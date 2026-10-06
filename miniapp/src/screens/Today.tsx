@@ -4,6 +4,7 @@ import { DropBadge, IntensityBadge } from '../components/Badges'
 import { ExerciseSheet } from '../components/ExerciseSheet'
 import { IconCheck, IconChevron, IconPlus } from '../components/icons'
 import { NumField } from '../components/NumField'
+import { Sheet } from '../components/Sheet'
 import {
   capitalize,
   dayFocus,
@@ -13,11 +14,12 @@ import {
   isDropset,
   nextTrainingDay,
   plural,
+  programExerciseNames,
   programPosition,
   WEEKDAY_LONG,
   WEEKDAY_SHORT,
 } from '../program'
-import { actions, currentRun, lastSetsFor, useStore, type Workout } from '../store'
+import { actions, currentRun, isStarted, lastSetsFor, useStore, type Workout } from '../store'
 import { formatKg } from '../stats'
 import { confirm, haptic } from '../telegram'
 
@@ -182,6 +184,8 @@ function ActiveWorkout({ workout }: { workout: Workout }) {
 
   const total = workout.exercises.reduce((n, e) => n + e.sets.length, 0)
   const done = workout.exercises.reduce((n, e) => n + e.sets.filter((s) => s.done).length, 0)
+  const started = isStarted(workout)
+  const [adding, setAdding] = useState(false)
   const elapsed = (now - new Date(workout.startedAt).getTime()) / 1000
   const restLeft = restEnd ? (restEnd - now) / 1000 : 0
 
@@ -202,7 +206,7 @@ function ActiveWorkout({ workout }: { workout: Workout }) {
   }
 
   const defaultReps = (ei: number) => {
-    const p = day?.exercises[ei]?.prescription
+    const p = day?.exercises.find((e) => e.name === workout.exercises[ei].name)?.prescription
     return p?.drop_reps?.[0] ?? p?.reps_max ?? null
   }
 
@@ -217,10 +221,26 @@ function ActiveWorkout({ workout }: { workout: Workout }) {
       )}
 
       <div className="hero">
-        <div className="eyebrow">
-          Неделя {workout.week} · {WEEKDAY_SHORT[workout.weekday]} · идёт тренировка
-        </div>
-        <h1 className="num">{mmss(elapsed)}</h1>
+        {started ? (
+          <>
+            <div className="eyebrow">
+              Неделя {workout.week} · {WEEKDAY_SHORT[workout.weekday]} · идёт тренировка
+            </div>
+            <h1 className="num">{mmss(elapsed)}</h1>
+          </>
+        ) : (
+          <>
+            <div className="eyebrow">Тренировка на сегодня · неделя {workout.week}</div>
+            <h1>
+              {day ? dayFocus(day) : WEEKDAY_LONG[workout.weekday]}
+              <span className="muted" style={{ fontWeight: 500 }}>
+                {' '}
+                · {WEEKDAY_SHORT[workout.weekday]}
+              </span>
+            </h1>
+            <div className="hint">Отметь первый подход, и пойдёт секундомер</div>
+          </>
+        )}
         <div className="week-progress" style={{ marginTop: 6 }}>
           <div className="progress">
             <div style={{ width: `${total ? (done / total) * 100 : 0}%` }} />
@@ -232,7 +252,7 @@ function ActiveWorkout({ workout }: { workout: Workout }) {
       </div>
 
       {workout.exercises.map((ex, ei) => {
-        const pe = day?.exercises[ei]
+        const pe = day?.exercises.find((e) => e.name === ex.name)
         const exDone = ex.sets.length > 0 && ex.sets.every((s) => s.done)
         const p = pe?.prescription
         const repsHint =
@@ -283,20 +303,41 @@ function ActiveWorkout({ workout }: { workout: Workout }) {
                   <IconPlus /> подход
                 </span>
               </button>
+              {!pe && (
+                <button className="add-set" style={{ color: 'var(--danger)' }} onClick={() => actions.removeExercise(ei)}>
+                  Убрать упражнение
+                </button>
+              )}
             </div>
           </div>
         )
       })}
 
       <div className="spacer" />
+      <button className="btn secondary" onClick={() => setAdding(true)}>
+        <IconPlus /> Добавить упражнение
+      </button>
       <button
         className="btn danger"
         onClick={async () => {
-          if (await confirm('Отменить тренировку? Отмеченные подходы не сохранятся.')) actions.cancelWorkout()
+          if (!started || (await confirm('Отменить тренировку? Отмеченные подходы не сохранятся.')))
+            actions.cancelWorkout()
         }}
       >
-        Отменить тренировку
+        {started ? 'Отменить тренировку' : 'Не сегодня'}
       </button>
+      {adding && (
+        <AddExerciseSheet
+          exclude={workout.exercises.map((e) => e.name)}
+          onPick={(name) => {
+            actions.addExercise(name)
+            setAdding(false)
+            haptic.tap()
+            setTimeout(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }), 50)
+          }}
+          onClose={() => setAdding(false)}
+        />
+      )}
 
       <div className="bottom-action">
         <button
@@ -318,5 +359,52 @@ function ActiveWorkout({ workout }: { workout: Workout }) {
 
       {sheet && <ExerciseSheet name={sheet} onClose={() => setSheet(null)} />}
     </>
+  )
+}
+
+function AddExerciseSheet({
+  exclude,
+  onPick,
+  onClose,
+}: {
+  exclude: string[]
+  onPick: (name: string) => void
+  onClose: () => void
+}) {
+  const { programId } = useStore()
+  const [q, setQ] = useState('')
+  const query = q.trim().toLowerCase()
+  const names = programExerciseNames(getProgram(programId)).filter((n) => !exclude.includes(n))
+  const filtered = names.filter((n) => n.includes(query))
+  const exact = names.includes(query) || exclude.includes(query)
+  return (
+    <Sheet onClose={onClose}>
+      <h1 style={{ fontSize: 22 }}>Добавить упражнение</h1>
+      <div className="spacer" />
+      <input
+        className="search"
+        autoFocus
+        placeholder="Найти или вписать своё"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+      />
+      <div className="spacer" />
+      <div className="list">
+        {query && !exact && (
+          <button className="row" onClick={() => onPick(query)}>
+            <div className="grow" style={{ color: 'var(--link)', fontWeight: 500 }}>
+              Добавить «{q.trim()}»
+            </div>
+          </button>
+        )}
+        {filtered.map((n) => (
+          <button className="row" key={n} onClick={() => onPick(n)}>
+            <div className="grow title">{capitalize(n)}</div>
+            <IconPlus />
+          </button>
+        ))}
+        {!filtered.length && !query && <div className="empty">Все упражнения программы уже в тренировке</div>}
+      </div>
+    </Sheet>
   )
 }

@@ -1,7 +1,7 @@
 // Local-only state until the stage 2 API exists: everything lives in localStorage.
 // Shapes mirror the future server models (Workout -> exercises -> sets) so the swap is mechanical.
 import { useSyncExternalStore } from 'react'
-import { getDay, getProgram, isDropset, type ProgramExercise } from './program'
+import { getDay, getProgram, isDropset, programPosition, type ProgramExercise } from './program'
 import { buildDemoHistory, demoStartDate } from './mock'
 
 export interface SetEntry {
@@ -33,6 +33,7 @@ export interface State {
   restSeconds: number
   restEnd: number | null // epoch ms when the current rest ends
   active: Workout | null
+  skipAutoStart: string | null // local date the user cancelled today's prepared workout
   history: Workout[]
 }
 
@@ -46,6 +47,7 @@ function initialState(): State {
     startDate,
     restSeconds: 90,
     restEnd: null,
+    skipAutoStart: null,
     active: null,
     history: buildDemoHistory(program, startDate),
   }
@@ -122,7 +124,35 @@ export function currentRun(s: State = state): Workout[] {
   return s.history.filter((w) => w.programId === s.programId && new Date(w.startedAt).getTime() >= since)
 }
 
+function localDate(d = new Date()): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/** True once at least one set of the workout is ticked, i.e. the user really started training. */
+export function isStarted(w: Workout): boolean {
+  return w.exercises.some((e) => e.sets.some((s) => s.done))
+}
+
 export const actions = {
+  /**
+   * Opening the app prepares the next workout of the current program week that is not logged yet
+   * (today's day if it is a training day, otherwise the next one, so a shifted schedule still works).
+   * Skipped when something is already logged today or the user dismissed it.
+   */
+  prepareToday() {
+    if (state.active) return
+    const today = localDate()
+    if (state.skipAutoStart === today) return
+    const program = getProgram(state.programId)
+    const pos = programPosition(program, state.startDate)
+    if (pos.finished || pos.notStarted) return
+    const run = currentRun()
+    if (run.some((w) => localDate(new Date(w.startedAt)) === today)) return
+    const days = program.weeks.find((w) => w.number === pos.week)?.days ?? []
+    const next = days.find((d) => !run.some((w) => w.week === pos.week && w.weekday === d.weekday))
+    if (next) actions.startWorkout(pos.week, next.weekday)
+  },
+
   startWorkout(week: number, weekday: number) {
     const program = getProgram(state.programId)
     const day = getDay(program, week, weekday)
@@ -147,7 +177,29 @@ export const actions = {
     const exercises = a.exercises.map((ex, i) =>
       i !== exIdx ? ex : { ...ex, sets: ex.sets.map((s, j) => (j === setIdx ? { ...s, ...patch } : s)) },
     )
-    commit({ ...state, active: { ...a, exercises } })
+    // The clock starts with the first ticked set, not when the template was prepared.
+    const startedAt = patch.done && !isStarted(a) ? new Date().toISOString() : a.startedAt
+    commit({ ...state, active: { ...a, startedAt, exercises } })
+  },
+
+  addExercise(name: string) {
+    const a = state.active
+    if (!a) return
+    const last = lastSetsFor(name)
+    const weight = last ? Math.max(...last.map((s) => s.weight ?? 0)) : null
+    const log: ExerciseLog = {
+      name,
+      target: '',
+      dropset: false,
+      sets: Array.from({ length: 3 }, () => ({ weight, reps: null, done: false })),
+    }
+    commit({ ...state, active: { ...a, exercises: [...a.exercises, log] } })
+  },
+
+  removeExercise(exIdx: number) {
+    const a = state.active
+    if (!a) return
+    commit({ ...state, active: { ...a, exercises: a.exercises.filter((_, i) => i !== exIdx) } })
   },
 
   addSet(exIdx: number) {
@@ -174,7 +226,7 @@ export const actions = {
   },
 
   cancelWorkout() {
-    commit({ ...state, active: null })
+    commit({ ...state, active: null, skipAutoStart: localDate() })
   },
 
   deleteWorkout(id: string) {
