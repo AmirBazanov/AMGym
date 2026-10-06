@@ -11,3 +11,4 @@ node_modules/
 miniapp/dist/
 *Zone.Identifier
 .claude/settings.local.json
+*.tsbuildinfo
