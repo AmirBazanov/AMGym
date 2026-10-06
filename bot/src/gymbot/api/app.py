@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -14,11 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gymbot.api.auth import InitDataError, TelegramUser, validate_init_data
 from gymbot.config import Settings
-from gymbot.db.models import FoodEntry, Reminder, User, UserProgram
+from gymbot.db.models import FoodEntry, Reminder, User, UserProgram, WellbeingEntry
 from gymbot.db.session import Sessionmaker
 from gymbot.services import nutrition as nut
 from gymbot.services import profile as prof
 from gymbot.services import reminders as rem
+from gymbot.services import wellbeing as wb
 from gymbot.services import workouts as ws
 from gymbot.services.access import is_allowed
 from gymbot.services.programs import load_program
@@ -55,7 +56,7 @@ class SettingsIn(BaseModel):
 
 # [0-9], not \d: pydantic's regex engine treats \d as any Unicode digit.
 TIME_PATTERN = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"
-ReminderKind = Literal["text", "nutrition", "advice"]
+ReminderKind = Literal["text", "nutrition", "advice", "checkin"]  # = rem.KINDS
 Weekday = Annotated[int, Field(ge=0, le=6)]  # 0=Mon..6=Sun in TIMEZONE
 
 
@@ -98,7 +99,7 @@ def reminder_out(r: Reminder) -> ReminderOut:
 
 
 def normalize_reminder_text(kind: str, text: str | None) -> str | None:
-    """kind=text needs 1..200 characters of text; nutrition and advice build their text at send time."""
+    """kind=text needs 1..200 characters of text; the other kinds build their text at send time."""
     if kind != "text":
         return None
     text = (text or "").strip()
@@ -229,6 +230,23 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
     async def delete_food(food_id: int, session: Session, tg: TgUser) -> None:
         user = await get_or_create_user(session, tg.id, tg.name)
         entry = await session.get(FoodEntry, food_id)
+        if entry is None or entry.user_id != user.id:
+            raise HTTPException(404, "not found")
+        await session.delete(entry)
+        await session.commit()
+
+    @app.get("/api/wellbeing")
+    async def list_wellbeing(
+        session: Session, tg: TgUser, days: Annotated[int, Query(ge=1, le=366)] = 14
+    ) -> list[wb.WellbeingOut]:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        entries = await wb.recent_entries(session, user, datetime.now(tz).date(), days, tz)
+        return [wb.entry_out(e, tz) for e in entries]
+
+    @app.delete("/api/wellbeing/{entry_id}", status_code=204)
+    async def delete_wellbeing(entry_id: int, session: Session, tg: TgUser) -> None:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        entry = await session.get(WellbeingEntry, entry_id)
         if entry is None or entry.user_id != user.id:
             raise HTTPException(404, "not found")
         await session.delete(entry)

@@ -168,6 +168,28 @@ class FoodEntry(Base):
     raw_text: Mapped[str | None] = mapped_column(Text)  # original message
 
 
+# --- Wellbeing: sleep, pains, energy, mood from chat messages (used by AI advice) ---
+
+class WellbeingEntry(Base):
+    """One "how do I feel" message. Scales are 1..5; every value optional, but at least one is set.
+
+    `pains` is a JSON list as text, [{"place": "левое плечо", "severity": 3 | null}], so the column
+    stays the same on SQLite and Postgres; see gymbot.services.wellbeing for (de)serialization.
+    """
+
+    __tablename__ = "wellbeing_entries"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    noted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    sleep_hours: Mapped[Decimal | None] = mapped_column(Numeric(3, 1))
+    sleep_quality: Mapped[int | None] = mapped_column(Integer)
+    energy: Mapped[int | None] = mapped_column(Integer)
+    mood: Mapped[int | None] = mapped_column(Integer)
+    pains: Mapped[str | None] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Text)
+    raw_text: Mapped[str] = mapped_column(Text)  # original message(s), "[voice] ..." for voice
+
+
 # --- Reminders (daily, local time in TIMEZONE) ---
 
 class Reminder(Base):
@@ -181,7 +203,7 @@ class Reminder(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     minute_of_day: Mapped[int] = mapped_column(Integer)  # 0..1439 in TIMEZONE
-    kind: Mapped[str] = mapped_column(String(16))  # text | nutrition | advice
+    kind: Mapped[str] = mapped_column(String(16))  # text | nutrition | advice | checkin
     text: Mapped[str | None] = mapped_column(Text)  # for kind=text only
     weekday: Mapped[int | None] = mapped_column(Integer)  # 0=Mon..6=Sun in TIMEZONE; None = every day
     enabled: Mapped[bool] = mapped_column(default=True)

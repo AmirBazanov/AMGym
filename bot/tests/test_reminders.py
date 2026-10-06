@@ -760,3 +760,35 @@ async def test_claim_rechecks_weekday(db, monkeypatch):
     bot = FakeBot()
     assert await _tick(db, bot, at(9, 30)) == 0
     assert bot.calls == [] and await _last_sent(db, rid) is None
+
+
+# ---- kind=checkin ----
+
+
+def test_checkin_kind_and_text_constants():
+    assert "checkin" in rem_module.KINDS
+    assert rem_module.CHECKIN_TEXT == "Как спалось и как самочувствие? Напиши одним сообщением: сон, боли, энергия."
+
+
+async def test_checkin_sent_once_with_fixed_text_and_no_button(db):
+    from gymbot.services.reminders import CHECKIN_TEXT
+
+    # A stray text and a configured miniapp_url must not change the message or add a button.
+    uid = await _user(db)
+    rid = await _rem(db, uid, kind="checkin", text="игнор", last_sent_on=YESTERDAY)
+    bot = FakeBot()
+    assert await _tick(db, bot, at(9, 30), miniapp_url=URL) == 1
+    assert bot.calls == [(42, CHECKIN_TEXT, None)]
+    assert await _last_sent(db, rid) == DAY
+    assert await _tick(db, bot, at(9, 30), miniapp_url=URL) == 0
+    assert await _tick(db, bot, at(9, 31), miniapp_url=URL) == 0
+    assert len(bot.calls) == 1
+
+
+async def test_checkin_without_text_and_without_miniapp_url(db):
+    from gymbot.services.reminders import CHECKIN_TEXT
+
+    await _rem(db, await _user(db), kind="checkin", text=None, last_sent_on=YESTERDAY)
+    bot = FakeBot()
+    assert await _tick(db, bot, at(9, 30), miniapp_url="") == 1
+    assert bot.calls == [(42, CHECKIN_TEXT, None)]

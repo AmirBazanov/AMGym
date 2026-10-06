@@ -50,11 +50,13 @@ log = logging.getLogger(__name__)
 GRACE = timedelta(minutes=30)
 CHECK_SECONDS = 30
 MAX_PER_USER = 20
-KINDS = ("text", "nutrition", "advice")
+KINDS = ("text", "nutrition", "advice", "checkin")
 ADVICE_RETRY = timedelta(minutes=10)
 # reminder id -> earliest next advice attempt (UTC) after an LLM failure. Lost on restart, which is fine.
 _advice_retry_at: dict[int, datetime] = {}
 
+# kind=checkin: the answer goes to the free-text parser as a wellbeing record (handlers/log_text.py).
+CHECKIN_TEXT = "Как спалось и как самочувствие? Напиши одним сообщением: сон, боли, энергия."
 NO_TARGETS = "Норма КБЖУ не задана, задай её в дневнике → Питание → Настройки"
 CLOSED = "КБЖУ на сегодня закрыт"
 OPEN_NUTRITION = "Открыть питание"
@@ -167,6 +169,8 @@ async def _build(
         return _Message(
             nutrition_text(s.remaining.kcal, s.remaining.protein), nutrition_keyboard(settings.miniapp_url)
         )
+    if item.kind == "checkin":
+        return _Message(CHECKIN_TEXT)
     return _Message(item.text or "Напоминание")
 
 

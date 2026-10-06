@@ -1,4 +1,6 @@
-from datetime import UTC, date, datetime
+import json
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -511,3 +513,251 @@ async def test_reminder_patch_weekday_rearms_last_sent_on(client, auth, db, sett
     after = datetime.now(tz).date()
     async with db() as s:
         assert await s.scalar(select(Reminder.last_sent_on).where(Reminder.id == rid)) in (before, after)
+
+
+# ---- reminders: kind=checkin ----
+
+
+async def test_reminder_checkin_ignores_text(client, auth):
+    r = await client.post("/api/reminders", json={"time": "08:00", "kind": "checkin", "text": "игнор"}, headers=auth)
+    assert r.status_code == 201, r.text
+    out = r.json()
+    assert out["kind"] == "checkin" and out["text"] is None and out["time"] == "08:00"
+    assert (await client.get("/api/reminders", headers=auth)).json() == [out]
+
+
+async def test_reminder_checkin_without_text_ok(client, auth):
+    out = await _mk(client, auth, kind="checkin", text=None)
+    assert out["kind"] == "checkin" and out["text"] is None
+
+
+async def test_reminder_patch_text_to_checkin_drops_text(client, auth):
+    rid = (await _mk(client, auth))["id"]
+    r = await client.patch(f"/api/reminders/{rid}", json={"kind": "checkin"}, headers=auth)
+    assert r.status_code == 200 and r.json()["kind"] == "checkin" and r.json()["text"] is None
+    assert (await client.get("/api/reminders", headers=auth)).json() == [r.json()]
+
+
+# ---- wellbeing: GET /api/wellbeing, DELETE /api/wellbeing/{id} ----
+
+WB_KEYS = {"id", "notedAt", "date", "sleepHours", "sleepQuality", "energy", "mood", "pains", "note"}
+
+
+async def _wb_user(client, auth, db, telegram_id: int = 42) -> int:
+    """Make sure the user exists (the first authorised request creates it) and return its id."""
+    assert (await client.get("/api/state", headers=auth)).status_code == 200
+    from gymbot.db.models import User
+
+    async with db() as s:
+        return await s.scalar(select(User.id).where(User.telegram_id == telegram_id))
+
+
+async def _wb(db, user_id: int, noted_at: datetime, raw_text: str = "сон 7ч", **fields) -> int:
+    from gymbot.db.models import WellbeingEntry
+
+    async with db() as s:
+        e = WellbeingEntry(user_id=user_id, noted_at=noted_at, raw_text=raw_text, **fields)
+        s.add(e)
+        await s.commit()
+        return e.id
+
+
+async def _wb_exists(db, entry_id: int) -> bool:
+    from gymbot.db.models import WellbeingEntry
+
+    async with db() as s:
+        return await s.scalar(select(WellbeingEntry.id).where(WellbeingEntry.id == entry_id)) is not None
+
+
+def _local_noon_utc(tz: ZoneInfo, days_ago: int) -> datetime:
+    day = datetime.now(tz).date() - timedelta(days=days_ago)
+    return datetime(day.year, day.month, day.day, 12, tzinfo=tz).astimezone(UTC)
+
+
+async def test_wellbeing_requires_auth(client):
+    assert (await client.get("/api/wellbeing")).status_code == 401
+    assert (await client.delete("/api/wellbeing/1")).status_code == 401
+    bad = {"X-Telegram-Init-Data": init_data(token="999:other")}
+    assert (await client.get("/api/wellbeing", headers=bad)).status_code == 401
+
+
+async def test_wellbeing_empty_for_new_user(client, auth):
+    r = await client.get("/api/wellbeing", headers=auth)
+    assert r.status_code == 200 and r.json() == []
+
+
+async def test_wellbeing_entry_shape(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    noted = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=1)
+    eid = await _wb(
+        db, uid, noted, raw_text="спал 7.5, плечо болит, бодрый",
+        sleep_hours=Decimal("7.5"), sleep_quality=4, energy=5, mood=3,
+        pains=json.dumps([{"place": "плечо", "severity": 3}], ensure_ascii=False), note="бодрый",
+    )
+    data = (await client.get("/api/wellbeing", headers=auth)).json()
+    assert len(data) == 1
+    e = data[0]
+    assert set(e) == WB_KEYS
+    assert e["id"] == eid
+    assert e["sleepHours"] == 7.5 and isinstance(e["sleepHours"], float)
+    assert (e["sleepQuality"], e["energy"], e["mood"]) == (4, 5, 3)
+    assert e["pains"] == [{"place": "плечо", "severity": 3}]
+    assert e["note"] == "бодрый"
+    parsed = datetime.fromisoformat(e["notedAt"])
+    assert parsed.utcoffset() == timedelta(0)
+    assert parsed == noted
+    assert e["date"] == noted.astimezone(ZoneInfo("Europe/Moscow")).date().isoformat()
+
+
+async def test_wellbeing_nullable_fields(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    await _wb(db, uid, datetime.now(UTC) - timedelta(minutes=5))
+    e = (await client.get("/api/wellbeing", headers=auth)).json()[0]
+    assert set(e) == WB_KEYS
+    assert e["sleepHours"] is None and e["sleepQuality"] is None
+    assert e["energy"] is None and e["mood"] is None and e["note"] is None
+    assert e["pains"] == []
+
+
+async def test_wellbeing_sorted_newest_first_ties_by_id_desc(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    now = datetime.now(UTC).replace(microsecond=0)
+    old = await _wb(db, uid, now - timedelta(days=2))
+    tie_a = await _wb(db, uid, now - timedelta(days=1))
+    tie_b = await _wb(db, uid, now - timedelta(days=1))
+    newest = await _wb(db, uid, now - timedelta(hours=1))
+    # Inserted last, but older than the tied pair: the order follows notedAt, not id.
+    mid = await _wb(db, uid, now - timedelta(hours=30))
+    data = (await client.get("/api/wellbeing", headers=auth)).json()
+    assert [e["id"] for e in data] == [newest, tie_b, tie_a, mid, old]
+
+
+async def test_wellbeing_only_current_users_entries(tmp_path, make_client, db):
+    one = {"X-Telegram-Init-Data": init_data(42)}
+    two = {"X-Telegram-Init-Data": init_data(77)}
+    async with make_client(make_settings(tmp_path, allowed_user_ids=[42, 77])) as c:
+        u1 = await _wb_user(c, one, db, 42)
+        u2 = await _wb_user(c, two, db, 77)
+        now = datetime.now(UTC)
+        mine = await _wb(db, u1, now - timedelta(hours=1), raw_text="моё")
+        theirs = await _wb(db, u2, now - timedelta(hours=2), raw_text="чужое")
+        assert [e["id"] for e in (await c.get("/api/wellbeing", headers=one)).json()] == [mine]
+        assert [e["id"] for e in (await c.get("/api/wellbeing", headers=two)).json()] == [theirs]
+
+
+async def test_wellbeing_window_excludes_old_entries(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    now = datetime.now(UTC)
+    recent = await _wb(db, uid, now - timedelta(hours=1))
+    old = await _wb(db, uid, now - timedelta(days=20))
+    default = (await client.get("/api/wellbeing", headers=auth)).json()  # days defaults to 14
+    assert [e["id"] for e in default] == [recent]
+    short = (await client.get("/api/wellbeing?days=14", headers=auth)).json()
+    assert [e["id"] for e in short] == [recent]
+    longer = (await client.get("/api/wellbeing?days=30", headers=auth)).json()
+    assert [e["id"] for e in longer] == [recent, old]
+
+
+async def test_wellbeing_window_counts_local_days_including_today(client, auth, db, settings):
+    tz = ZoneInfo(settings.timezone)
+    uid = await _wb_user(client, auth, db)
+    last_in = await _wb(db, uid, _local_noon_utc(tz, 13))  # 14th local day counting today
+    first_out = await _wb(db, uid, _local_noon_utc(tz, 14))
+    ids = [e["id"] for e in (await client.get("/api/wellbeing?days=14", headers=auth)).json()]
+    assert ids == [last_in]
+    ids = [e["id"] for e in (await client.get("/api/wellbeing?days=15", headers=auth)).json()]
+    assert ids == [last_in, first_out]
+
+
+async def test_wellbeing_days_1_is_only_today(client, auth, db, settings):
+    tz = ZoneInfo(settings.timezone)
+    uid = await _wb_user(client, auth, db)
+    await _wb(db, uid, _local_noon_utc(tz, 1))
+    now = datetime.now(UTC).replace(microsecond=0)
+    today = await _wb(db, uid, now)
+    data = (await client.get("/api/wellbeing?days=1", headers=auth)).json()
+    assert [e["id"] for e in data] == [today]
+    assert data[0]["date"] == now.astimezone(tz).date().isoformat()
+
+
+@pytest.mark.parametrize(
+    "tz_name,utc_hm,day_shift",
+    [
+        ("Europe/Moscow", (21, 30), 1),  # 21:30 UTC is already 00:30 of the next day in Moscow
+        ("America/Los_Angeles", (3, 0), -1),  # 03:00 UTC is still the previous evening in Los Angeles
+        ("UTC", (21, 30), 0),
+    ],
+)
+async def test_wellbeing_date_is_local_day_of_noted_at(tmp_path, make_client, db, tz_name, utc_hm, day_shift):
+    utc_day = datetime.now(UTC).date() - timedelta(days=4)  # well inside the default window in any zone
+    noted = datetime(utc_day.year, utc_day.month, utc_day.day, *utc_hm, tzinfo=UTC)
+    auth = {"X-Telegram-Init-Data": init_data()}
+    async with make_client(make_settings(tmp_path, timezone=tz_name)) as c:
+        uid = await _wb_user(c, auth, db)
+        await _wb(db, uid, noted)
+        e = (await c.get("/api/wellbeing", headers=auth)).json()[0]
+    assert e["date"] == (utc_day + timedelta(days=day_shift)).isoformat()
+    parsed = datetime.fromisoformat(e["notedAt"])
+    assert parsed.utcoffset() == timedelta(0) and parsed == noted  # notedAt stays UTC
+
+
+async def test_wellbeing_pains_parsed(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    pains = [{"place": "плечо", "severity": 3}, {"place": "колено", "severity": None}]
+    await _wb(db, uid, datetime.now(UTC) - timedelta(hours=1), pains=json.dumps(pains, ensure_ascii=False))
+    e = (await client.get("/api/wellbeing", headers=auth)).json()[0]
+    assert e["pains"] == pains
+
+
+@pytest.mark.parametrize("bad", [None, "", "not json{", '[{"place": "плечо"'])
+async def test_wellbeing_missing_or_malformed_pains_is_empty_list(client, auth, db, bad):
+    uid = await _wb_user(client, auth, db)
+    await _wb(db, uid, datetime.now(UTC) - timedelta(hours=1), pains=bad)
+    r = await client.get("/api/wellbeing", headers=auth)
+    assert r.status_code == 200
+    assert r.json()[0]["pains"] == []
+
+
+@pytest.mark.parametrize("days", [0, -1, 367, 400])
+async def test_wellbeing_days_out_of_range_422(client, auth, days):
+    assert (await client.get(f"/api/wellbeing?days={days}", headers=auth)).status_code == 422
+
+
+@pytest.mark.parametrize("days", [1, 366])
+async def test_wellbeing_days_boundaries_ok(client, auth, days):
+    assert (await client.get(f"/api/wellbeing?days={days}", headers=auth)).status_code == 200
+
+
+async def test_wellbeing_days_not_a_number_422(client, auth):
+    assert (await client.get("/api/wellbeing?days=abc", headers=auth)).status_code == 422
+
+
+async def test_wellbeing_delete_own(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    now = datetime.now(UTC)
+    keep = await _wb(db, uid, now - timedelta(hours=1))
+    gone = await _wb(db, uid, now - timedelta(hours=2))
+    assert (await client.delete(f"/api/wellbeing/{gone}", headers=auth)).status_code == 204
+    assert [e["id"] for e in (await client.get("/api/wellbeing", headers=auth)).json()] == [keep]
+    assert not await _wb_exists(db, gone) and await _wb_exists(db, keep)
+    assert (await client.delete(f"/api/wellbeing/{gone}", headers=auth)).status_code == 404
+
+
+async def test_wellbeing_delete_other_users_entry_404(tmp_path, make_client, db):
+    one = {"X-Telegram-Init-Data": init_data(42)}
+    two = {"X-Telegram-Init-Data": init_data(77)}
+    async with make_client(make_settings(tmp_path, allowed_user_ids=[42, 77])) as c:
+        u1 = await _wb_user(c, one, db, 42)
+        await _wb_user(c, two, db, 77)
+        eid = await _wb(db, u1, datetime.now(UTC) - timedelta(hours=1))
+        assert (await c.delete(f"/api/wellbeing/{eid}", headers=two)).status_code == 404
+        assert await _wb_exists(db, eid)
+        assert [e["id"] for e in (await c.get("/api/wellbeing", headers=one)).json()] == [eid]
+        assert (await c.delete(f"/api/wellbeing/{eid}", headers=one)).status_code == 204
+
+
+async def test_wellbeing_delete_unknown_id_404(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    eid = await _wb(db, uid, datetime.now(UTC) - timedelta(hours=1))
+    assert (await client.delete("/api/wellbeing/9999", headers=auth)).status_code == 404
+    assert await _wb_exists(db, eid)

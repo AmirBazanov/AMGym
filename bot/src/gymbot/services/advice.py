@@ -4,8 +4,9 @@ The summary never contains secrets or identifiers (telegram_id, name): only the 
 aggregated food and training numbers and the current program.
 
 Nutrition is averaged over the 7 completed local days before today (today is not over yet and would
-inflate the shortfall); today's intake so far is a separate line. Training covers the last 14 local days
-including today. build_context only reads: it never creates users or programs.
+inflate the shortfall); today's intake so far is a separate line. Training and wellbeing (sleep, energy,
+pains, the last note; gymbot.services.wellbeing) cover the last 14 local days including today.
+build_context only reads: it never creates users or programs.
 """
 
 from __future__ import annotations
@@ -25,8 +26,9 @@ from gymbot.llm.prompts import ADVICE_DISCLAIMER, build_advice_messages
 from gymbot.services.nutrition import day_summary, user_targets, week_summary
 from gymbot.services.profile import GOAL_NAMES
 from gymbot.services.programs import find_day, format_item, load_program, program_position
+from gymbot.services.wellbeing import context_lines as wellbeing_lines
 
-CONTEXT_MAX = 1500
+CONTEXT_MAX = 1800  # room for the wellbeing block (~450) next to 8 exercises and the program
 FOOD_DAYS = 7
 WORKOUT_DAYS = 14
 MAX_EXERCISES = 8
@@ -243,7 +245,7 @@ async def build_context(
     head = [*_profile_lines(user, today), _targets_line(user), *await _food_lines(session, user, today, tz)]
     training, exercises = await _training(session, user, today)
     program = await _program_line(session, user, today)
-    tail = [program] if program else []
+    tail = [*await wellbeing_lines(session, user, today, tz), *([program] if program else [])]
     # Drop exercise lines (least recent first) until the summary fits.
     for n in range(min(len(exercises), MAX_EXERCISES), -1, -1):
         shown = exercises[:n]

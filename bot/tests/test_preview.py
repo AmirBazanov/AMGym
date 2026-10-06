@@ -94,3 +94,32 @@ def test_record_with_question_asks_after_list_and_note():
 def test_record_question_that_echoes_user_is_hidden():
     r = ParseResult(kind="food", foods=[FOOD], clarification="косушка")
     assert "Уточни" not in render_preview(r, source_text="Косушка")
+
+
+def test_wellbeing_preview():
+    r = ParseResult.model_validate(
+        {
+            "kind": "wellbeing",
+            "wellbeing": {
+                "sleep_hours": 6, "sleep_quality": 2, "energy": 2, "mood": 4,
+                "pains": [{"place": "левое плечо", "severity": 3}, {"place": "колено", "severity": None}],
+                "note": "после работы",
+            },
+        }
+    )
+    out = render_preview(r, source_text="спал 6 часов")
+    assert out.startswith("Записать самочувствие?\n")
+    for line in ("Сон 6 ч (качество 2/5)", "Энергия 2/5", "Настроение 4/5", "Боли: левое плечо (3/5), колено",
+                 "Заметка: после работы"):
+        assert line in out
+
+
+def test_wellbeing_preview_only_sleep():
+    r = ParseResult.model_validate({"kind": "wellbeing", "wellbeing": {"sleep_hours": 7.5}})
+    out = render_preview(r)
+    assert "Сон 7.5 ч" in out and "качество" not in out and "Энергия" not in out and "Боли" not in out
+
+
+def test_empty_wellbeing_falls_back():
+    assert "Не понял" in render_preview(ParseResult(kind="wellbeing"))
+    assert "Не понял" in render_preview(ParseResult.model_validate({"kind": "wellbeing", "wellbeing": {}}))

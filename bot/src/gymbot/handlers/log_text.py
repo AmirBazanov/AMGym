@@ -7,7 +7,8 @@ Dialog context. Each user's last parsed exchange (texts, result, time) is kept i
 CONTEXT_TTL and sent to the model as history with the next message, so "три штуки" after
 "три куриные самсы" corrects that record instead of being parsed on its own. Rules:
 - The next record either revises the previous one or is new (see is_revision: the model's
-  `revises` flag, or for food a common name, because free models set the flag unreliably).
+  `revises` flag, or for food a common name, because free models set the flag unreliably;
+  wellbeing after wellbeing is always a revision: one "how do I feel" record per dialog).
 - A revision replaces the previous preview: the old "Сохранить" button stops working, otherwise
   the user could save both the wrong and the corrected record. Its raw_text is the chain of texts
   ("три куриные самсы\nтри штуки").
@@ -47,9 +48,10 @@ from gymbot.config import Settings
 from gymbot.db.models import FoodEntry
 from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
-from gymbot.llm.schemas import ParseResult
+from gymbot.llm.schemas import ParsedWellbeing, ParseResult
 from gymbot.services.programs import exercise_catalog
 from gymbot.services.users import get_or_create_user
+from gymbot.services.wellbeing import wellbeing_entry
 from gymbot.services.workouts import save_from_chat
 
 router = Router(name="log_text")
@@ -131,6 +133,20 @@ def _tail(result: ParseResult, source_text: str) -> str:
     return "".join(f"\n\n{p}" for p in parts)
 
 
+def _wellbeing_lines(w: ParsedWellbeing) -> list[str]:
+    lines = []
+    if w.sleep_hours is not None:
+        lines.append(f"Сон {w.sleep_hours:g} ч" + (f" (качество {w.sleep_quality}/5)" if w.sleep_quality else ""))
+    elif w.sleep_quality:
+        lines.append(f"Качество сна {w.sleep_quality}/5")
+    lines += [f"{label} {v}/5" for label, v in (("Энергия", w.energy), ("Настроение", w.mood)) if v]
+    if w.pains:
+        lines.append("Боли: " + ", ".join(p.place + (f" ({p.severity}/5)" if p.severity else "") for p in w.pains))
+    if w.note:
+        lines.append(f"Заметка: {w.note}")
+    return [f"• {line}" for line in lines]
+
+
 def render_preview(result: ParseResult, source_text: str = "") -> str:
     """Preview of a parsed message. `source_text` is the user's text: it is never echoed back.
 
@@ -155,6 +171,9 @@ def render_preview(result: ParseResult, source_text: str = "") -> str:
         ]
         total = sum(f.kcal for f in result.foods)
         return f"Записать еду? Всего {total:.0f} ккал\n" + "\n".join(lines) + _tail(result, source_text)
+    if result.is_record() and result.wellbeing is not None:
+        lines = _wellbeing_lines(result.wellbeing)
+        return "Записать самочувствие?\n" + "\n".join(lines) + _tail(result, source_text)
     answer = (result.clarification or "").strip()
     if not answer or _norm(answer) == _norm(source_text):
         return HINT
@@ -179,7 +198,12 @@ def is_revision(prev: ParseResult, new: ParseResult) -> bool:
 
     The model's `revises` flag decides. For food a common name ("самса, 1 шт" -> "самса, 3 шт")
     counts too. Not for workouts: the same exercise sent twice is usually the next set, not a fix.
+    Wellbeing after wellbeing always revises: the model returns the full merged state (sleep, pains...),
+    so the new preview replaces the old one. Wellbeing never revises another kind and vice versa, whatever
+    the flag: live runs showed `revises=true` on a fresh wellbeing message, which would drop a food preview.
     """
+    if "wellbeing" in (prev.kind, new.kind):
+        return prev.kind == new.kind
     if new.revises:
         return True
     return prev.kind == new.kind == "food" and bool(_names(prev) & _names(new))
@@ -262,8 +286,7 @@ async def process_text(
     # been saved, cancelled or replaced by another message. Then this is not its continuation.
     if prev is not None and (CONTEXT.get(user_id) is not prev or (prev.token and prev.token not in PENDING)):
         prev = None
-    savable = (result.kind == "workout" and result.exercises) or (result.kind == "food" and result.foods)
-    if not savable:  # the model asks a clarifying question
+    if not result.is_record():  # the model asks a clarifying question
         if prev is None:
             exchange = Exchange([text], [raw], result, message.date)
         elif prev.token:  # keep the record the question is about
@@ -320,7 +343,7 @@ async def save(cb: CallbackQuery, settings: Settings, sessionmaker: Sessionmaker
     _forget(cb.from_user.id, token)
     if cb.message:
         saved = pending.result.model_copy(update={"clarification": None})  # the question is moot now
-        shown = re.sub(r"^Записать( еду)?\?\s*", "", render_preview(saved))
+        shown = re.sub(r"^Записать( еду| самочувствие)?\?\s*", "", render_preview(saved))
         await cb.message.edit_text(f"{shown}\n\n{note}".strip())  # type: ignore[union-attr]
     await cb.answer()
 
@@ -331,6 +354,10 @@ async def _save(pending: Pending, cb: CallbackQuery, today: date, sessionmaker: 
         if pending.result.kind == "workout":
             await save_from_chat(session, user, pending.result, pending.raw_text, today)
             note = "Сохранено ✅ Видно в дневнике, /undo — отменить."
+        elif pending.result.kind == "wellbeing":
+            assert pending.result.wellbeing is not None  # is_record() was checked before the preview
+            session.add(wellbeing_entry(user.id, pending.result.wellbeing, pending.raw_text, pending.sent_at))
+            note = "Самочувствие сохранено ✅"
         else:
             for f in pending.result.foods:
                 session.add(

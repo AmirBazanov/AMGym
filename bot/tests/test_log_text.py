@@ -10,7 +10,7 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from gymbot.db.models import FoodEntry
+from gymbot.db.models import FoodEntry, WellbeingEntry
 from gymbot.handlers import log_text
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.llm.prompts import EXAMPLES
@@ -281,6 +281,14 @@ def half_flatbread() -> dict:
     return {**food(1), "foods": [{**food(1)["foods"][0], "description": "Лепёшка, 0.5 шт"}]}
 
 
+def wellbeing(*pains: str, sleep: float | None = 6, energy: int | None = 2, revises: bool = False) -> dict:
+    return {
+        "kind": "wellbeing",
+        "revises": revises,
+        "wellbeing": {"sleep_hours": sleep, "energy": energy, "pains": [{"place": p, "severity": 3} for p in pains]},
+    }
+
+
 def workout(*names: str, revises: bool = False) -> dict:
     return {
         "kind": "workout",
@@ -302,6 +310,11 @@ def workout(*names: str, revises: bool = False) -> dict:
         (food(1), workout("присед", revises=True), True),  # the flag wins
         (food(1, "лепёшка"), {**food(1), "foods": [*food(1, "плов")["foods"], *food(2, "лепёшка")["foods"]]}, True),
         (half_flatbread(), food(1, "лепёшка"), True),  # fractional pieces are cut too
+        (wellbeing("плечо"), wellbeing("колено"), True),  # one wellbeing record per dialog
+        (wellbeing("плечо"), food(1), False),
+        (food(1), wellbeing("плечо"), False),
+        (food(1), wellbeing("плечо", revises=True), False),  # a wellbeing record cannot fix food
+        (wellbeing("плечо"), food(1, revises=True), False),
     ],
 )
 def test_is_revision(prev, new, expected):
@@ -427,3 +440,71 @@ async def test_saved_message_drops_the_question(llm, settings, db):
     cb = callback(f"save:{token_of(msg)}")
     await log_text.save(cb, settings, db)
     assert "Уточни" not in cb.message.edit_text.await_args.args[0]
+
+
+async def test_wellbeing_saved_with_message_time_and_raw_text(llm, settings, db):
+    llm.answers = [{**wellbeing("левое плечо"), "wellbeing": {
+        "sleep_hours": 6.5, "sleep_quality": 2, "energy": 2, "mood": None,
+        "pains": [{"place": "левое плечо", "severity": 3}], "note": "после ночной смены"}}]
+    sent_at = T0.replace(hour=20, minute=58)
+    msg = await send("спал 6.5 часов, болит левое плечо, сил мало", llm, settings, db, sent_at)
+    assert msg.answer.await_args.args[0].startswith("Записать самочувствие?")
+    cb = callback(f"save:{token_of(msg)}")
+    await log_text.save(cb, settings, db)
+    shown = cb.message.edit_text.await_args.args[0]
+    assert not shown.startswith("Записать") and "Сон 6.5 ч (качество 2/5)" in shown
+    assert shown.endswith("Самочувствие сохранено ✅")
+    async with db() as s:
+        row = (await s.scalars(select(WellbeingEntry))).one()
+        assert await s.scalar(select(FoodEntry.id)) is None
+    assert row.noted_at.replace(tzinfo=None) == sent_at.replace(tzinfo=None)
+    assert float(row.sleep_hours) == 6.5 and row.sleep_quality == 2 and row.energy == 2 and row.mood is None
+    assert json.loads(row.pains) == [{"place": "левое плечо", "severity": 3}]
+    assert row.note == "после ночной смены"
+    assert row.raw_text == "спал 6.5 часов, болит левое плечо, сил мало"
+    assert USER not in log_text.CONTEXT
+
+
+async def test_wellbeing_without_pains_stores_null(llm, settings, db):
+    llm.answers = [wellbeing(sleep=8, energy=5)]
+    msg = await send("спал отлично 8 часов", llm, settings, db)
+    await log_text.save(callback(f"save:{token_of(msg)}"), settings, db)
+    async with db() as s:
+        row = (await s.scalars(select(WellbeingEntry))).one()
+    assert row.pains is None and row.note is None and float(row.sleep_hours) == 8
+
+
+async def test_wellbeing_correction_replaces_preview_even_without_flag(llm, settings, db):
+    llm.answers = [wellbeing("плечо"), wellbeing("колено")]  # the model forgot revises
+    first = await send("спал 6 часов, болит плечо", llm, settings, db)
+    second = await send("нет, плечо не болит, болит колено", llm, settings, db, T0 + timedelta(minutes=1))
+    assert llm.last_messages()[-3] == "спал 6 часов, болит плечо"  # the model saw the record
+    assert token_of(first) not in log_text.PENDING
+    pending = log_text.PENDING[token_of(second)]
+    assert pending.raw_text == "спал 6 часов, болит плечо\nнет, плечо не болит, болит колено"
+    await log_text.save(callback(f"save:{token_of(second)}"), settings, db)
+    async with db() as s:
+        rows = (await s.scalars(select(WellbeingEntry))).all()
+    assert len(rows) == 1 and json.loads(rows[0].pains)[0]["place"] == "колено"
+
+
+async def test_wellbeing_with_stray_flag_keeps_food_preview(llm, settings, db):
+    llm.answers = [food(1), wellbeing("плечо", revises=True)]
+    first = await send("самса", llm, settings, db)
+    await send("спал 6 часов, болит плечо", llm, settings, db, T0 + timedelta(minutes=1))
+    assert token_of(first) in log_text.PENDING and len(log_text.PENDING) == 2
+    assert log_text.CONTEXT[USER].raw_text == "спал 6 часов, болит плечо"
+
+
+async def test_food_after_wellbeing_keeps_both_previews(llm, settings, db):
+    llm.answers = [wellbeing("плечо"), food(1)]
+    first = await send("спал 6 часов, болит плечо", llm, settings, db)
+    await send("самса", llm, settings, db, T0 + timedelta(minutes=1))
+    assert token_of(first) in log_text.PENDING and len(log_text.PENDING) == 2
+
+
+async def test_empty_wellbeing_is_not_savable(llm, settings, db):
+    llm.answers = [{"kind": "wellbeing", "wellbeing": {"pains": []}, "clarification": "Как спалось?"}]
+    msg = await send("ну такое", llm, settings, db)
+    assert msg.answer.await_args.args[0] == "Как спалось?"
+    assert "reply_markup" not in msg.answer.await_args.kwargs and not log_text.PENDING

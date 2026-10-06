@@ -68,6 +68,7 @@ def test_only_corrections_revise():
         "три куриные самсы": False,
         "нет, четыре": True,
         "самса была так себе, белка поменьше": True,
+        "спал 6 часов, болит левое плечо, сил мало": False,
         "сколько белка в 100 г творога?": False,
         "привет": False,
     }
@@ -123,3 +124,28 @@ def test_regional_portions_example():
 def test_unknown_word_rule_in_prompt():
     assert "не придумывай" in SYSTEM_PROMPT.lower() and "распознавания" in SYSTEM_PROMPT
     assert "грамотно" in SYSTEM_PROMPT
+
+
+def test_wellbeing_example_and_rule():
+    r = example("спал 6 часов, болит левое плечо, сил мало")
+    assert r.kind == "wellbeing" and r.wellbeing is not None and not r.foods and not r.exercises
+    w = r.wellbeing
+    assert w.sleep_hours == 6 and w.energy == 2
+    assert [p.place for p in w.pains] == ["левое плечо"]
+    assert '"wellbeing"' in SYSTEM_PROMPT and "сил мало" in SYSTEM_PROMPT
+    assert len(SYSTEM_PROMPT) < 2700  # keep the prompt compact for small free models
+
+
+def test_wellbeing_out_of_range_values_are_clamped_not_rejected():
+    from gymbot.llm.schemas import ParsedWellbeing
+
+    w = ParsedWellbeing.model_validate(
+        {"sleep_hours": 30, "sleep_quality": 0, "energy": 7, "mood": "3",
+         "pains": [{"place": " колено ", "severity": 9}, {"place": "", "severity": 2}, {"place": "спина"}]}
+    )
+    assert w.sleep_hours is None and w.sleep_quality == 1 and w.energy == 5 and w.mood == 3
+    assert [(p.place, p.severity) for p in w.pains] == [("колено", 5), ("спина", None)]
+    assert ParsedWellbeing.model_validate({"sleep_hours": 7.5, "pains": None}).pains == []
+    for shape in ("плечо", ["плечо"], {"place": "плечо"}):
+        assert [p.place for p in ParsedWellbeing.model_validate({"pains": shape}).pains] == ["плечо"]
+    assert ParsedWellbeing.model_validate({"pains": [3, None, {"severity": 2}]}).pains == []

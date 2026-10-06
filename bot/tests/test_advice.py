@@ -1,5 +1,6 @@
 """AI advice: the summary for the model, generation and the /advice handler."""
 
+import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -9,7 +10,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from sqlalchemy import func, select
 
-from gymbot.db.models import FoodEntry, Program, User, UserProgram, Workout, WorkoutSet
+from gymbot.db.models import FoodEntry, Program, User, UserProgram, WellbeingEntry, Workout, WorkoutSet
 from gymbot.handlers import advice as advice_handler
 from gymbot.llm.openrouter import LLMError
 from gymbot.llm.prompts import ADVICE_DISCLAIMER, ADVICE_SYSTEM_PROMPT
@@ -158,6 +159,62 @@ async def test_context_food_at_norm(db):
         await s.commit()
         ctx = await advice.build_context(s, user, None, MSK, NOW)
     assert "к норме: ккал в норме, белок в норме." in ctx
+
+
+def _wb(user: User, day: date, h: int = 9, sleep: str | None = None, energy: int | None = None,
+        pains: list[tuple[str, int | None]] | None = None, note: str | None = None) -> WellbeingEntry:
+    return WellbeingEntry(
+        user_id=user.id, noted_at=msk(day, h), sleep_hours=Decimal(sleep) if sleep else None, energy=energy,
+        pains=json.dumps([{"place": p, "severity": sv} for p, sv in pains], ensure_ascii=False) if pains else None,
+        note=note, raw_text="текст",
+    )
+
+
+async def test_context_wellbeing_block(db):
+    async with db() as s:
+        user = await _user(s)
+        s.add_all([
+            _wb(user, date(2026, 9, 20), sleep="3", energy=1, pains=[("спина", 5)], note="старое"),  # > 14 days
+            _wb(user, date(2026, 9, 25), sleep="8", energy=4),
+            _wb(user, date(2026, 10, 1), sleep="6", energy=2, pains=[("Колено", 2)]),
+            _wb(user, date(2026, 10, 3), pains=[("левое плечо", None), ("колено", 3)], note="после жима"),
+            _wb(user, date(2026, 10, 5), sleep="6.5", pains=[("левое плечо", 3), ("Колено", None)]),
+            _wb(user, date(2026, 10, 6), sleep="7", energy=3, pains=[("левое плечо", 4)]),
+            _wb(user, TODAY, 8, note="сил мало, ноги ватные"),
+        ])
+        await s.commit()
+        ctx = await advice.build_context(s, user, None, MSK, NOW)
+    assert ("Самочувствие за 14 дней: записей 6; сон в среднем 6.9 ч (записей о сне 4), "
+            "ночей меньше 7 ч: 2; энергия в среднем 3/5.") in ctx
+    # The 5 most recent pains (the 01.10 one is 6th) grouped by place, case-insensitively.
+    assert "Боли: левое плечо 06.10 (4/5), 05.10 (3/5), 03.10; Колено 05.10, 03.10 (3/5)." in ctx
+    assert "Последняя заметка 07.10: сил мало, ноги ватные" in ctx
+    assert "спина" not in ctx and "старое" not in ctx and "01.10" not in ctx
+
+
+async def test_context_without_wellbeing(db):
+    async with db() as s:
+        user = await _user(s)
+        await s.commit()
+        ctx = await advice.build_context(s, user, None, MSK, NOW)
+    assert "Самочувствие за 14 дней: записей нет" in ctx and "Боли" not in ctx
+
+
+async def test_context_full_user_with_wellbeing_keeps_program_and_fits(db, full_user):
+    async with db() as s:
+        user = await s.get(User, full_user)
+        for d in range(1, 8):
+            s.add(_wb(user, date(2026, 10, d), sleep="6", energy=2, pains=[(f"место {d}", 3)],
+                      note="очень длинная заметка о самочувствии " * 10))
+        await s.commit()
+    ctx = await _context(db, full_user)
+    assert len(ctx) <= advice.CONTEXT_MAX
+    assert "Самочувствие за 14 дней: записей 7" in ctx and "Программа «" in ctx
+
+
+def test_advice_prompt_wellbeing_rules():
+    p = ADVICE_SYSTEM_PROMPT.lower()
+    assert "самочувстви" in p and "боли" in p and "замен" in p and "недосып" in p and "диагноз" in p
 
 
 def test_epley():
