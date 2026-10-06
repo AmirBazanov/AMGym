@@ -46,6 +46,7 @@ export const haptic = {
   tap: () => tg?.HapticFeedback?.impactOccurred('light'),
   select: () => tg?.HapticFeedback?.selectionChanged(),
   success: () => tg?.HapticFeedback?.notificationOccurred('success'),
+  error: () => tg?.HapticFeedback?.notificationOccurred('error'),
 }
 
 export function confirm(message: string): Promise<boolean> {

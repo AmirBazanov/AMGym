@@ -20,7 +20,6 @@ from gymbot.llm.prompts import build_messages
 from gymbot.llm.schemas import ParseResult
 
 log = logging.getLogger(__name__)
-JSON_BLOCK = re.compile(r"\{.*\}", re.S)
 
 
 class LLMError(RuntimeError):
@@ -28,10 +27,21 @@ class LLMError(RuntimeError):
 
 
 def extract_json(content: str) -> dict:
-    m = JSON_BLOCK.search(content)
-    if not m:
+    """First JSON object in the text that looks like a ParseResult (models may add prose or reasoning)."""
+    decoder = json.JSONDecoder()
+    first: dict | None = None
+    for m in re.finditer(r"\{", content):
+        try:
+            obj, _ = decoder.raw_decode(content, m.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            if "kind" in obj:
+                return obj
+            first = first or obj
+    if first is None:
         raise LLMError(f"no JSON in model output: {content[:200]!r}")
-    return json.loads(m.group(0))
+    return first
 
 
 class OpenRouterClient:
@@ -54,7 +64,9 @@ class OpenRouterClient:
             },
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        message = resp.json()["choices"][0]["message"]
+        # Reasoning models sometimes leave `content` empty and put the answer after their reasoning.
+        return message.get("content") or message.get("reasoning") or ""
 
     async def parse_message(self, text: str, catalog: list[str]) -> ParseResult:
         if not self.s.openrouter_api_key:
@@ -65,7 +77,12 @@ class OpenRouterClient:
             for _attempt in range(2):
                 try:
                     return ParseResult.model_validate(extract_json(await self._complete(model, messages)))
-                except (httpx.HTTPError, LLMError, ValidationError, json.JSONDecodeError, KeyError) as e:
+                except httpx.HTTPStatusError as e:
+                    log.warning("openrouter %s failed: %s", model, e)
+                    last_err = e
+                    if e.response.status_code in (402, 404, 429):  # out of quota / model gone: next model
+                        break
+                except (httpx.HTTPError, LLMError, ValidationError, json.JSONDecodeError, KeyError, TypeError) as e:
                     log.warning("openrouter %s failed: %s", model, e)
                     last_err = e
         raise LLMError(f"all models failed: {last_err}")

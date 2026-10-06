@@ -18,7 +18,9 @@ description: Запуск и проверка Telegram-бота GymAPP лока�
    ruff check src tests
    pytest -q
    ```
-4. Живой запуск: `python -m gymbot.main` (long polling, вебхук не нужен). Отправь боту `/start`, затем «жим лёжа 3 по 10 на 60» и проверь предпросмотр.
+4. Живой запуск одной командой из корня репо: `uv run --project bot python -m gymbot.dev` (сборка мини-аппа, туннель cloudflared, миграции, импорт программ, бот + HTTP на :8000). Без туннеля: `python -m gymbot.main`. Отправь боту `/start`, затем «жим лёжа 3 по 10 на 60» и проверь предпросмотр с кнопками.
+   - Только API и мини-апп без Telegram: `RUN_BOT=false DEV_USER_ID=1 python -m gymbot.main`, затем http://localhost:8000.
+   - Проверка бесплатных моделей OpenRouter: `python -m gymbot.llm.check`.
 5. Если бот молчит: проверь, что токен не используется другим запущенным процессом (Telegram отдаёт апдейты одному поллеру), и `ALLOWED_USER_IDS`.
 
 Без токена живой запуск невозможен; в этом случае ограничься шагом 3 и скажи об этом.

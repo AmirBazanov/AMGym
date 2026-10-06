@@ -11,11 +11,13 @@ export function NumField({
   onChange,
   placeholder,
   decimal,
+  invalid,
 }: {
   value: number | null
   onChange: (v: number | null) => void
   placeholder?: string
   decimal?: boolean
+  invalid?: boolean
 }) {
   const [text, setText] = useState(value == null ? '' : String(value).replace('.', ','))
   useEffect(() => {
@@ -24,7 +26,7 @@ export function NumField({
   }, [value])
   return (
     <input
-      className="field"
+      className={`field ${invalid ? 'invalid' : ''}`}
       inputMode={decimal ? 'decimal' : 'numeric'}
       placeholder={placeholder ?? '—'}
       value={text}

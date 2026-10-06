@@ -22,16 +22,16 @@ SYSTEM_PROMPT = """Ты парсер дневника тренировок и п
 EXAMPLES: list[tuple[str, str]] = [
     (
         "сделал жим лёжа 3 по 10 на 60",
-        '{"kind":"workout","exercises":[{"exercise":"жим лёжа","sets":['
+        ('{"kind":"workout","exercises":[{"exercise":"жим лёжа","sets":['
         '{"reps":10,"weight_kg":60,"drop_index":0},{"reps":10,"weight_kg":60,"drop_index":0},'
-        '{"reps":10,"weight_kg":60,"drop_index":0}]}],"foods":[],"clarification":null}',
+        '{"reps":10,"weight_kg":60,"drop_index":0}]}],"foods":[],"clarification":null}'),
     ),
     (
         "съел 200г куриной грудки и 150г риса",
-        '{"kind":"food","exercises":[],"foods":['
+        ('{"kind":"food","exercises":[],"foods":['
         '{"description":"куриная грудка","grams":200,"kcal":330,"protein_g":62,"fat_g":7,"carbs_g":0},'
         '{"description":"рис варёный","grams":150,"kcal":195,"protein_g":4,"fat_g":0.5,"carbs_g":42}],'
-        '"clarification":null}',
+        '"clarification":null}'),
     ),
 ]
 
