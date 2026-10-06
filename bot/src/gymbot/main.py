@@ -18,7 +18,7 @@ from gymbot.api.app import create_app
 from gymbot.config import Settings, get_settings
 from gymbot.db.migrate import upgrade_head
 from gymbot.db.session import make_engine
-from gymbot.handlers import common, log_text
+from gymbot.handlers import common, log_text, voice
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services.access import is_allowed
 from gymbot.services.programs import sync_programs
@@ -113,7 +113,8 @@ async def run() -> None:
     llm = OpenRouterClient(settings)
     dp = Dispatcher(settings=settings, sessionmaker=sessionmaker, llm=llm)
     dp.update.outer_middleware(AllowedUsers())
-    dp.include_routers(common.router, log_text.router)  # log_text last: it catches all text
+    # voice before log_text: the filters do not overlap, but the order is kept explicit.
+    dp.include_routers(common.router, voice.router, log_text.router)  # log_text last: it catches all text
     await setup_bot_ui(bot, settings)
     polling = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
     # If polling dies (e.g. the token was revoked), stop the HTTP server too instead of running half-alive.

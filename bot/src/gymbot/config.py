@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     openrouter_fallback_models: list[str] = ["inclusionai/ling-3.0-flash-sante:free", "apodex/apodex-1.1-mini:free"]
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
+    # Speech-to-text for voice messages: any OpenAI-compatible /audio/transcriptions endpoint.
+    # Default is Groq's free tier (key at https://console.groq.com/keys). Empty key = voice is off.
+    stt_api_key: str = ""
+    stt_base_url: str = "https://api.groq.com/openai/v1"
+    stt_model: str = "whisper-large-v3-turbo"
+    stt_max_seconds: int = 120
+
     miniapp_url: str = ""  # public HTTPS URL of the Mini App (Telegram requires HTTPS)
     timezone: str = "Europe/Moscow"
 
