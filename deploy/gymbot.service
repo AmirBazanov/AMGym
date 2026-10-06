@@ -1,0 +1,18 @@
+[Unit]
+Description=GymAPP Telegram bot + Mini App server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=__USER__
+WorkingDirectory=__HOME__/amgym
+Environment=PATH=__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+# gymbot.dev builds the Mini App when needed, opens a Cloudflare quick tunnel, runs migrations, bot and HTTP.
+ExecStart=__HOME__/.local/bin/uv run --project bot python -m gymbot.dev
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
