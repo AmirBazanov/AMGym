@@ -18,7 +18,7 @@ from gymbot.api.app import create_app
 from gymbot.config import Settings, get_settings
 from gymbot.db.migrate import upgrade_head
 from gymbot.db.session import make_engine
-from gymbot.handlers import common, log_text, voice
+from gymbot.handlers import advice, common, log_text, voice
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services.access import is_allowed
 from gymbot.services.programs import sync_programs
@@ -55,6 +55,7 @@ async def setup_bot_ui(bot: Bot, settings: Settings) -> None:
         [
             BotCommand(command="today", description="План на сегодня"),
             BotCommand(command="undo", description="Удалить последнюю запись"),
+            BotCommand(command="advice", description="Советы по питанию, тренировкам и восстановлению"),
             BotCommand(command="help", description="Как записывать"),
         ]
     )
@@ -123,12 +124,12 @@ async def run() -> None:
     dp = Dispatcher(settings=settings, sessionmaker=sessionmaker, llm=llm)
     dp.update.outer_middleware(AllowedUsers())
     # voice before log_text: the filters do not overlap, but the order is kept explicit.
-    dp.include_routers(common.router, voice.router, log_text.router)  # log_text last: it catches all text
+    dp.include_routers(common.router, advice.router, voice.router, log_text.router)  # log_text last: it catches all text
     await setup_bot_ui(bot, settings)
     polling = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
     # If polling dies (e.g. the token was revoked), stop the HTTP server too instead of running half-alive.
     polling.add_done_callback(lambda _: setattr(server, "should_exit", True))
-    reminders = asyncio.create_task(reminder_loop(bot, sessionmaker, settings))
+    reminders = asyncio.create_task(reminder_loop(bot, sessionmaker, settings, llm))
     try:
         await server.serve()  # returns on Ctrl+C (uvicorn handles the signals)
     finally:

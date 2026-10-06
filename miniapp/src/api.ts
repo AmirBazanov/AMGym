@@ -45,6 +45,21 @@ export type MacroKey = keyof Macros
 
 export const EMPTY_TARGETS: Targets = { kcal: null, protein: null, fat: null, carbs: null }
 
+// ---- Profile (used by the bot's /advice). Limits and helpers live in profile.ts. ----
+
+export type Goal = 'mass' | 'cut' | 'strength' | 'health'
+
+/** null means "not set". PUT /api/settings takes a partial profile: a missing key is kept, null clears it. */
+export interface Profile {
+  weightKg: number | null
+  heightCm: number | null
+  birthYear: number | null
+  goal: Goal | null
+  about: string | null
+}
+
+export const EMPTY_PROFILE: Profile = { weightKg: null, heightCm: null, birthYear: null, goal: null, about: null }
+
 export interface FoodEntry extends Macros {
   id: number
   eatenAt: string // ISO, UTC
@@ -87,14 +102,18 @@ export function deleteFood(id: number): Promise<void> {
 
 // ---- Reminders (contract: same spec, section 2). Never cached offline: loaded when the block is shown. ----
 
-export type ReminderKind = 'text' | 'nutrition'
+export type ReminderKind = 'text' | 'nutrition' | 'advice'
 
-/** Daily reminder sent by the bot at `time` (HH:MM, server TIMEZONE). `text` is used only for kind "text". */
+/**
+ * Reminder sent by the bot at `time` (HH:MM, server TIMEZONE), every day or only on `weekday`
+ * (0 = Monday .. 6 = Sunday). `text` is used only for kind "text".
+ */
 export interface Reminder {
   id: number
   time: string
   kind: ReminderKind
   text: string | null
+  weekday: number | null // may be absent on servers older than weekly reminders: read as `?? null`
   enabled: boolean
 }
 
@@ -102,6 +121,7 @@ export interface ReminderInput {
   time: string
   kind: ReminderKind
   text?: string
+  weekday?: number | null
   enabled?: boolean
 }
 

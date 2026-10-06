@@ -42,6 +42,12 @@ class User(Base):
     fat_target_g: Mapped[int | None] = mapped_column(Integer)
     carbs_target_g: Mapped[int | None] = mapped_column(Integer)
     rest_seconds: Mapped[int] = mapped_column(Integer, default=90)
+    # Profile for AI advice; every field optional.
+    weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(5, 1))
+    height_cm: Mapped[int | None] = mapped_column(Integer)
+    birth_year: Mapped[int | None] = mapped_column(Integer)
+    goal: Mapped[str | None] = mapped_column(String(16))  # mass | cut | strength | health
+    about: Mapped[str | None] = mapped_column(Text)  # injuries, sleep, limits (free text, <= 500 chars)
 
 
 class Exercise(Base):
@@ -165,7 +171,7 @@ class FoodEntry(Base):
 # --- Reminders (daily, local time in TIMEZONE) ---
 
 class Reminder(Base):
-    """Daily reminder sent by the bot at `minute_of_day` local time (09:30 -> 570).
+    """Reminder sent by the bot at `minute_of_day` local time (09:30 -> 570), daily or on one `weekday`.
 
     `last_sent_on` is the local date of the last claimed send; it guards against duplicates
     (see gymbot.services.reminders.tick).
@@ -175,8 +181,9 @@ class Reminder(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     minute_of_day: Mapped[int] = mapped_column(Integer)  # 0..1439 in TIMEZONE
-    kind: Mapped[str] = mapped_column(String(16))  # text | nutrition
+    kind: Mapped[str] = mapped_column(String(16))  # text | nutrition | advice
     text: Mapped[str | None] = mapped_column(Text)  # for kind=text only
+    weekday: Mapped[int | None] = mapped_column(Integer)  # 0=Mon..6=Sun in TIMEZONE; None = every day
     enabled: Mapped[bool] = mapped_column(default=True)
     last_sent_on: Mapped[date | None] = mapped_column(Date)  # local date in TIMEZONE
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

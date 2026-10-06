@@ -15,6 +15,7 @@ import {
   type MacroKey,
   type NutritionDay,
   type NutritionWeek,
+  type Profile,
   type Reminder,
   type ReminderInput,
   type ReminderKind,
@@ -25,7 +26,9 @@ import { IconChevronLeft, IconChevronRight, IconClose, IconPlus } from '../compo
 import { NumField } from '../components/NumField'
 import { Sheet } from '../components/Sheet'
 import { capitalize, WEEKDAY_SHORT } from '../program'
-import { actions, useStore } from '../store'
+import { ABOUT_MAX, GOALS, profileErrors, profileLimits, profilePatch } from '../profile'
+import { KIND_DEFAULTS, REMINDER_WEEKDAYS, reminderTitle, reminderWhen, repeatPhrase, weekdayShort } from '../reminders'
+import { actions, getState, useStore } from '../store'
 import { confirm, haptic } from '../telegram'
 
 // Food data and reminders are never cached in the offline store: every view loads them from the server when shown.
@@ -598,10 +601,139 @@ function WeekBody({ week, today, onOpenDay }: { week: NutritionWeek; today: stri
 
 // ---------- settings ----------
 
+type SaveStatus = 'idle' | 'saving' | 'saved' | 'local' | 'failed'
+
+/** Profile for the bot's AI advice. Like the targets, the store changes only from the server's answer. */
+function ProfileForm() {
+  const { profile } = useStore()
+  const [draft, setDraft] = useState<Profile>(profile)
+  const [status, setStatus] = useState<SaveStatus>('idle')
+  const patch = profilePatch(draft, profile)
+  const dirty = Object.keys(patch).length > 0
+  const errors = profileErrors(draft)
+  const anyInvalid = Object.keys(errors).length > 0
+  const lim = profileLimits()
+
+  // Server state may arrive after the screen opened; adopt it unless the user is editing.
+  useEffect(() => {
+    if (!dirty) setDraft(profile)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile])
+
+  function edit(p: Partial<Profile>) {
+    setStatus('idle')
+    setDraft((d) => ({ ...d, ...p }))
+  }
+
+  async function save() {
+    if (!dirty || anyInvalid || status === 'saving') return
+    setStatus('saving')
+    const sent = draft
+    const res = await actions.setProfile(patch)
+    if (res === 'failed') haptic.error()
+    else {
+      haptic.success()
+      // Take the stored (normalized) values so the form is clean, unless the user kept typing meanwhile.
+      setDraft((d) => (d === sent ? getState().profile : d))
+    }
+    setStatus(res)
+  }
+
+  const about = draft.about ?? ''
+
+  return (
+    <>
+      <h2>О себе</h2>
+      <div className="list">
+        <label className="row">
+          <div className="grow title">Вес</div>
+          <div className="target-field">
+            <NumField decimal value={draft.weightKg} invalid={errors.weightKg} onChange={(v) => edit({ weightKg: v })} />
+          </div>
+          <div className="target-unit muted">кг</div>
+        </label>
+        <label className="row">
+          <div className="grow title">Рост</div>
+          <div className="target-field">
+            <NumField value={draft.heightCm} invalid={errors.heightCm} onChange={(v) => edit({ heightCm: v })} />
+          </div>
+          <div className="target-unit muted">см</div>
+        </label>
+        <label className="row">
+          <div className="grow title">Год рождения</div>
+          <div className="target-field">
+            <NumField value={draft.birthYear} invalid={errors.birthYear} onChange={(v) => edit({ birthYear: v })} />
+          </div>
+          <div className="target-unit" />
+        </label>
+        <div className="row profile-stack">
+          <div className="title">Цель</div>
+          <div className="segmented profile-goal" role="group" aria-label="Цель">
+            {GOALS.map((g) => (
+              <button
+                type="button"
+                key={g.key}
+                className={draft.goal === g.key ? 'active' : ''}
+                aria-pressed={draft.goal === g.key}
+                onClick={() => {
+                  haptic.select()
+                  // Tapping the chosen goal again clears it.
+                  edit({ goal: draft.goal === g.key ? null : g.key })
+                }}
+              >
+                {g.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <label className="row profile-stack">
+          <div className="title">Травмы, сон, ограничения</div>
+          <textarea
+            className={`field profile-about-field ${errors.about ? 'invalid' : ''}`}
+            value={about}
+            maxLength={ABOUT_MAX}
+            rows={3}
+            placeholder="Например: болит левое плечо, сплю 6 часов, не ем молочное"
+            onChange={(e) => edit({ about: e.target.value })}
+          />
+          <div className="hint">
+            Нейросеть учитывает это в советах.
+            {about.length > ABOUT_MAX - 100 && ` ${about.length} / ${ABOUT_MAX}`}
+          </div>
+        </label>
+      </div>
+      {anyInvalid && (
+        <p className="hint" style={{ margin: '8px 4px 0', color: 'var(--danger)' }}>
+          Проверь значения: вес {lim.weightKg.min}–{lim.weightKg.max} кг, рост {lim.heightCm.min}–{lim.heightCm.max} см, год
+          рождения {lim.birthYear.min}–{lim.birthYear.max}.
+        </p>
+      )}
+      <div className="spacer" />
+      <button className="btn" disabled={!dirty || anyInvalid || status === 'saving'} onClick={save}>
+        {status === 'saving' ? 'Сохраняю…' : 'Сохранить профиль'}
+      </button>
+      {status === 'saved' && <p className="hint" style={{ margin: '8px 4px 0' }}>Профиль сохранён.</p>}
+      {status === 'local' && (
+        <p className="hint" style={{ margin: '8px 4px 0' }}>
+          Сохранено только в этом браузере. Открой дневник из бота, чтобы профиль попал на сервер.
+        </p>
+      )}
+      {status === 'failed' && (
+        <p className="hint" style={{ margin: '8px 4px 0', color: 'var(--danger)' }}>
+          Сервер не сохранил профиль. Проверь интернет и попробуй ещё раз.
+        </p>
+      )}
+      <p className="hint" style={{ margin: '8px 4px 0' }}>
+        Используется для советов от ИИ: команда /advice в боте.
+      </p>
+    </>
+  )
+}
+
 function Settings() {
   const { targets } = useStore()
   const [draft, setDraft] = useState<Targets>(targets)
-  const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'local' | 'failed'>('idle')
+  const [status, setStatus] = useState<SaveStatus>('idle')
   const dirty = MACROS.some((m) => draft[m.key] !== targets[m.key])
 
   // Server state may arrive after the screen opened; adopt it unless the user is editing.
@@ -626,6 +758,8 @@ function Settings() {
 
   return (
     <>
+      <ProfileForm />
+
       <h2>Норма в день</h2>
       <div className="list">
         {MACROS.map((m) => (
@@ -679,10 +813,10 @@ function Settings() {
 // ---------- reminders (spec section 2) ----------
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/
-const NUTRITION_TITLE = 'Сводка КБЖУ'
 
-const reminderTitle = (r: Reminder) => (r.kind === 'nutrition' ? NUTRITION_TITLE : (r.text ?? ''))
-const byTime = (a: Reminder, b: Reminder) => a.time.localeCompare(b.time) || a.id - b.id
+/** By time of day; at the same time daily reminders first, then Monday..Sunday. */
+const byTime = (a: Reminder, b: Reminder) =>
+  a.time.localeCompare(b.time) || (a.weekday ?? -1) - (b.weekday ?? -1) || a.id - b.id
 
 function Reminders() {
   const r = useRemote<Reminder[]>('reminders', getReminders)
@@ -741,20 +875,23 @@ function Reminders() {
               {items.map((rem) => (
                 <div className={`row reminder ${rem.enabled ? '' : 'off'}`} key={rem.id}>
                   <button className="reminder-open" onClick={() => setEditing(rem)}>
-                    <span className="reminder-time num">{rem.time}</span>
+                    <span className="reminder-time num">
+                      {rem.weekday != null && <span className="reminder-day">{weekdayShort(rem.weekday)}</span>}
+                      {rem.time}
+                    </span>
                     <span className="reminder-title">{reminderTitle(rem)}</span>
                   </button>
                   <Switch
                     on={rem.enabled}
                     disabled={pending.has(rem.id)}
-                    label={`${rem.time} ${reminderTitle(rem)}`}
+                    label={`${reminderWhen(rem)} ${reminderTitle(rem)}`}
                     onToggle={() => toggle(rem)}
                   />
                 </div>
               ))}
             </div>
           ) : (
-            <div className="card hint">Пока нет напоминаний. Например: «Креатин» в 09:00 или сводка КБЖУ в 20:00.</div>
+            <div className="card hint">Пока нет напоминаний. Например: «Креатин» в 09:00, сводка КБЖУ в 20:00 или советы недели в воскресенье.</div>
           )}
           {failed && (
             <p className="hint" style={{ margin: '8px 4px 0', color: 'var(--danger)' }}>
@@ -859,15 +996,18 @@ function ReminderSheet({
   onGone: (id: number) => void
   onClose: () => void
 }) {
-  const [time, setTime] = useState(reminder?.time ?? '09:00')
+  const [time, setTime] = useState(reminder?.time ?? KIND_DEFAULTS.text.time)
   const [kind, setKind] = useState<ReminderKind>(reminder?.kind ?? 'text')
+  const [weekday, setWeekday] = useState<number | null>(reminder ? (reminder.weekday ?? null) : KIND_DEFAULTS.text.weekday)
+  // A new reminder follows its kind's default time and day until the user picks them.
+  const [whenTouched, setWhenTouched] = useState(reminder != null)
   // Kept while switching to "nutrition" so switching back restores it.
   const [text, setText] = useState(reminder?.text ?? '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const timeOk = TIME_RE.test(time)
-  const textOk = kind === 'nutrition' || text.trim().length > 0
+  const textOk = kind !== 'text' || text.trim().length > 0
   const canSave = timeOk && textOk && !busy
 
   async function save() {
@@ -875,7 +1015,8 @@ function ReminderSheet({
     setBusy(true)
     setError(null)
     // `text` is only meaningful for kind "text"; omit it otherwise instead of relying on null handling.
-    const body: ReminderInput = { time, kind, ...(kind === 'text' ? { text: text.trim() } : {}) }
+    // `weekday` is always sent: null on PATCH turns a weekly reminder back into a daily one.
+    const body: ReminderInput = { time, kind, weekday, ...(kind === 'text' ? { text: text.trim() } : {}) }
     try {
       const saved = reminder ? await updateReminder(reminder.id, body) : await createReminder({ ...body, enabled: true })
       haptic.success()
@@ -890,7 +1031,7 @@ function ReminderSheet({
 
   async function remove() {
     if (!reminder || busy) return
-    if (!(await confirm(`Удалить напоминание «${reminderTitle(reminder)}» в ${reminder.time}?`))) return
+    if (!(await confirm(`Удалить напоминание «${reminderTitle(reminder)}» в ${reminderWhen(reminder)}?`))) return
     setBusy(true)
     setError(null)
     try {
@@ -922,7 +1063,9 @@ function ReminderSheet({
           {(
             [
               ['text', 'Текст'],
-              ['nutrition', NUTRITION_TITLE],
+              // Short labels: three full titles do not fit one line at 360 px.
+              ['nutrition', 'КБЖУ'],
+              ['advice', 'Советы'],
             ] as const
           ).map(([k, l]) => (
             <button
@@ -932,6 +1075,10 @@ function ReminderSheet({
               onClick={() => {
                 haptic.select()
                 setKind(k)
+                if (!whenTouched) {
+                  setTime(KIND_DEFAULTS[k].time)
+                  setWeekday(KIND_DEFAULTS[k].weekday)
+                }
               }}
             >
               {l}
@@ -947,10 +1094,37 @@ function ReminderSheet({
               className={`field reminder-time-field ${timeOk ? '' : 'invalid'}`}
               value={time}
               required
-              onChange={(e) => setTime(e.target.value.slice(0, 5))}
+              onChange={(e) => {
+                setWhenTouched(true)
+                setTime(e.target.value.slice(0, 5))
+              }}
             />
           </label>
-          <div className="hint">Если это время сегодня уже прошло, первое напоминание придёт завтра.</div>
+          <div className="row profile-stack">
+            <div className="title">День</div>
+            <div className="weekday-picker" role="group" aria-label="День">
+              {[null, 0, 1, 2, 3, 4, 5, 6].map((d) => (
+                <button
+                  type="button"
+                  key={d ?? 'daily'}
+                  className={`${d == null ? 'daily' : ''} ${weekday === d ? 'active' : ''}`}
+                  aria-pressed={weekday === d}
+                  onClick={() => {
+                    haptic.select()
+                    setWhenTouched(true)
+                    setWeekday(d)
+                  }}
+                >
+                  {d == null ? 'Каждый день' : REMINDER_WEEKDAYS[d]}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="hint">
+            {weekday == null
+              ? 'Если это время сегодня уже прошло, первое напоминание придёт завтра.'
+              : 'Если сегодня этот день, а время уже прошло, первое напоминание придёт через неделю.'}
+          </div>
           {kind === 'text' && (
             <label className="row reminder-text-row">
               <div className="title">Текст</div>
@@ -968,8 +1142,10 @@ function ReminderSheet({
         </div>
         <p className="hint" style={{ margin: '8px 4px 0' }}>
           {kind === 'nutrition'
-            ? 'Бот пришлёт, сколько ккал и белка осталось до нормы на сегодня.'
-            : `Бот пришлёт этот текст каждый день.${text.length > REMINDER_TEXT_MAX - 40 ? ` ${text.length} / ${REMINDER_TEXT_MAX}` : ''}`}
+            ? `Бот пришлёт ${repeatPhrase(weekday)}, сколько ккал и белка осталось до нормы на сегодня.`
+            : kind === 'advice'
+              ? `ИИ пришлёт ${repeatPhrase(weekday)} рекомендации по питанию, тренировкам и восстановлению. Учитывает блок «О себе».`
+              : `Бот пришлёт этот текст ${repeatPhrase(weekday)}.${text.length > REMINDER_TEXT_MAX - 40 ? ` ${text.length} / ${REMINDER_TEXT_MAX}` : ''}`}
           {!timeOk && ' Укажи время.'}
         </p>
         {error && (

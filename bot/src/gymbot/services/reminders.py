@@ -1,4 +1,4 @@
-"""Daily reminders: a plain asyncio loop over state in the DB (no APScheduler).
+"""Daily and weekly reminders: a plain asyncio loop over state in the DB (no APScheduler).
 
 A reminder is due when `due <= now < due + GRACE` on the UTC timeline, where `due` is `minute_of_day`
 on a local day in TIMEZONE (a time in the spring DST gap fires an hour later on the wall clock; a
@@ -6,6 +6,12 @@ repeated autumn time fires once, at its first occurrence). Duplicates are preven
 reminder before sending: a conditional `UPDATE ... SET last_sent_on = :day WHERE last_sent_on IS NULL OR
 last_sent_on < :day AND enabled AND minute_of_day = :minute`, committed, and only the caller whose UPDATE
 changed the row sends. This is atomic on SQLite and Postgres, also with two processes.
+
+A reminder with `weekday` (0=Mon..6=Sun) is due only when the local day returned by `due_day` is that
+weekday, so a Sunday 23:50 reminder that spills past midnight still counts as Sunday.
+
+kind=advice asks the LLM for advice (gymbot.services.advice) before claiming, like nutrition builds its
+summary: when the model fails nothing is claimed and the next check within GRACE retries.
 
 Delivery is "at most once per claim", not strictly at most once per day:
 - a crash between claim and send loses that day's reminder;
@@ -32,6 +38,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gymbot.config import Settings
 from gymbot.db.models import Reminder, User
 from gymbot.db.session import Sessionmaker
+from gymbot.llm.openrouter import LLMError, OpenRouterClient
+from gymbot.services import advice
 from gymbot.services.access import is_allowed
 from gymbot.services.nutrition import day_summary
 
@@ -40,7 +48,7 @@ log = logging.getLogger(__name__)
 GRACE = timedelta(minutes=30)
 CHECK_SECONDS = 30
 MAX_PER_USER = 20
-KINDS = ("text", "nutrition")
+KINDS = ("text", "nutrition", "advice")
 
 NO_TARGETS = "Норма КБЖУ не задана, задай её в дневнике → Питание → Настройки"
 CLOSED = "КБЖУ на сегодня закрыт"
@@ -122,6 +130,7 @@ class _Due:
     minute: int
     kind: str
     text: str | None
+    weekday: int | None
     previous: date | None
     day: date
 
@@ -132,23 +141,40 @@ class _Message:
     reply_markup: InlineKeyboardMarkup | None = None
 
 
-async def _build(session: AsyncSession, item: _Due, tz: ZoneInfo, miniapp_url: str) -> _Message:
+async def _build(
+    session: AsyncSession,
+    item: _Due,
+    tz: ZoneInfo,
+    settings: Settings,
+    llm: OpenRouterClient | None,
+    now_utc: datetime,
+) -> _Message:
+    if item.kind == "advice":
+        if llm is None:
+            raise RuntimeError("kind=advice needs an LLM client")
+        user = await session.get(User, item.user_id)
+        assert user is not None  # FK with ON DELETE CASCADE
+        return _Message(await advice.generate(session, user, settings, llm, tz, now_utc))
     if item.kind == "nutrition":
         user = await session.get(User, item.user_id)
         assert user is not None  # FK with ON DELETE CASCADE
         s = await day_summary(session, user, item.day, tz)
-        return _Message(nutrition_text(s.remaining.kcal, s.remaining.protein), nutrition_keyboard(miniapp_url))
+        return _Message(
+            nutrition_text(s.remaining.kcal, s.remaining.protein), nutrition_keyboard(settings.miniapp_url)
+        )
     return _Message(item.text or "Напоминание")
 
 
 async def _claim(session: AsyncSession, item: _Due) -> bool:
     """Atomically mark today as sent, unless already sent, disabled or re-timed since the snapshot."""
+    weekday = Reminder.weekday.is_(None) if item.weekday is None else Reminder.weekday == item.weekday
     result = await session.execute(
         update(Reminder)
         .where(
             Reminder.id == item.id,
             Reminder.enabled.is_(True),
             Reminder.minute_of_day == item.minute,
+            weekday,
             or_(Reminder.last_sent_on.is_(None), Reminder.last_sent_on < item.day),
         )
         .values(last_sent_on=item.day)
@@ -169,11 +195,19 @@ async def _release(session: AsyncSession, reminder_id: int, day: date, previous:
     await session.commit()
 
 
-async def tick(session: AsyncSession, bot: Bot, now_utc: datetime, tz: ZoneInfo, *, settings: Settings) -> int:
+async def tick(
+    session: AsyncSession,
+    bot: Bot,
+    now_utc: datetime,
+    tz: ZoneInfo,
+    *,
+    settings: Settings,
+    llm: OpenRouterClient | None = None,
+) -> int:
     """One check: send every reminder that is due now. Returns how many were sent.
 
     Only users who may use the app (ALLOWED_USER_IDS / owner, same rule as the handlers) get reminders.
-    `settings.miniapp_url` is read here, at send time.
+    `settings.miniapp_url` is read here, at send time. kind=advice needs `llm`; without it they are skipped.
     """
     today = now_utc.astimezone(tz).date()
     rows = (
@@ -192,25 +226,35 @@ async def tick(session: AsyncSession, bot: Bot, now_utc: datetime, tz: ZoneInfo,
         day = due_day(reminder.minute_of_day, now_utc, tz)
         if day is None or (reminder.last_sent_on is not None and reminder.last_sent_on >= day):
             continue
+        if reminder.weekday is not None and day.weekday() != reminder.weekday:  # 0=Mon, not isoweekday
+            continue
+        if reminder.kind == "advice" and llm is None:
+            log.warning("reminder %s: kind=advice but no LLM client, skipped", reminder.id)
+            continue
         due.append(
             _Due(
                 reminder.id, user.id, user.telegram_id, reminder.minute_of_day, reminder.kind, reminder.text,
-                reminder.last_sent_on, day,
+                reminder.weekday, reminder.last_sent_on, day,
             )
         )
     allowed: dict[int, bool] = {}
     for item in due:
         if item.chat_id not in allowed:
             allowed[item.chat_id] = await is_allowed(session, settings, item.chat_id)
-    due = [item for item in due if allowed[item.chat_id]]
-    miniapp_url = settings.miniapp_url
+    # Advice waits for the LLM (seconds to minutes): send the quick ones first.
+    due = sorted((item for item in due if allowed[item.chat_id]), key=lambda item: item.kind == "advice")
     sent = 0
     for item in due:
         try:
             # Build before claiming, so a failing summary does not leave a dangling claim.
-            message = await _build(session, item, tz, miniapp_url)
+            message = await _build(session, item, tz, settings, llm, now_utc)
             if not await _claim(session, item):
                 continue  # sent by another check/process, or disabled/re-timed meanwhile
+        except LLMError as e:
+            # Nothing was claimed: the next check within GRACE retries.
+            await session.rollback()
+            log.warning("reminder %s: advice not generated, will retry: %s", item.id, e)
+            continue
         except Exception:
             await session.rollback()
             log.exception("reminder %s: failed to prepare", item.id)
@@ -233,14 +277,16 @@ async def tick(session: AsyncSession, bot: Bot, now_utc: datetime, tz: ZoneInfo,
     return sent
 
 
-async def reminder_loop(bot: Bot, sessionmaker: Sessionmaker, settings: Settings) -> None:
+async def reminder_loop(
+    bot: Bot, sessionmaker: Sessionmaker, settings: Settings, llm: OpenRouterClient | None = None
+) -> None:
     """Check every CHECK_SECONDS until cancelled. One failed check is logged and does not stop the loop."""
     tz = ZoneInfo(settings.timezone)
     log.info("reminders: checking every %s s", CHECK_SECONDS)
     while True:
         try:
             async with sessionmaker() as session:
-                sent = await tick(session, bot, datetime.now(UTC), tz, settings=settings)
+                sent = await tick(session, bot, datetime.now(UTC), tz, settings=settings, llm=llm)
             if sent:
                 log.info("reminders: sent %s", sent)
         except Exception:

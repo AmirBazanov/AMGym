@@ -186,3 +186,77 @@ async def test_aclose_closes_http():
     c = client_with(lambda req: reply(json.dumps(GOOD)))
     await c.aclose()
     assert c.http.is_closed
+
+
+# ---- complete_text: plain generation (advice) ----
+
+MSGS = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+
+
+async def test_complete_text_plain_body_and_clean_text():
+    bodies = []
+
+    def handler(req):
+        bodies.append(json.loads(req.content))
+        return reply("<think>hmm, let me think</think>\n\n**Питание**\n- добери 40 г белка\n")
+
+    text = await client_with(handler).complete_text(MSGS)
+    assert text == "Питание\n- добери 40 г белка"
+    assert "response_format" not in bodies[0]
+    assert bodies[0]["messages"] == MSGS and bodies[0]["model"] == "m1"
+
+
+async def test_complete_text_strips_code_fence_and_headings():
+    text = await client_with(lambda req: reply("```\n## Питание\n- пункт\n```")).complete_text(MSGS)
+    assert text == "Питание\n- пункт"
+
+
+async def test_complete_text_fallback_on_429():
+    models = []
+
+    def handler(req):
+        m = json.loads(req.content)["model"]
+        models.append(m)
+        return httpx.Response(429) if m == "m1" else reply("ok")
+
+    assert await client_with(handler).complete_text(MSGS) == "ok"
+    assert models == ["m1", "m2"]
+
+
+async def test_complete_text_400_moves_to_next_model():
+    models = []
+
+    def handler(req):
+        m = json.loads(req.content)["model"]
+        models.append(m)
+        return httpx.Response(400, json=CONTEXT_400) if m == "m1" else reply("ok")
+
+    assert await client_with(handler).complete_text(MSGS) == "ok"
+    assert models == ["m1", "m2"]
+
+
+async def test_complete_text_ignores_reasoning_when_content_empty():
+    # The chain of thought must never reach the user as the answer.
+    models = []
+
+    def handler(req):
+        m = json.loads(req.content)["model"]
+        models.append(m)
+        if m == "m1":
+            return httpx.Response(200, json={"choices": [{"message": {"content": "", "reasoning": "secret thoughts"}}]})
+        return reply("ok")
+
+    assert await client_with(handler).complete_text(MSGS) == "ok"
+    assert models[0] == "m1" and models[-1] == "m2"
+
+
+async def test_complete_text_all_fail():
+    with pytest.raises(LLMError, match="all models failed"):
+        await client_with(lambda req: httpx.Response(429)).complete_text(MSGS)
+
+
+async def test_complete_text_no_api_key_makes_no_request():
+    calls = []
+    with pytest.raises(LLMError, match="OPENROUTER_API_KEY"):
+        await client_with(lambda req: calls.append(req) or reply("ok"), openrouter_api_key="").complete_text(MSGS)
+    assert calls == []

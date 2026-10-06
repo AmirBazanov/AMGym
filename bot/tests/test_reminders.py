@@ -9,6 +9,8 @@ from sqlalchemy import select
 
 from gymbot.config import Settings
 from gymbot.db.models import FoodEntry, Reminder, User
+from gymbot.llm.openrouter import LLMError
+from gymbot.services import advice as advice_module
 from gymbot.services.reminders import (
     CLOSED,
     GRACE,
@@ -74,10 +76,10 @@ async def _user(db, telegram_id: int = 42, **fields) -> int:
 
 
 async def _rem(db, user_id: int, minute: int = M0930, kind="text", text="Креатин", enabled=True,
-               last_sent_on: date | None = None) -> int:
+               last_sent_on: date | None = None, weekday: int | None = None) -> int:
     async with db() as s:
         r = Reminder(user_id=user_id, minute_of_day=minute, kind=kind, text=text, enabled=enabled,
-                     last_sent_on=last_sent_on)
+                     last_sent_on=last_sent_on, weekday=weekday)
         s.add(r)
         await s.commit()
         return r.id
@@ -100,9 +102,9 @@ def _settings(miniapp_url: str = "", allowed: list[int] | None = None) -> Settin
 
 
 async def _tick(db, bot, now: datetime, tz: ZoneInfo = MSK, miniapp_url: str = "",
-                allowed: list[int] | None = None) -> int:
+                allowed: list[int] | None = None, llm=None) -> int:
     async with db() as s:  # a fresh session per call, like the loop
-        return await tick(s, bot, now, tz, settings=_settings(miniapp_url, allowed))
+        return await tick(s, bot, now, tz, settings=_settings(miniapp_url, allowed), llm=llm)
 
 
 async def _last_sent(db, reminder_id: int) -> date | None:
@@ -473,12 +475,12 @@ async def test_concurrent_checks_send_once(db, monkeypatch):
     original = rem._build
     raced = False
 
-    async def build_then_race(session, item, tz, miniapp_url):
+    async def build_then_race(session, item, *args):
         nonlocal raced
         if not raced:
             raced = True
             assert await _tick(db, other, at(9, 30)) == 1
-        return await original(session, item, tz, miniapp_url)
+        return await original(session, item, *args)
 
     monkeypatch.setattr(rem, "_build", build_then_race)
     bot = FakeBot()
@@ -539,13 +541,13 @@ async def _race_build(monkeypatch, db, rid: int, **changes) -> None:
 
     original = rem._build
 
-    async def build_then_edit(session, item, tz, miniapp_url):
+    async def build_then_edit(session, item, *args):
         async with db() as other:
             r = await other.get(Reminder, rid)
             for k, v in changes.items():
                 setattr(r, k, v)
             await other.commit()
-        return await original(session, item, tz, miniapp_url)
+        return await original(session, item, *args)
 
     monkeypatch.setattr(rem, "_build", build_then_edit)
 
@@ -599,3 +601,121 @@ async def test_without_allowed_ids_only_the_owner_gets_reminders(db):
     bot = FakeBot()
     assert await _tick(db, bot, at(9, 30), allowed=[]) == 1
     assert [c[0] for c in bot.calls] == [555]
+
+
+# ---- weekday: weekly reminders ----
+
+OTHER_DAY = (DAY.weekday() + 1) % 7  # the weekday of TOMORROW
+
+
+async def test_weekday_matching_is_sent(db):
+    rid = await _rem(db, await _user(db), weekday=DAY.weekday())
+    bot = FakeBot()
+    assert DAY.weekday() == 1  # Tuesday: 0=Mon, not isoweekday
+    assert await _tick(db, bot, at(9, 30)) == 1
+    assert bot.calls == [(42, "Креатин", None)]
+    assert await _last_sent(db, rid) == DAY
+
+
+async def test_weekday_other_day_waits_for_its_day(db):
+    rid = await _rem(db, await _user(db), weekday=OTHER_DAY)
+    bot = FakeBot()
+    assert await _tick(db, bot, at(9, 30)) == 0
+    assert bot.calls == [] and await _last_sent(db, rid) is None
+    assert await _tick(db, bot, at(9, 30, TOMORROW)) == 1
+    assert await _last_sent(db, rid) == TOMORROW
+
+
+async def test_weekday_fires_once_a_week(db):
+    await _rem(db, await _user(db), weekday=DAY.weekday())
+    bot = FakeBot()
+    assert await _tick(db, bot, at(9, 30)) == 1
+    assert await _tick(db, bot, at(9, 30, TOMORROW)) == 0
+    for d in range(2, 7):
+        assert await _tick(db, bot, at(9, 30, DAY + timedelta(days=d))) == 0
+    assert await _tick(db, bot, at(9, 30, DAY + timedelta(days=7))) == 1
+    assert len(bot.calls) == 2
+
+
+async def test_weekday_spill_keeps_the_day_of_the_occurrence(db):
+    uid = await _user(db)
+    rid = await _rem(db, uid, minute=23 * 60 + 50, weekday=DAY.weekday(), last_sent_on=YESTERDAY)
+    bot = FakeBot()
+    assert await _tick(db, bot, at(0, 10, TOMORROW)) == 1  # 23:50 of DAY, sent at 00:10 of TOMORROW
+    assert await _last_sent(db, rid) == DAY
+
+
+async def test_weekday_spill_of_another_day_not_sent(db):
+    # Due day is DAY (Tuesday); the reminder is for Wednesday, which is the day "now" falls on.
+    rid = await _rem(db, await _user(db), minute=23 * 60 + 50, weekday=TOMORROW.weekday(), last_sent_on=YESTERDAY)
+    bot = FakeBot()
+    assert await _tick(db, bot, at(0, 10, TOMORROW)) == 0
+    assert bot.calls == [] and await _last_sent(db, rid) == YESTERDAY
+
+
+# ---- kind=advice ----
+
+
+def _fake_advice(monkeypatch, result="СОВЕТ"):
+    """Replace advice.generate; returns the list of recorded calls (user, now_utc)."""
+    calls: list[tuple[User, datetime]] = []
+
+    async def fake(session, user, settings, llm, tz, now_utc):
+        calls.append((user, now_utc))
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(advice_module, "generate", fake)
+    return calls
+
+
+async def test_advice_is_generated_and_sent(db, monkeypatch):
+    calls = _fake_advice(monkeypatch)
+    uid = await _user(db)
+    rid = await _rem(db, uid, kind="advice", text=None)
+    bot = FakeBot()
+    assert await _tick(db, bot, at(9, 30), llm=object()) == 1
+    assert bot.calls == [(42, "СОВЕТ", None)]
+    assert len(calls) == 1
+    assert calls[0][0].id == uid and calls[0][1] == at(9, 30)
+    assert await _last_sent(db, rid) == DAY
+
+
+async def test_advice_without_llm_is_skipped(db, monkeypatch):
+    calls = _fake_advice(monkeypatch)
+    rid = await _rem(db, await _user(db), kind="advice", text=None)
+    bot = FakeBot()
+    assert await _tick(db, bot, at(9, 30), llm=None) == 0
+    assert bot.calls == [] and calls == []
+    assert await _last_sent(db, rid) is None
+
+
+async def test_advice_llm_error_does_not_claim_and_retries(db, monkeypatch):
+    _fake_advice(monkeypatch, LLMError("model is down"))
+    rid = await _rem(db, await _user(db), kind="advice", text=None)
+    bot = FakeBot()
+    assert await _tick(db, bot, at(9, 30), llm=object()) == 0
+    assert bot.calls == [] and await _last_sent(db, rid) is None
+    _fake_advice(monkeypatch)
+    assert await _tick(db, bot, at(9, 31), llm=object()) == 1
+    assert bot.calls == [(42, "СОВЕТ", None)]
+    assert await _last_sent(db, rid) == DAY
+
+
+async def test_advice_is_sent_after_quick_reminders(db, monkeypatch):
+    _fake_advice(monkeypatch)
+    uid = await _user(db)
+    await _rem(db, uid, kind="advice", text=None)  # created first, lower id
+    await _rem(db, uid, text="Креатин")
+    bot = FakeBot()
+    assert await _tick(db, bot, at(9, 30), llm=object()) == 2
+    assert [c[1] for c in bot.calls] == ["Креатин", "СОВЕТ"]
+
+
+async def test_claim_rechecks_weekday(db, monkeypatch):
+    rid = await _rem(db, await _user(db), weekday=DAY.weekday())
+    await _race_build(monkeypatch, db, rid, weekday=OTHER_DAY)
+    bot = FakeBot()
+    assert await _tick(db, bot, at(9, 30)) == 0
+    assert bot.calls == [] and await _last_sent(db, rid) is None

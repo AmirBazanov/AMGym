@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -162,7 +162,8 @@ async def test_reminder_create_and_list(client, auth):
     r = await client.post("/api/reminders", json={"time": "09:30", "kind": "text", "text": "Креатин"}, headers=auth)
     assert r.status_code == 201
     body = r.json()
-    assert set(body) == {"id", "time", "kind", "text", "enabled"}
+    assert set(body) == {"id", "time", "kind", "text", "enabled", "weekday"}
+    assert body["weekday"] is None
     assert body["time"] == "09:30" and body["kind"] == "text" and body["text"] == "Креатин"
     assert body["enabled"] is True
     listed = (await client.get("/api/reminders", headers=auth)).json()
@@ -249,7 +250,7 @@ async def test_reminder_other_user_isolated(tmp_path, make_client):
     async with make_client(make_settings(tmp_path, allowed_user_ids=[42, 99])) as c:
         rid = (await c.post("/api/reminders", json={"time": "09:30", "kind": "text", "text": "моё"}, headers=one)).json()["id"]
         assert (await c.get("/api/reminders", headers=two)).json() == []
-        assert (await c.patch(f"/api/reminders/{rid}", json={"enabled": False}, headers=two)).status_code == 404
+        assert (await c.patch(f"/api/reminders/{rid}", json={"enabled": False, "weekday": None}, headers=two)).status_code == 404
         assert (await c.delete(f"/api/reminders/{rid}", headers=two)).status_code == 404
         mine = (await c.get("/api/reminders", headers=one)).json()
         assert len(mine) == 1 and mine[0]["enabled"] is True and mine[0]["text"] == "моё"
@@ -260,7 +261,7 @@ async def test_reminder_other_user_isolated(tmp_path, make_client):
 
 
 async def test_reminder_unknown_id_404(client, auth):
-    assert (await client.patch("/api/reminders/9999", json={"enabled": False}, headers=auth)).status_code == 404
+    assert (await client.patch("/api/reminders/9999", json={"enabled": False, "weekday": None}, headers=auth)).status_code == 404
     assert (await client.delete("/api/reminders/9999", headers=auth)).status_code == 404
 
 
@@ -271,13 +272,13 @@ async def test_reminder_requires_auth(client):
 
 async def test_reminder_patch_changes_only_given_fields(client, auth):
     rid = (await client.post("/api/reminders", json={"time": "09:30", "kind": "text", "text": "Креатин"}, headers=auth)).json()["id"]
-    r = await client.patch(f"/api/reminders/{rid}", json={"enabled": False}, headers=auth)
+    r = await client.patch(f"/api/reminders/{rid}", json={"enabled": False, "weekday": None}, headers=auth)
     assert r.status_code == 200
-    assert r.json() == {"id": rid, "time": "09:30", "kind": "text", "text": "Креатин", "enabled": False}
+    assert r.json() == {"id": rid, "time": "09:30", "kind": "text", "text": "Креатин", "enabled": False, "weekday": None}
     r = await client.patch(f"/api/reminders/{rid}", json={"time": "10:15"}, headers=auth)
-    assert r.json() == {"id": rid, "time": "10:15", "kind": "text", "text": "Креатин", "enabled": False}
+    assert r.json() == {"id": rid, "time": "10:15", "kind": "text", "text": "Креатин", "enabled": False, "weekday": None}
     r = await client.patch(f"/api/reminders/{rid}", json={"text": "  Протеин "}, headers=auth)
-    assert r.json() == {"id": rid, "time": "10:15", "kind": "text", "text": "Протеин", "enabled": False}
+    assert r.json() == {"id": rid, "time": "10:15", "kind": "text", "text": "Протеин", "enabled": False, "weekday": None}
     assert (await client.get("/api/reminders", headers=auth)).json() == [r.json()]
 
 
@@ -354,3 +355,159 @@ async def test_reminder_patch_rearms_last_sent_on(client, auth, db, settings):
     assert (await client.patch(f"/api/reminders/{rid}", json={"enabled": True}, headers=auth)).status_code == 200
     async with db() as s:
         assert await s.scalar(select(Reminder.last_sent_on).where(Reminder.id == rid)) is not None
+
+
+# ---- profile ----
+
+PROFILE_KEYS = {"weightKg", "heightCm", "birthYear", "goal", "about"}
+
+
+async def _profile(client, auth) -> dict:
+    return (await client.get("/api/state", headers=auth)).json()["profile"]
+
+
+async def test_profile_empty_for_new_user(client, auth):
+    assert await _profile(client, auth) == dict.fromkeys(PROFILE_KEYS)
+
+
+async def test_put_profile_saves_rounds_and_trims(client, auth):
+    body = {"weightKg": 82.46, "heightCm": 180, "birthYear": 1998, "goal": "mass", "about": "  болит плечо  "}
+    r = await client.put("/api/settings", json={"profile": body}, headers=auth)
+    assert r.status_code == 200
+    expected = {"weightKg": 82.5, "heightCm": 180, "birthYear": 1998, "goal": "mass", "about": "болит плечо"}
+    assert r.json()["profile"] == expected
+    assert await _profile(client, auth) == expected
+
+
+async def test_put_profile_is_partial(client, auth):
+    full = {"weightKg": 80, "heightCm": 180, "birthYear": 1998, "goal": "cut", "about": "заметка"}
+    await client.put("/api/settings", json={"profile": full}, headers=auth)
+    await client.put("/api/settings", json={"profile": {"heightCm": 181}}, headers=auth)
+    assert await _profile(client, auth) == {**full, "weightKg": 80.0, "heightCm": 181}
+    await client.put("/api/settings", json={"profile": {"weightKg": None}}, headers=auth)
+    assert await _profile(client, auth) == {**full, "weightKg": None, "heightCm": 181}
+    r = await client.put("/api/settings", json={"restSeconds": 120}, headers=auth)
+    assert r.status_code == 200 and r.json()["restSeconds"] == 120
+    assert await _profile(client, auth) == {**full, "weightKg": None, "heightCm": 181}
+
+
+async def test_put_profile_blank_about_stores_null(client, auth):
+    await client.put("/api/settings", json={"profile": {"about": "что-то"}}, headers=auth)
+    r = await client.put("/api/settings", json={"profile": {"about": "   "}}, headers=auth)
+    assert r.status_code == 200 and r.json()["profile"]["about"] is None
+    assert (await _profile(client, auth))["about"] is None
+
+
+def _bad_profiles() -> list[dict]:
+    year = datetime.now(UTC).year
+    return [
+        {"weightKg": 29.9}, {"weightKg": 300.1},
+        {"heightCm": 119}, {"heightCm": 251},
+        {"birthYear": 1929}, {"birthYear": year - 9},
+        {"goal": "bulk"}, {"about": "x" * 501},
+    ]
+
+
+@pytest.mark.parametrize("bad", _bad_profiles(), ids=lambda b: f"{next(iter(b))}={str(next(iter(b.values())))[:6]}")
+async def test_put_profile_out_of_range_422_and_nothing_changed(client, auth, bad):
+    before = await _profile(client, auth)
+    r = await client.put("/api/settings", json={"profile": bad}, headers=auth)
+    assert r.status_code == 422
+    assert await _profile(client, auth) == before
+
+
+def _good_profiles() -> list[dict]:
+    year = datetime.now(UTC).year
+    return [
+        {"weightKg": 30}, {"weightKg": 300},
+        {"heightCm": 120}, {"heightCm": 250},
+        {"birthYear": 1930}, {"birthYear": year - 10},
+        {"about": "x" * 500},
+        *({"goal": g} for g in ("mass", "cut", "strength", "health")),
+    ]
+
+
+@pytest.mark.parametrize("good", _good_profiles(), ids=lambda b: f"{next(iter(b))}={str(next(iter(b.values())))[:6]}")
+async def test_put_profile_boundaries_ok(client, auth, good):
+    r = await client.put("/api/settings", json={"profile": good}, headers=auth)
+    assert r.status_code == 200
+    key, value = next(iter(good.items()))
+    assert r.json()["profile"][key] == value
+    assert (await _profile(client, auth))[key] == value
+
+
+# ---- reminders: weekday and kind=advice ----
+
+
+async def _mk(client, auth, **body) -> dict:
+    body = {"time": "09:30", "kind": "text", "text": "Креатин", **body}
+    r = await client.post("/api/reminders", json=body, headers=auth)
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+async def test_reminder_advice_ignores_text_and_keeps_weekday(client, auth):
+    r = await client.post(
+        "/api/reminders", json={"time": "10:00", "kind": "advice", "text": "игнор", "weekday": 6}, headers=auth
+    )
+    assert r.status_code == 201
+    out = r.json()
+    assert out["kind"] == "advice" and out["text"] is None and out["weekday"] == 6
+    assert (await client.get("/api/reminders", headers=auth)).json() == [out]
+
+
+async def test_reminder_weekday_defaults_to_every_day(client, auth):
+    assert (await _mk(client, auth))["weekday"] is None
+
+
+@pytest.mark.parametrize("bad", [-1, 7, "mon"])
+async def test_reminder_weekday_invalid_422(client, auth, bad):
+    r = await client.post(
+        "/api/reminders", json={"time": "09:30", "kind": "text", "text": "x", "weekday": bad}, headers=auth
+    )
+    assert r.status_code == 422
+    assert (await client.get("/api/reminders", headers=auth)).json() == []
+    created = await _mk(client, auth, weekday=3)
+    r = await client.patch(f"/api/reminders/{created['id']}", json={"weekday": bad}, headers=auth)
+    assert r.status_code == 422
+    assert (await client.get("/api/reminders", headers=auth)).json() == [created]
+
+
+async def test_reminder_patch_weekday_set_reset_keep(client, auth):
+    rid = (await _mk(client, auth))["id"]
+    url = f"/api/reminders/{rid}"
+    assert (await client.patch(url, json={"weekday": 2}, headers=auth)).json()["weekday"] == 2
+    assert (await client.patch(url, json={}, headers=auth)).json()["weekday"] == 2
+    assert (await client.patch(url, json={"enabled": False}, headers=auth)).json()["weekday"] == 2
+    assert (await client.patch(url, json={"weekday": None}, headers=auth)).json()["weekday"] is None
+    assert (await client.get("/api/reminders", headers=auth)).json()[0]["weekday"] is None
+
+
+async def test_reminder_patch_text_to_advice_drops_text(client, auth):
+    rid = (await _mk(client, auth))["id"]
+    r = await client.patch(f"/api/reminders/{rid}", json={"kind": "advice"}, headers=auth)
+    assert r.status_code == 200 and r.json()["kind"] == "advice" and r.json()["text"] is None
+
+
+async def test_reminder_patch_advice_to_text_without_text_422(client, auth):
+    rid = (await _mk(client, auth, kind="advice", text=None))["id"]
+    assert (await client.patch(f"/api/reminders/{rid}", json={"kind": "text"}, headers=auth)).status_code == 422
+    after = (await client.get("/api/reminders", headers=auth)).json()[0]
+    assert after["kind"] == "advice" and after["text"] is None
+    ok = await client.patch(f"/api/reminders/{rid}", json={"kind": "text", "text": "Вода"}, headers=auth)
+    assert ok.status_code == 200 and ok.json()["text"] == "Вода"
+
+
+async def test_reminder_patch_weekday_rearms_last_sent_on(client, auth, db, settings):
+    # Changing the weekday must not fire today's already-passed time at once.
+    tz = ZoneInfo(settings.timezone)
+    rid = (await _mk(client, auth, time="00:00", kind="nutrition", text=None))["id"]
+    async with db() as s:
+        r = await s.get(Reminder, rid)
+        r.last_sent_on = None
+        await s.commit()
+    before = datetime.now(tz).date()
+    assert (await client.patch(f"/api/reminders/{rid}", json={"weekday": 3}, headers=auth)).status_code == 200
+    after = datetime.now(tz).date()
+    async with db() as s:
+        assert await s.scalar(select(Reminder.last_sent_on).where(Reminder.id == rid)) in (before, after)

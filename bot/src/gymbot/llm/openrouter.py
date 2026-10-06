@@ -45,6 +45,20 @@ def extract_json(content: str) -> dict:
     return first
 
 
+_THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_FENCE = re.compile(r"^```[\w-]*\s*$", re.MULTILINE)
+_HEADING = re.compile(r"^#{1,6}\s*", re.MULTILINE)
+
+
+def clean_text(content: str) -> str:
+    """Plain text for a Telegram message sent without parse_mode: no reasoning, fences or Markdown marks."""
+    text = _THINK.sub("", content)
+    text = _FENCE.sub("", text)
+    text = _HEADING.sub("", text)
+    text = text.replace("**", "").replace("__", "")
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 def _rejects_json_mode(resp: httpx.Response) -> bool:
     """A 400 about response_format, not e.g. about context length (that one is the next model's job)."""
     text = resp.text.lower()
@@ -62,8 +76,16 @@ class OpenRouterClient:
     async def aclose(self) -> None:
         await self.http.aclose()
 
-    async def _complete(self, model: str, messages: list[dict[str, str]], json_mode: bool) -> str:
-        body: dict = {"model": model, "messages": messages, "temperature": 0}
+    async def _complete(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        json_mode: bool,
+        *,
+        temperature: float = 0,
+        use_reasoning: bool = True,
+    ) -> str:
+        body: dict = {"model": model, "messages": messages, "temperature": temperature}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         resp = await self.http.post(
@@ -76,8 +98,40 @@ class OpenRouterClient:
         )
         resp.raise_for_status()
         message = resp.json()["choices"][0]["message"]
+        if not use_reasoning:
+            return message.get("content") or ""
         # Reasoning models sometimes leave `content` empty and put the answer after their reasoning.
         return message.get("content") or message.get("reasoning") or ""
+
+    async def complete_text(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
+        """Plain text generation (no JSON mode) with the same model fallback as parse_message.
+
+        Empty `content` counts as a failure: `reasoning` is the model's chain of thought, not an answer.
+        """
+        if not self.s.openrouter_api_key:
+            raise LLMError("OPENROUTER_API_KEY is not set")
+        last_err: Exception | None = None
+        for model in [self.s.openrouter_model, *self.s.openrouter_fallback_models]:
+            for _attempt in range(2):
+                try:
+                    raw = await self._complete(model, messages, False, temperature=temperature, use_reasoning=False)
+                    text = clean_text(raw)
+                    if not text:
+                        raise LLMError("empty answer")
+                    return text
+                except httpx.HTTPStatusError as e:
+                    log.warning("openrouter %s failed: %s", model, e)
+                    last_err = e
+                    if e.response.status_code in (400, 402, 404, 429):  # bad request / quota / model gone
+                        break
+                except LLMError as e:
+                    log.warning("openrouter %s failed: %s", model, e)
+                    last_err = e
+                    break  # an empty answer is unlikely to change on a retry of the same model
+                except (httpx.HTTPError, KeyError, TypeError, ValueError) as e:
+                    log.warning("openrouter %s failed: %s", model, e)
+                    last_err = e
+        raise LLMError(f"all models failed: {last_err}")
 
     async def parse_message(
         self, text: str, catalog: list[str], history: list[tuple[str, str]] | None = None

@@ -17,6 +17,7 @@ from gymbot.config import Settings
 from gymbot.db.models import FoodEntry, Reminder, User, UserProgram
 from gymbot.db.session import Sessionmaker
 from gymbot.services import nutrition as nut
+from gymbot.services import profile as prof
 from gymbot.services import reminders as rem
 from gymbot.services import workouts as ws
 from gymbot.services.access import is_allowed
@@ -31,6 +32,7 @@ class StateOut(BaseModel):
     startDate: date
     restSeconds: int
     targets: nut.Targets
+    profile: prof.Profile
     history: list[ws.WorkoutOut]
 
 
@@ -48,11 +50,13 @@ class SettingsIn(BaseModel):
     startDate: date | None = None
     restSeconds: int | None = Field(default=None, ge=15, le=600)
     targets: TargetsIn | None = None
+    profile: prof.ProfileIn | None = None
 
 
 # [0-9], not \d: pydantic's regex engine treats \d as any Unicode digit.
 TIME_PATTERN = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"
-ReminderKind = Literal["text", "nutrition"]
+ReminderKind = Literal["text", "nutrition", "advice"]
+Weekday = Annotated[int, Field(ge=0, le=6)]  # 0=Mon..6=Sun in TIMEZONE
 
 
 class ReminderOut(BaseModel):
@@ -61,6 +65,7 @@ class ReminderOut(BaseModel):
     kind: ReminderKind
     text: str | None
     enabled: bool
+    weekday: int | None  # None = every day
 
 
 class ReminderIn(BaseModel):
@@ -68,6 +73,7 @@ class ReminderIn(BaseModel):
     kind: ReminderKind
     text: str | None = Field(default=None, max_length=200)
     enabled: bool = True
+    weekday: Weekday | None = None
 
 
 class ReminderPatch(BaseModel):
@@ -77,17 +83,23 @@ class ReminderPatch(BaseModel):
     kind: ReminderKind | None = None
     text: str | None = Field(default=None, max_length=200)
     enabled: bool | None = None
+    weekday: Weekday | None = None  # null = every day
 
 
 def reminder_out(r: Reminder) -> ReminderOut:
     return ReminderOut(
-        id=r.id, time=rem.minute_to_hhmm(r.minute_of_day), kind=r.kind, text=r.text, enabled=r.enabled  # type: ignore[arg-type]
+        id=r.id,
+        time=rem.minute_to_hhmm(r.minute_of_day),
+        kind=r.kind,  # type: ignore[arg-type]
+        text=r.text,
+        enabled=r.enabled,
+        weekday=r.weekday,
     )
 
 
 def normalize_reminder_text(kind: str, text: str | None) -> str | None:
-    """kind=text needs 1..200 characters of text; kind=nutrition stores no text."""
-    if kind == "nutrition":
+    """kind=text needs 1..200 characters of text; nutrition and advice build their text at send time."""
+    if kind != "text":
         return None
     text = (text or "").strip()
     if not text:
@@ -137,6 +149,7 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
             startDate=up.started_on,
             restSeconds=user.rest_seconds,
             targets=nut.user_targets(user),
+            profile=prof.user_profile(user),
             history=history,
         )
 
@@ -158,6 +171,8 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
             user.rest_seconds = body.restSeconds
         if body.targets is not None:
             nut.set_targets(user, body.targets.model_dump(exclude_unset=True))
+        if body.profile is not None:
+            prof.set_profile(user, body.profile.model_dump(exclude_unset=True))
         if body.programId or body.startDate:
             try:
                 up = await set_program(
@@ -240,6 +255,7 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
             kind=body.kind,
             text=normalize_reminder_text(body.kind, body.text),
             enabled=body.enabled,
+            weekday=body.weekday,
             # A time that has already passed today fires from tomorrow, not right away.
             last_sent_on=rem.initial_last_sent(minute, datetime.now(UTC), tz),
         )
@@ -267,6 +283,9 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
             minute = rem.hhmm_to_minute(changes["time"])
             rearm = minute != r.minute_of_day
             r.minute_of_day = minute
+        if "weekday" in changes:  # null is a real value here: every day
+            rearm = rearm or changes["weekday"] != r.weekday
+            r.weekday = changes["weekday"]
         if changes.get("enabled") is not None:
             rearm = rearm or (changes["enabled"] and not r.enabled)
             r.enabled = changes["enabled"]

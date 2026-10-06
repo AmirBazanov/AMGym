@@ -60,7 +60,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
   color: inherit;
 }
@@ -934,4 +935,54 @@ table.nutrition-table td.over {
   font-size: 17px;
   font-weight: 500;
   padding: 0 12px;
+}
+
+/* ---------- profile and weekday picker ---------- */
+.row.profile-stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.segmented.profile-goal {
+  background: var(--bg);
+}
+.segmented.profile-goal button {
+  height: 44px;
+}
+.field.profile-about-field {
+  height: auto;
+  min-height: 92px;
+  padding: 10px 12px;
+  text-align: left;
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.35;
+  resize: vertical;
+}
+.weekday-picker {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+.weekday-picker button {
+  height: 44px;
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 500;
+}
+.weekday-picker button.daily {
+  grid-column: 1 / -1;
+}
+.weekday-picker button.active {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.reminder-day {
+  margin-right: 5px;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--hint);
 }

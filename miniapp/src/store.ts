@@ -2,7 +2,7 @@
 // Shapes mirror the future server models (Workout -> exercises -> sets) so the swap is mechanical.
 import { useSyncExternalStore } from 'react'
 import { getDay, getProgram, isDropset, programPosition, type ProgramExercise } from './program'
-import { api, ApiError, EMPTY_TARGETS, inTelegram, type Targets } from './api'
+import { api, ApiError, EMPTY_PROFILE, EMPTY_TARGETS, inTelegram, type Profile, type Targets } from './api'
 import { buildDemoHistory, demoStartDate } from './mock'
 import { lastSameSession, suggestWeight } from './progression'
 
@@ -46,6 +46,8 @@ export interface State {
   rejected: Workout[]
   // Daily nutrition targets (a setting like restSeconds). Food entries themselves are never cached here.
   targets: Targets
+  // Profile for the bot's AI advice (weight, height, goal...). Same server-first rules as targets.
+  profile: Profile
 }
 
 interface ServerState {
@@ -54,6 +56,11 @@ interface ServerState {
   restSeconds: number
   history: Workout[]
   targets?: Targets // absent on servers older than the nutrition API
+  profile?: Partial<Profile> // absent on servers older than the profile API
+}
+
+type SettingsPatch = Partial<Pick<State, 'programId' | 'startDate' | 'restSeconds' | 'targets'>> & {
+  profile?: Partial<Profile> // partial update: a missing key is kept, null clears it
 }
 
 const KEY = 'gymapp.v1'
@@ -74,13 +81,18 @@ function initialState(): State {
     pending: [],
     rejected: [],
     targets: EMPTY_TARGETS,
+    profile: EMPTY_PROFILE,
   }
 }
 
 function load(): State {
   try {
     const raw = localStorage.getItem(KEY)
-    if (raw) return { ...initialState(), ...(JSON.parse(raw) as State) }
+    if (raw) {
+      const saved = JSON.parse(raw) as Partial<State>
+      // Nested merge: storage written before the profile existed (or with fewer keys) still loads.
+      return { ...initialState(), ...saved, profile: { ...EMPTY_PROFILE, ...saved.profile } }
+    }
   } catch {
     // Storage blocked or corrupted: start from the demo state.
   }
@@ -307,6 +319,19 @@ export const actions = {
     return res?.targets ? 'saved' : 'failed'
   },
 
+  /**
+   * Save the changed profile fields (partial update). Same contract as setTargets: in server mode
+   * the store only changes from the server's answer, so a failed save keeps the previous profile.
+   */
+  async setProfile(patch: Partial<Profile>): Promise<'local' | 'saved' | 'failed'> {
+    if (state.mode !== 'server') {
+      commit({ ...state, profile: { ...state.profile, ...patch } })
+      return 'local'
+    }
+    const res = await pushSettings({ profile: patch })
+    return res?.profile ? 'saved' : 'failed'
+  },
+
   resetDemo() {
     const startDate = demoStartDate()
     commit({ ...state, startDate, history: buildDemoHistory(getProgram(state.programId), startDate) })
@@ -333,6 +358,7 @@ function applyServer(server: ServerState) {
     startDate: server.startDate,
     restSeconds: server.restSeconds,
     targets: server.targets ?? state.targets,
+    profile: server.profile ? { ...EMPTY_PROFILE, ...server.profile } : state.profile,
     history: [...server.history, ...pending, ...state.rejected].sort((a, b) => a.startedAt.localeCompare(b.startedAt)),
     pending,
   })
@@ -370,9 +396,7 @@ export async function flushPending(): Promise<void> {
 }
 
 /** Resolves to the server state after the update, or null when not in server mode or the request failed. */
-function pushSettings(
-  patch: Partial<Pick<State, 'programId' | 'startDate' | 'restSeconds' | 'targets'>>,
-): Promise<ServerState | null> {
+function pushSettings(patch: SettingsPatch): Promise<ServerState | null> {
   if (state.mode !== 'server') return Promise.resolve(null)
   return api<ServerState>('/settings', { method: 'PUT', body: JSON.stringify(patch) })
     .then((server) => {
