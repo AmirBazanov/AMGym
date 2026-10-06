@@ -102,7 +102,7 @@ export function deleteFood(id: number): Promise<void> {
 
 // ---- Reminders (contract: same spec, section 2). Never cached offline: loaded when the block is shown. ----
 
-export type ReminderKind = 'text' | 'nutrition' | 'advice'
+export type ReminderKind = 'text' | 'nutrition' | 'advice' | 'checkin'
 
 /**
  * Reminder sent by the bot at `time` (HH:MM, server TIMEZONE), every day or only on `weekday`
@@ -142,4 +142,77 @@ export function updateReminder(id: number, patch: Partial<ReminderInput>): Promi
 
 export function deleteReminder(id: number): Promise<void> {
   return api<void>(`/reminders/${id}`, { method: 'DELETE' })
+}
+
+// ---- Wellbeing: sleep, energy, mood and pains the bot parsed from chat. Never cached offline. ----
+
+export interface Pain {
+  place: string
+  severity: number | null // 1..5
+}
+
+export interface WellbeingEntry {
+  id: number
+  notedAt: string // ISO, UTC
+  date: string // YYYY-MM-DD in the server TIMEZONE
+  sleepHours: number | null
+  sleepQuality: number | null // 1..5
+  energy: number | null // 1..5
+  mood: number | null // 1..5
+  pains: Pain[]
+  note: string | null
+}
+
+/** Entries of the last `days` days, newest first (by notedAt). */
+export function getWellbeing(days = 14): Promise<WellbeingEntry[]> {
+  return api<WellbeingEntry[]>(`/wellbeing?days=${days}`)
+}
+
+/** 404 when the entry is already gone or belongs to someone else. */
+export function deleteWellbeing(id: number): Promise<void> {
+  return api<void>(`/wellbeing/${id}`, { method: 'DELETE' })
+}
+
+// ---- Facts the bot remembers about the user (mixed into parsing and advice). Never cached offline. ----
+
+export type FactCategory = 'food' | 'training' | 'health' | 'schedule' | 'other'
+
+export interface Fact {
+  id: number
+  text: string
+  category: FactCategory
+  createdAt: string // ISO, UTC
+  active: boolean
+}
+
+export interface FactInput {
+  text: string
+  category?: FactCategory // server default: "other"
+}
+
+export interface FactPatch {
+  text?: string
+  category?: FactCategory
+  active?: boolean
+}
+
+export const FACT_TEXT_MAX = 200
+/** More active facts than this: 409 on create and on switching one back on. */
+export const FACTS_ACTIVE_MAX = 50
+
+/** Newest first (by createdAt). */
+export function getFacts(): Promise<Fact[]> {
+  return api<Fact[]>('/facts')
+}
+
+export function createFact(body: FactInput): Promise<Fact> {
+  return api<Fact>('/facts', { method: 'POST', body: JSON.stringify(body) })
+}
+
+export function updateFact(id: number, patch: FactPatch): Promise<Fact> {
+  return api<Fact>(`/facts/${id}`, { method: 'PATCH', body: JSON.stringify(patch) })
+}
+
+export function deleteFact(id: number): Promise<void> {
+  return api<void>(`/facts/${id}`, { method: 'DELETE' })
 }

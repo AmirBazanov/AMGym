@@ -59,6 +59,10 @@ describe('reminderTitle', () => {
     expect(KIND_TITLE.nutrition).toBe('Сводка КБЖУ')
   })
 
+  it('uses a fixed title for the wellbeing check-in', () => {
+    expect(reminderTitle({ kind: 'checkin', text: null })).toBe('Опрос самочувствия')
+  })
+
   it('ignores stray text on non-text kinds', () => {
     expect(reminderTitle({ kind: 'nutrition', text: 'x' })).toBe('Сводка КБЖУ')
   })
@@ -72,5 +76,9 @@ describe('KIND_DEFAULTS', () => {
   it('suggests a daily morning slot for text and nutrition', () => {
     expect(KIND_DEFAULTS.text).toEqual({ time: '09:00', weekday: null })
     expect(KIND_DEFAULTS.nutrition).toEqual({ time: '09:00', weekday: null })
+  })
+
+  it('suggests a daily 08:00 slot for the check-in', () => {
+    expect(KIND_DEFAULTS.checkin).toEqual({ time: '08:00', weekday: null })
   })
 })

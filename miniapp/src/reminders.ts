@@ -8,13 +8,15 @@ const WEEKLY = ['по понедельникам', 'по вторникам', '�
 export const KIND_TITLE: Record<Exclude<ReminderKind, 'text'>, string> = {
   nutrition: 'Сводка КБЖУ',
   advice: 'Советы недели',
+  checkin: 'Опрос самочувствия',
 }
 
-/** Defaults offered for a new reminder of each kind (weekly advice fits the end of the week). */
+/** Defaults offered for a new reminder of each kind (weekly advice fits the end of the week, the check-in the morning). */
 export const KIND_DEFAULTS: Record<ReminderKind, { time: string; weekday: number | null }> = {
   text: { time: '09:00', weekday: null },
   nutrition: { time: '09:00', weekday: null },
   advice: { time: '19:00', weekday: 6 },
+  checkin: { time: '08:00', weekday: null },
 }
 
 export function weekdayShort(weekday: number | null | undefined): string {

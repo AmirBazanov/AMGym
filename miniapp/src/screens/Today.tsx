@@ -5,6 +5,7 @@ import { ExerciseSheet } from '../components/ExerciseSheet'
 import { IconCheck, IconChevron, IconPlus } from '../components/icons'
 import { NumField } from '../components/NumField'
 import { Sheet } from '../components/Sheet'
+import { useWellbeing, useWellbeingSheet, WellbeingDaySheet } from '../components/Wellbeing'
 import {
   capitalize,
   dayFocus,
@@ -24,6 +25,7 @@ import { suggestWeight } from '../progression'
 import { actions, currentRun, isStarted, lastSetsFor, useStore, type Workout } from '../store'
 import { formatKg } from '../stats'
 import { confirm, haptic } from '../telegram'
+import { entriesCount, formatWellbeing, groupByDate, localISODate } from '../wellbeing'
 
 /** Why the day's weight is what it is, under the exercise name. */
 function SuggestHint({ history, exercise }: { history: Workout[]; exercise: ProgramExercise }) {
@@ -110,6 +112,8 @@ function DayPreview() {
         </div>
       </div>
 
+      <WellbeingToday />
+
       <div className="spacer" />
       <div className="chips" ref={chipsRef}>
         {program.weeks.map((w) => (
@@ -185,6 +189,42 @@ function DayPreview() {
       </div>
 
       {sheet && <ExerciseSheet name={sheet} onClose={() => setSheet(null)} />}
+    </>
+  )
+}
+
+/**
+ * Today's wellbeing from the chat, or a quiet hint; nothing while loading or without access (401).
+ * Shown under the hero of both the day preview and the prepared or running workout.
+ */
+function WellbeingToday({ hint = true }: { hint?: boolean }) {
+  const wb = useWellbeing()
+  const sheet = useWellbeingSheet(wb.entries)
+  if (!wb.entries) return null
+  const today = localISODate()
+  const entries = groupByDate(wb.entries).find((d) => d.date === today)?.entries
+  if (!entries) return hint ? <p className="hint wb-hint">Напиши боту, как спал и что болит</p> : null
+  const latest = entries[0]
+  return (
+    <>
+      <button
+        type="button"
+        className="card wb-card"
+        onClick={() => {
+          haptic.tap()
+          sheet.open(today)
+        }}
+      >
+        <div className="grow">
+          <div className="eyebrow">
+            Самочувствие сегодня
+            {entries.length > 1 && <span className="wb-count"> · {entriesCount(entries.length)}</span>}
+          </div>
+          <div className="wb-text">{formatWellbeing(latest)}</div>
+        </div>
+        <IconChevron />
+      </button>
+      <WellbeingDaySheet wb={wb} sheet={sheet} />
     </>
   )
 }
@@ -288,6 +328,8 @@ function ActiveWorkout({ workout }: { workout: Workout }) {
           </span>
         </div>
       </div>
+      {/* Also during the workout: a sore shoulder matters when picking the weight. The hint only before it starts. */}
+      <WellbeingToday hint={!started} />
 
       {workout.exercises.map((ex, ei) => {
         const pe = day?.exercises.find((e) => e.name === ex.name)

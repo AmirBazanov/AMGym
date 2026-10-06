@@ -25,11 +25,14 @@ import { BarSeries } from '../components/LazyCharts'
 import { IconChevronLeft, IconChevronRight, IconClose, IconPlus } from '../components/icons'
 import { NumField } from '../components/NumField'
 import { Sheet } from '../components/Sheet'
+import { Switch } from '../components/Switch'
 import { capitalize, WEEKDAY_SHORT } from '../program'
 import { ABOUT_MAX, GOALS, profileErrors, profileLimits, profilePatch } from '../profile'
 import { KIND_DEFAULTS, REMINDER_WEEKDAYS, reminderTitle, reminderWhen, repeatPhrase, weekdayShort } from '../reminders'
 import { actions, getState, useStore } from '../store'
 import { confirm, haptic } from '../telegram'
+import { useRemote } from '../useRemote'
+import { Facts } from './Facts'
 
 // Food data and reminders are never cached in the offline store: every view loads them from the server when shown.
 
@@ -96,44 +99,6 @@ export function Nutrition() {
       {view === 'settings' && <Settings />}
     </>
   )
-}
-
-// ---------- data loading ----------
-
-interface Remote<T> {
-  data: T | undefined
-  error: unknown
-  loading: boolean
-  reload: () => void
-}
-
-/** Loads `key` with `load`; keeps showing the last data of the same key while reloading. */
-function useRemote<T>(key: string, load: () => Promise<T>): Remote<T> {
-  const [res, setRes] = useState<{ key: string; data?: T; error?: unknown } | null>(null)
-  const [nonce, setNonce] = useState(0)
-
-  useEffect(() => {
-    let alive = true
-    load().then(
-      (data) => alive && setRes({ key, data }),
-      (error: unknown) => alive && setRes({ key, error }),
-    )
-    return () => {
-      alive = false
-    }
-    // `load` is rebuilt every render; `key` fully describes the request.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, nonce])
-
-  // The app may stay open across midnight or while food is logged in the chat: refresh on return.
-  useEffect(() => {
-    const onVisible = () => document.visibilityState === 'visible' && setNonce((n) => n + 1)
-    document.addEventListener('visibilitychange', onVisible)
-    return () => document.removeEventListener('visibilitychange', onVisible)
-  }, [])
-
-  const cur = res?.key === key ? res : null
-  return { data: cur?.data, error: cur?.error, loading: !cur, reload: () => setNonce((n) => n + 1) }
 }
 
 function LoadError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
@@ -760,6 +725,8 @@ function Settings() {
     <>
       <ProfileForm />
 
+      <Facts />
+
       <h2>Норма в день</h2>
       <div className="list">
         {MACROS.map((m) => (
@@ -962,21 +929,6 @@ function RemindersError({ error, onRetry }: { error: unknown; onRetry: () => voi
   )
 }
 
-function Switch({ on, disabled, label, onToggle }: { on: boolean; disabled?: boolean; label: string; onToggle: () => void }) {
-  return (
-    <button
-      className={`switch ${on ? 'on' : ''}`}
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      disabled={disabled}
-      onClick={onToggle}
-    >
-      <span className="switch-track" />
-    </button>
-  )
-}
-
 function saveError(err: unknown): string {
   const status = err instanceof ApiError ? err.status : null
   if (status === 401 || status === 403) return 'Не получилось войти. Закрой дневник и открой его заново из бота.'
@@ -1063,9 +1015,10 @@ function ReminderSheet({
           {(
             [
               ['text', 'Текст'],
-              // Short labels: three full titles do not fit one line at 360 px.
+              // Short labels: the full titles do not fit one line at 360 px.
               ['nutrition', 'КБЖУ'],
               ['advice', 'Советы'],
+              ['checkin', 'Опрос'],
             ] as const
           ).map(([k, l]) => (
             <button
@@ -1145,7 +1098,9 @@ function ReminderSheet({
             ? `Бот пришлёт ${repeatPhrase(weekday)}, сколько ккал и белка осталось до нормы на сегодня.`
             : kind === 'advice'
               ? `ИИ пришлёт ${repeatPhrase(weekday)} рекомендации по питанию, тренировкам и восстановлению. Учитывает блок «О себе».`
-              : `Бот пришлёт этот текст ${repeatPhrase(weekday)}.${text.length > REMINDER_TEXT_MAX - 40 ? ` ${text.length} / ${REMINDER_TEXT_MAX}` : ''}`}
+              : kind === 'checkin'
+                ? 'Бот утром спросит про сон, боли и энергию, ответ сохранится.'
+                : `Бот пришлёт этот текст ${repeatPhrase(weekday)}.${text.length > REMINDER_TEXT_MAX - 40 ? ` ${text.length} / ${REMINDER_TEXT_MAX}` : ''}`}
           {!timeOk && ' Укажи время.'}
         </p>
         {error && (
