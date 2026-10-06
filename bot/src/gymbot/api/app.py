@@ -2,20 +2,22 @@
 
 
 from collections.abc import AsyncIterator
-from datetime import date, datetime, timedelta
-from typing import Annotated
+from datetime import UTC, date, datetime, timedelta
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gymbot.api.auth import InitDataError, TelegramUser, validate_init_data
 from gymbot.config import Settings
-from gymbot.db.models import FoodEntry, User, UserProgram
+from gymbot.db.models import FoodEntry, Reminder, User, UserProgram
 from gymbot.db.session import Sessionmaker
 from gymbot.services import nutrition as nut
+from gymbot.services import reminders as rem
 from gymbot.services import workouts as ws
 from gymbot.services.access import is_allowed
 from gymbot.services.programs import load_program
@@ -46,6 +48,51 @@ class SettingsIn(BaseModel):
     startDate: date | None = None
     restSeconds: int | None = Field(default=None, ge=15, le=600)
     targets: TargetsIn | None = None
+
+
+# [0-9], not \d: pydantic's regex engine treats \d as any Unicode digit.
+TIME_PATTERN = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"
+ReminderKind = Literal["text", "nutrition"]
+
+
+class ReminderOut(BaseModel):
+    id: int
+    time: str  # HH:MM in TIMEZONE
+    kind: ReminderKind
+    text: str | None
+    enabled: bool
+
+
+class ReminderIn(BaseModel):
+    time: str = Field(pattern=TIME_PATTERN)
+    kind: ReminderKind
+    text: str | None = Field(default=None, max_length=200)
+    enabled: bool = True
+
+
+class ReminderPatch(BaseModel):
+    """Partial update: omitted keys stay."""
+
+    time: str | None = Field(default=None, pattern=TIME_PATTERN)
+    kind: ReminderKind | None = None
+    text: str | None = Field(default=None, max_length=200)
+    enabled: bool | None = None
+
+
+def reminder_out(r: Reminder) -> ReminderOut:
+    return ReminderOut(
+        id=r.id, time=rem.minute_to_hhmm(r.minute_of_day), kind=r.kind, text=r.text, enabled=r.enabled  # type: ignore[arg-type]
+    )
+
+
+def normalize_reminder_text(kind: str, text: str | None) -> str | None:
+    """kind=text needs 1..200 characters of text; kind=nutrition stores no text."""
+    if kind == "nutrition":
+        return None
+    text = (text or "").strip()
+    if not text:
+        raise HTTPException(422, "text is required for kind=text")
+    return text
 
 
 def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
@@ -170,6 +217,69 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
         if entry is None or entry.user_id != user.id:
             raise HTTPException(404, "not found")
         await session.delete(entry)
+        await session.commit()
+
+    @app.get("/api/reminders")
+    async def list_reminders(session: Session, tg: TgUser) -> list[ReminderOut]:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        rows = await session.scalars(
+            select(Reminder).where(Reminder.user_id == user.id).order_by(Reminder.minute_of_day, Reminder.id)
+        )
+        return [reminder_out(r) for r in rows]
+
+    @app.post("/api/reminders", status_code=201)
+    async def create_reminder(body: ReminderIn, session: Session, tg: TgUser) -> ReminderOut:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        count = await session.scalar(select(func.count()).select_from(Reminder).where(Reminder.user_id == user.id))
+        if (count or 0) >= rem.MAX_PER_USER:
+            raise HTTPException(409, f"at most {rem.MAX_PER_USER} reminders")
+        minute = rem.hhmm_to_minute(body.time)
+        r = Reminder(
+            user_id=user.id,
+            minute_of_day=minute,
+            kind=body.kind,
+            text=normalize_reminder_text(body.kind, body.text),
+            enabled=body.enabled,
+            # A time that has already passed today fires from tomorrow, not right away.
+            last_sent_on=rem.initial_last_sent(minute, datetime.now(UTC), tz),
+        )
+        session.add(r)
+        await session.commit()
+        return reminder_out(r)
+
+    async def own_reminder(session: AsyncSession, tg: TelegramUser, reminder_id: int) -> Reminder:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        r = await session.get(Reminder, reminder_id)
+        if r is None or r.user_id != user.id:
+            raise HTTPException(404, "not found")
+        return r
+
+    @app.patch("/api/reminders/{reminder_id}")
+    async def patch_reminder(reminder_id: int, body: ReminderPatch, session: Session, tg: TgUser) -> ReminderOut:
+        r = await own_reminder(session, tg, reminder_id)
+        changes = body.model_dump(exclude_unset=True)
+        kind = changes.get("kind") or r.kind
+        text = changes.get("text", r.text)
+        r.text = normalize_reminder_text(kind, text)
+        r.kind = kind
+        rearm = False
+        if changes.get("time") is not None:
+            minute = rem.hhmm_to_minute(changes["time"])
+            rearm = minute != r.minute_of_day
+            r.minute_of_day = minute
+        if changes.get("enabled") is not None:
+            rearm = rearm or (changes["enabled"] and not r.enabled)
+            r.enabled = changes["enabled"]
+        if rearm:
+            # Same rule as on create: a time already passed today waits for tomorrow.
+            r.last_sent_on = rem.initial_last_sent(r.minute_of_day, datetime.now(UTC), tz)
+        await session.commit()
+        return reminder_out(r)
+
+    @app.delete("/api/reminders/{reminder_id}", status_code=204)
+    async def delete_reminder(reminder_id: int, session: Session, tg: TgUser) -> None:
+        r = await own_reminder(session, tg, reminder_id)
+        await session.delete(r)
         await session.commit()
 
     @app.middleware("http")

@@ -160,3 +160,23 @@ class FoodEntry(Base):
     carbs_g: Mapped[Decimal] = mapped_column(Numeric(6, 1))
     estimated: Mapped[bool] = mapped_column(default=True)  # LLM estimate vs. label data
     raw_text: Mapped[str | None] = mapped_column(Text)  # original message
+
+
+# --- Reminders (daily, local time in TIMEZONE) ---
+
+class Reminder(Base):
+    """Daily reminder sent by the bot at `minute_of_day` local time (09:30 -> 570).
+
+    `last_sent_on` is the local date of the last claimed send; it guards against duplicates
+    (see gymbot.services.reminders.tick).
+    """
+
+    __tablename__ = "reminders"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    minute_of_day: Mapped[int] = mapped_column(Integer)  # 0..1439 in TIMEZONE
+    kind: Mapped[str] = mapped_column(String(16))  # text | nutrition
+    text: Mapped[str | None] = mapped_column(Text)  # for kind=text only
+    enabled: Mapped[bool] = mapped_column(default=True)
+    last_sent_on: Mapped[date | None] = mapped_column(Date)  # local date in TIMEZONE
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

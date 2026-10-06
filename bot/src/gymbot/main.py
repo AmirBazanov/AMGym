@@ -22,6 +22,7 @@ from gymbot.handlers import common, log_text, voice
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services.access import is_allowed
 from gymbot.services.programs import sync_programs
+from gymbot.services.reminders import reminder_loop
 from gymbot.services.users import get_or_create_user
 
 log = logging.getLogger("gymbot")
@@ -67,8 +68,16 @@ async def setup_bot_ui(bot: Bot, settings: Settings) -> None:
 
 
 async def shutdown(
-    dp: Dispatcher, polling: asyncio.Task[None], bot: Bot, engine: Any, llm: OpenRouterClient
+    dp: Dispatcher,
+    polling: asyncio.Task[None],
+    reminders: asyncio.Task[None],
+    bot: Bot,
+    engine: Any,
+    llm: OpenRouterClient,
 ) -> None:
+    reminders.cancel()
+    with contextlib.suppress(Exception, asyncio.CancelledError):
+        await reminders
     with contextlib.suppress(RuntimeError):  # polling may already be stopped
         await dp.stop_polling()
     with contextlib.suppress(Exception, asyncio.CancelledError):
@@ -119,10 +128,11 @@ async def run() -> None:
     polling = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
     # If polling dies (e.g. the token was revoked), stop the HTTP server too instead of running half-alive.
     polling.add_done_callback(lambda _: setattr(server, "should_exit", True))
+    reminders = asyncio.create_task(reminder_loop(bot, sessionmaker, settings))
     try:
         await server.serve()  # returns on Ctrl+C (uvicorn handles the signals)
     finally:
-        await asyncio.shield(shutdown(dp, polling, bot, engine, llm))
+        await asyncio.shield(shutdown(dp, polling, reminders, bot, engine, llm))
 
 
 if __name__ == "__main__":

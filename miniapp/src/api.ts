@@ -84,3 +84,42 @@ export function getNutritionWeek(end?: string): Promise<NutritionWeek> {
 export function deleteFood(id: number): Promise<void> {
   return api<void>(`/food/${id}`, { method: 'DELETE' })
 }
+
+// ---- Reminders (contract: same spec, section 2). Never cached offline: loaded when the block is shown. ----
+
+export type ReminderKind = 'text' | 'nutrition'
+
+/** Daily reminder sent by the bot at `time` (HH:MM, server TIMEZONE). `text` is used only for kind "text". */
+export interface Reminder {
+  id: number
+  time: string
+  kind: ReminderKind
+  text: string | null
+  enabled: boolean
+}
+
+export interface ReminderInput {
+  time: string
+  kind: ReminderKind
+  text?: string
+  enabled?: boolean
+}
+
+export const REMINDER_TEXT_MAX = 200
+export const REMINDERS_MAX = 20
+
+export function getReminders(): Promise<Reminder[]> {
+  return api<Reminder[]>('/reminders')
+}
+
+export function createReminder(body: ReminderInput): Promise<Reminder> {
+  return api<Reminder>('/reminders', { method: 'POST', body: JSON.stringify(body) })
+}
+
+export function updateReminder(id: number, patch: Partial<ReminderInput>): Promise<Reminder> {
+  return api<Reminder>(`/reminders/${id}`, { method: 'PATCH', body: JSON.stringify(patch) })
+}
+
+export function deleteReminder(id: number): Promise<void> {
+  return api<void>(`/reminders/${id}`, { method: 'DELETE' })
+}

@@ -1,24 +1,34 @@
 import { useEffect, useState } from 'react'
 import {
   ApiError,
+  createReminder,
   deleteFood,
+  deleteReminder,
   getNutritionDay,
   getNutritionWeek,
+  getReminders,
   inTelegram,
+  REMINDER_TEXT_MAX,
+  REMINDERS_MAX,
+  updateReminder,
   type FoodEntry,
   type MacroKey,
   type NutritionDay,
   type NutritionWeek,
+  type Reminder,
+  type ReminderInput,
+  type ReminderKind,
   type Targets,
 } from '../api'
 import { BarSeries } from '../components/LazyCharts'
-import { IconChevronLeft, IconChevronRight, IconClose } from '../components/icons'
+import { IconChevronLeft, IconChevronRight, IconClose, IconPlus } from '../components/icons'
 import { NumField } from '../components/NumField'
+import { Sheet } from '../components/Sheet'
 import { capitalize, WEEKDAY_SHORT } from '../program'
 import { actions, useStore } from '../store'
 import { confirm, haptic } from '../telegram'
 
-// Food data is never cached in the offline store: every view loads it from the server when shown.
+// Food data and reminders are never cached in the offline store: every view loads them from the server when shown.
 
 type View = 'day' | 'week' | 'settings'
 
@@ -661,9 +671,322 @@ function Settings() {
         </p>
       )}
 
-      <h2>Напоминания</h2>
-      {/* Reminders block (spec section 2) goes here. */}
-      <div className="card hint">Скоро здесь можно будет настроить напоминания: креатин, вода, вечерняя сводка КБЖУ.</div>
+      <Reminders />
     </>
+  )
+}
+
+// ---------- reminders (spec section 2) ----------
+
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/
+const NUTRITION_TITLE = 'Сводка КБЖУ'
+
+const reminderTitle = (r: Reminder) => (r.kind === 'nutrition' ? NUTRITION_TITLE : (r.text ?? ''))
+const byTime = (a: Reminder, b: Reminder) => a.time.localeCompare(b.time) || a.id - b.id
+
+function Reminders() {
+  const r = useRemote<Reminder[]>('reminders', getReminders)
+  // Local copy so toggles and edits show at once; re-seeded whenever the server list arrives.
+  const [items, setItems] = useState<Reminder[] | null>(null)
+  const [editing, setEditing] = useState<Reminder | 'new' | null>(null)
+  const [pending, setPending] = useState<ReadonlySet<number>>(new Set())
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    if (r.data) setItems([...r.data].sort(byTime))
+  }, [r.data])
+
+  const upsert = (rem: Reminder) => setItems((list) => [...(list ?? []).filter((x) => x.id !== rem.id), rem].sort(byTime))
+  const drop = (id: number) => setItems((list) => list && list.filter((x) => x.id !== id))
+
+  async function toggle(rem: Reminder) {
+    if (pending.has(rem.id)) return
+    haptic.select()
+    setFailed(false)
+    setPending((p) => new Set(p).add(rem.id))
+    const enabled = !rem.enabled
+    upsert({ ...rem, enabled })
+    try {
+      upsert(await updateReminder(rem.id, { enabled }))
+    } catch (err) {
+      haptic.error()
+      // 404: deleted elsewhere; anything else: roll back.
+      if (err instanceof ApiError && err.status === 404) drop(rem.id)
+      else {
+        upsert(rem)
+        setFailed(true)
+      }
+    } finally {
+      setPending((p) => {
+        const next = new Set(p)
+        next.delete(rem.id)
+        return next
+      })
+    }
+  }
+
+  const full = (items?.length ?? 0) >= REMINDERS_MAX
+
+  return (
+    <>
+      <h2>Напоминания</h2>
+      {r.error != null && !items ? (
+        <RemindersError error={r.error} onRetry={r.reload} />
+      ) : !items ? (
+        <div className="card hint">Загрузка…</div>
+      ) : (
+        <>
+          {items.length ? (
+            <div className="list">
+              {items.map((rem) => (
+                <div className={`row reminder ${rem.enabled ? '' : 'off'}`} key={rem.id}>
+                  <button className="reminder-open" onClick={() => setEditing(rem)}>
+                    <span className="reminder-time num">{rem.time}</span>
+                    <span className="reminder-title">{reminderTitle(rem)}</span>
+                  </button>
+                  <Switch
+                    on={rem.enabled}
+                    disabled={pending.has(rem.id)}
+                    label={`${rem.time} ${reminderTitle(rem)}`}
+                    onToggle={() => toggle(rem)}
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="card hint">Пока нет напоминаний. Например: «Креатин» в 09:00 или сводка КБЖУ в 20:00.</div>
+          )}
+          {failed && (
+            <p className="hint" style={{ margin: '8px 4px 0', color: 'var(--danger)' }}>
+              Не удалось переключить напоминание. Попробуй ещё раз.
+            </p>
+          )}
+          <div className="spacer" />
+          <button
+            className="btn secondary"
+            disabled={full}
+            onClick={() => {
+              haptic.tap()
+              setEditing('new')
+            }}
+          >
+            <IconPlus />
+            Добавить
+          </button>
+          <p className="hint" style={{ margin: '8px 4px 0' }}>
+            {full && `Больше ${REMINDERS_MAX} напоминаний добавить нельзя. `}
+            Напоминания приходят в чат бота, пока запущен сервер.
+          </p>
+        </>
+      )}
+
+      {editing && (
+        <ReminderSheet
+          reminder={editing === 'new' ? null : editing}
+          onSaved={(rem) => {
+            upsert(rem)
+            setEditing(null)
+          }}
+          onGone={(id) => {
+            drop(id)
+            setEditing(null)
+          }}
+          onClose={() => setEditing(null)}
+        />
+      )}
+    </>
+  )
+}
+
+function RemindersError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+  const status = error instanceof ApiError ? error.status : null
+  if (status === 401 || status === 403)
+    return (
+      <div className="card hint">
+        {inTelegram
+          ? 'Не получилось войти. Закрой дневник и открой его заново из бота.'
+          : 'Напоминания хранятся на сервере бота. Открой дневник из бота в Telegram, чтобы их настроить.'}
+      </div>
+    )
+  return (
+    <div className="card">
+      <div className="hint">{status === 404 ? 'Сервер пока не умеет напоминания.' : 'Не удалось загрузить напоминания.'}</div>
+      <div className="spacer" />
+      <button
+        className="btn secondary"
+        onClick={() => {
+          haptic.tap()
+          onRetry()
+        }}
+      >
+        Повторить
+      </button>
+    </div>
+  )
+}
+
+function Switch({ on, disabled, label, onToggle }: { on: boolean; disabled?: boolean; label: string; onToggle: () => void }) {
+  return (
+    <button
+      className={`switch ${on ? 'on' : ''}`}
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onToggle}
+    >
+      <span className="switch-track" />
+    </button>
+  )
+}
+
+function saveError(err: unknown): string {
+  const status = err instanceof ApiError ? err.status : null
+  if (status === 401 || status === 403) return 'Не получилось войти. Закрой дневник и открой его заново из бота.'
+  if (status === 409) return `Больше ${REMINDERS_MAX} напоминаний добавить нельзя.`
+  if (status != null && status >= 400 && status < 500) return 'Сервер не принял напоминание. Проверь время и текст.'
+  return 'Не удалось сохранить. Проверь интернет и попробуй ещё раз.'
+}
+
+function ReminderSheet({
+  reminder,
+  onSaved,
+  onGone,
+  onClose,
+}: {
+  reminder: Reminder | null
+  onSaved: (r: Reminder) => void
+  onGone: (id: number) => void
+  onClose: () => void
+}) {
+  const [time, setTime] = useState(reminder?.time ?? '09:00')
+  const [kind, setKind] = useState<ReminderKind>(reminder?.kind ?? 'text')
+  // Kept while switching to "nutrition" so switching back restores it.
+  const [text, setText] = useState(reminder?.text ?? '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const timeOk = TIME_RE.test(time)
+  const textOk = kind === 'nutrition' || text.trim().length > 0
+  const canSave = timeOk && textOk && !busy
+
+  async function save() {
+    if (!canSave) return
+    setBusy(true)
+    setError(null)
+    // `text` is only meaningful for kind "text"; omit it otherwise instead of relying on null handling.
+    const body: ReminderInput = { time, kind, ...(kind === 'text' ? { text: text.trim() } : {}) }
+    try {
+      const saved = reminder ? await updateReminder(reminder.id, body) : await createReminder({ ...body, enabled: true })
+      haptic.success()
+      onSaved(saved)
+    } catch (err) {
+      haptic.error()
+      if (reminder && err instanceof ApiError && err.status === 404) return onGone(reminder.id)
+      setError(saveError(err))
+      setBusy(false)
+    }
+  }
+
+  async function remove() {
+    if (!reminder || busy) return
+    if (!(await confirm(`Удалить напоминание «${reminderTitle(reminder)}» в ${reminder.time}?`))) return
+    setBusy(true)
+    setError(null)
+    try {
+      await deleteReminder(reminder.id)
+    } catch (err) {
+      // 404: already gone, which is what we wanted.
+      if (!(err instanceof ApiError && err.status === 404)) {
+        haptic.error()
+        setError('Не удалось удалить. Проверь интернет и попробуй ещё раз.')
+        setBusy(false)
+        return
+      }
+    }
+    haptic.success()
+    onGone(reminder.id)
+  }
+
+  return (
+    <Sheet onClose={onClose}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault()
+          save()
+        }}
+      >
+        <h1 style={{ fontSize: 22 }}>{reminder ? 'Напоминание' : 'Новое напоминание'}</h1>
+        <div className="spacer" />
+        <div className="segmented">
+          {(
+            [
+              ['text', 'Текст'],
+              ['nutrition', NUTRITION_TITLE],
+            ] as const
+          ).map(([k, l]) => (
+            <button
+              type="button"
+              key={k}
+              className={kind === k ? 'active' : ''}
+              onClick={() => {
+                haptic.select()
+                setKind(k)
+              }}
+            >
+              {l}
+            </button>
+          ))}
+        </div>
+        <div className="spacer" />
+        <div className="list">
+          <label className="row">
+            <div className="grow title">Время</div>
+            <input
+              type="time"
+              className={`field reminder-time-field ${timeOk ? '' : 'invalid'}`}
+              value={time}
+              required
+              onChange={(e) => setTime(e.target.value.slice(0, 5))}
+            />
+          </label>
+          <div className="hint">Если это время сегодня уже прошло, первое напоминание придёт завтра.</div>
+          {kind === 'text' && (
+            <label className="row reminder-text-row">
+              <div className="title">Текст</div>
+              <input
+                type="text"
+                className="field reminder-text-field"
+                value={text}
+                maxLength={REMINDER_TEXT_MAX}
+                placeholder="Например, «Креатин»"
+                enterKeyHint="done"
+                onChange={(e) => setText(e.target.value)}
+              />
+            </label>
+          )}
+        </div>
+        <p className="hint" style={{ margin: '8px 4px 0' }}>
+          {kind === 'nutrition'
+            ? 'Бот пришлёт, сколько ккал и белка осталось до нормы на сегодня.'
+            : `Бот пришлёт этот текст каждый день.${text.length > REMINDER_TEXT_MAX - 40 ? ` ${text.length} / ${REMINDER_TEXT_MAX}` : ''}`}
+          {!timeOk && ' Укажи время.'}
+        </p>
+        {error && (
+          <p className="hint" style={{ margin: '8px 4px 0', color: 'var(--danger)' }}>
+            {error}
+          </p>
+        )}
+        <div className="spacer" />
+        <button type="submit" className="btn" disabled={!canSave}>
+          {busy ? 'Сохраняю…' : reminder ? 'Сохранить' : 'Добавить'}
+        </button>
+        {reminder && (
+          <button type="button" className="btn danger" style={{ marginTop: 6 }} disabled={busy} onClick={remove}>
+            Удалить напоминание
+          </button>
+        )}
+      </form>
+    </Sheet>
   )
 }

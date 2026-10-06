@@ -1,9 +1,11 @@
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
+import pytest
 from conftest import init_data, make_settings
 from sqlalchemy import select
 
-from gymbot.db.models import Exercise, Workout, WorkoutSet
+from gymbot.db.models import Exercise, Reminder, Workout, WorkoutSet
 
 
 def workout(wid="abc", **over):
@@ -151,3 +153,204 @@ async def test_dev_bypass_refused_through_tunnel(tmp_path, make_client):
     async with make_client(make_settings(tmp_path, dev_user_id=7)) as c:
         assert (await c.get("/api/state")).status_code == 200
         assert (await c.get("/api/state", headers={"cf-connecting-ip": "1.2.3.4"})).status_code == 401
+
+
+# ---- reminders ----
+
+
+async def test_reminder_create_and_list(client, auth):
+    r = await client.post("/api/reminders", json={"time": "09:30", "kind": "text", "text": "Креатин"}, headers=auth)
+    assert r.status_code == 201
+    body = r.json()
+    assert set(body) == {"id", "time", "kind", "text", "enabled"}
+    assert body["time"] == "09:30" and body["kind"] == "text" and body["text"] == "Креатин"
+    assert body["enabled"] is True
+    listed = (await client.get("/api/reminders", headers=auth)).json()
+    assert listed == [body]
+
+
+async def test_reminder_list_sorted_by_time(client, auth):
+    for t in ("21:00", "07:15", "09:30"):
+        await client.post("/api/reminders", json={"time": t, "kind": "text", "text": t}, headers=auth)
+    assert [r["time"] for r in (await client.get("/api/reminders", headers=auth)).json()] == [
+        "07:15", "09:30", "21:00"
+    ]
+
+
+async def test_reminder_nutrition_ignores_text(client, auth):
+    r = await client.post(
+        "/api/reminders", json={"time": "20:00", "kind": "nutrition", "text": "игнор"}, headers=auth
+    )
+    assert r.status_code == 201
+    assert r.json()["text"] is None and r.json()["kind"] == "nutrition"
+    assert (await client.get("/api/reminders", headers=auth)).json()[0]["text"] is None
+
+
+@pytest.mark.parametrize(
+    "bad", ["24:00", "9:30", "09:60", "0930", "09:30:00", "", "\u0660\u0669:\u0663\u0660", "09:30\n", "09-30", "ab:cd"]
+)
+async def test_reminder_invalid_time_422(client, auth, bad):
+    r = await client.post("/api/reminders", json={"time": bad, "kind": "nutrition"}, headers=auth)
+    assert r.status_code == 422
+    assert (await client.get("/api/reminders", headers=auth)).json() == []
+
+
+@pytest.mark.parametrize("good", ["00:00", "23:59", "12:05"])
+async def test_reminder_valid_time_edges(client, auth, good):
+    r = await client.post("/api/reminders", json={"time": good, "kind": "nutrition"}, headers=auth)
+    assert r.status_code == 201 and r.json()["time"] == good
+
+
+@pytest.mark.parametrize("payload", [
+    {"time": "09:30", "kind": "text"},
+    {"time": "09:30", "kind": "text", "text": None},
+    {"time": "09:30", "kind": "text", "text": ""},
+    {"time": "09:30", "kind": "text", "text": "   "},
+    {"time": "09:30", "kind": "text", "text": "x" * 201},
+    {"time": "09:30", "kind": "weekly", "text": "x"},
+    {"time": "09:30", "text": "x"},
+])
+async def test_reminder_invalid_body_422(client, auth, payload):
+    assert (await client.post("/api/reminders", json=payload, headers=auth)).status_code == 422
+    assert (await client.get("/api/reminders", headers=auth)).json() == []
+
+
+async def test_reminder_text_length_200_ok(client, auth):
+    r = await client.post("/api/reminders", json={"time": "09:30", "kind": "text", "text": "x" * 200}, headers=auth)
+    assert r.status_code == 201 and r.json()["text"] == "x" * 200
+
+
+async def test_reminder_limit_20_then_409(client, auth):
+    for i in range(20):
+        r = await client.post(
+            "/api/reminders",
+            json={"time": f"{i:02d}:00", "kind": "text", "text": f"n{i}", "enabled": i % 3 != 0},
+            headers=auth,
+        )
+        assert r.status_code == 201
+    r = await client.post("/api/reminders", json={"time": "23:30", "kind": "text", "text": "лишнее"}, headers=auth)
+    assert r.status_code == 409
+    assert len((await client.get("/api/reminders", headers=auth)).json()) == 20
+
+
+async def test_reminder_limit_frees_after_delete(client, auth):
+    ids = []
+    for i in range(20):
+        r = await client.post("/api/reminders", json={"time": f"{i:02d}:00", "kind": "nutrition"}, headers=auth)
+        ids.append(r.json()["id"])
+    assert (await client.delete(f"/api/reminders/{ids[0]}", headers=auth)).status_code == 204
+    assert (await client.post("/api/reminders", json={"time": "23:30", "kind": "nutrition"}, headers=auth)).status_code == 201
+
+
+async def test_reminder_other_user_isolated(tmp_path, make_client):
+    # Two allowed users: otherwise the second one is refused with 403 (personal app).
+    one = {"X-Telegram-Init-Data": init_data(42)}
+    two = {"X-Telegram-Init-Data": init_data(99)}
+    async with make_client(make_settings(tmp_path, allowed_user_ids=[42, 99])) as c:
+        rid = (await c.post("/api/reminders", json={"time": "09:30", "kind": "text", "text": "моё"}, headers=one)).json()["id"]
+        assert (await c.get("/api/reminders", headers=two)).json() == []
+        assert (await c.patch(f"/api/reminders/{rid}", json={"enabled": False}, headers=two)).status_code == 404
+        assert (await c.delete(f"/api/reminders/{rid}", headers=two)).status_code == 404
+        mine = (await c.get("/api/reminders", headers=one)).json()
+        assert len(mine) == 1 and mine[0]["enabled"] is True and mine[0]["text"] == "моё"
+        # The other user's reminders do not count towards the limit.
+        for i in range(20):
+            assert (await c.post("/api/reminders", json={"time": f"{i:02d}:10", "kind": "nutrition"}, headers=two)).status_code == 201
+        assert (await c.post("/api/reminders", json={"time": "23:30", "kind": "nutrition"}, headers=one)).status_code == 201
+
+
+async def test_reminder_unknown_id_404(client, auth):
+    assert (await client.patch("/api/reminders/9999", json={"enabled": False}, headers=auth)).status_code == 404
+    assert (await client.delete("/api/reminders/9999", headers=auth)).status_code == 404
+
+
+async def test_reminder_requires_auth(client):
+    assert (await client.get("/api/reminders")).status_code == 401
+    assert (await client.post("/api/reminders", json={"time": "09:30", "kind": "nutrition"})).status_code == 401
+
+
+async def test_reminder_patch_changes_only_given_fields(client, auth):
+    rid = (await client.post("/api/reminders", json={"time": "09:30", "kind": "text", "text": "Креатин"}, headers=auth)).json()["id"]
+    r = await client.patch(f"/api/reminders/{rid}", json={"enabled": False}, headers=auth)
+    assert r.status_code == 200
+    assert r.json() == {"id": rid, "time": "09:30", "kind": "text", "text": "Креатин", "enabled": False}
+    r = await client.patch(f"/api/reminders/{rid}", json={"time": "10:15"}, headers=auth)
+    assert r.json() == {"id": rid, "time": "10:15", "kind": "text", "text": "Креатин", "enabled": False}
+    r = await client.patch(f"/api/reminders/{rid}", json={"text": "  Протеин "}, headers=auth)
+    assert r.json() == {"id": rid, "time": "10:15", "kind": "text", "text": "Протеин", "enabled": False}
+    assert (await client.get("/api/reminders", headers=auth)).json() == [r.json()]
+
+
+async def test_reminder_patch_empty_body_keeps_everything(client, auth):
+    created = (await client.post("/api/reminders", json={"time": "09:30", "kind": "text", "text": "Креатин"}, headers=auth)).json()
+    r = await client.patch(f"/api/reminders/{created['id']}", json={}, headers=auth)
+    assert r.status_code == 200 and r.json() == created
+
+
+async def test_reminder_patch_invalid_values_422(client, auth):
+    rid = (await client.post("/api/reminders", json={"time": "09:30", "kind": "text", "text": "Креатин"}, headers=auth)).json()["id"]
+    for body in ({"time": "24:00"}, {"time": "9:30"}, {"kind": "weekly"}, {"text": "x" * 201}, {"enabled": "maybe"}):
+        assert (await client.patch(f"/api/reminders/{rid}", json=body, headers=auth)).status_code == 422
+    assert (await client.get("/api/reminders", headers=auth)).json()[0]["time"] == "09:30"
+
+
+async def test_reminder_patch_to_text_without_text_422(client, auth):
+    rid = (await client.post("/api/reminders", json={"time": "20:00", "kind": "nutrition"}, headers=auth)).json()["id"]
+    assert (await client.patch(f"/api/reminders/{rid}", json={"kind": "text"}, headers=auth)).status_code == 422
+    assert (await client.patch(f"/api/reminders/{rid}", json={"kind": "text", "text": "  "}, headers=auth)).status_code == 422
+    after = (await client.get("/api/reminders", headers=auth)).json()[0]
+    assert after["kind"] == "nutrition" and after["text"] is None
+    ok = await client.patch(f"/api/reminders/{rid}", json={"kind": "text", "text": "Вода"}, headers=auth)
+    assert ok.status_code == 200 and ok.json()["kind"] == "text" and ok.json()["text"] == "Вода"
+
+
+async def test_reminder_patch_text_null_on_text_kind_422(client, auth):
+    rid = (await client.post("/api/reminders", json={"time": "09:30", "kind": "text", "text": "Креатин"}, headers=auth)).json()["id"]
+    assert (await client.patch(f"/api/reminders/{rid}", json={"text": None}, headers=auth)).status_code == 422
+    assert (await client.get("/api/reminders", headers=auth)).json()[0]["text"] == "Креатин"
+
+
+async def test_reminder_patch_kind_nutrition_drops_text(client, auth):
+    rid = (await client.post("/api/reminders", json={"time": "09:30", "kind": "text", "text": "Креатин"}, headers=auth)).json()["id"]
+    r = await client.patch(f"/api/reminders/{rid}", json={"kind": "nutrition"}, headers=auth)
+    assert r.status_code == 200 and r.json()["kind"] == "nutrition" and r.json()["text"] is None
+
+
+async def test_reminder_delete(client, auth):
+    rid = (await client.post("/api/reminders", json={"time": "09:30", "kind": "nutrition"}, headers=auth)).json()["id"]
+    assert (await client.delete(f"/api/reminders/{rid}", headers=auth)).status_code == 204
+    assert (await client.get("/api/reminders", headers=auth)).json() == []
+    assert (await client.delete(f"/api/reminders/{rid}", headers=auth)).status_code == 404
+
+
+async def test_reminder_created_at_passed_time_is_marked_today(client, auth, db, settings):
+    # 00:00 has always passed today, so the reminder must not fire right away: last_sent_on = today.
+    tz = ZoneInfo(settings.timezone)
+    before = datetime.now(tz).date()
+    rid = (await client.post("/api/reminders", json={"time": "00:00", "kind": "nutrition"}, headers=auth)).json()["id"]
+    after = datetime.now(tz).date()
+    async with db() as s:
+        last = await s.scalar(select(Reminder.last_sent_on).where(Reminder.id == rid))
+    assert last in (before, after)  # tolerates the test running across local midnight
+
+
+async def test_reminder_patch_rearms_last_sent_on(client, auth, db, settings):
+    # Re-timing to an already-passed time (00:00) and re-enabling mark today as done, so nothing fires at once.
+    tz = ZoneInfo(settings.timezone)
+    rid = (await client.post("/api/reminders", json={"time": "23:59", "kind": "nutrition"}, headers=auth)).json()["id"]
+    async with db() as s:
+        r = await s.get(Reminder, rid)
+        r.last_sent_on = None
+        await s.commit()
+    before = datetime.now(tz).date()
+    assert (await client.patch(f"/api/reminders/{rid}", json={"time": "00:00"}, headers=auth)).status_code == 200
+    after = datetime.now(tz).date()
+    async with db() as s:
+        assert await s.scalar(select(Reminder.last_sent_on).where(Reminder.id == rid)) in (before, after)
+        r = await s.get(Reminder, rid)
+        r.last_sent_on = None
+        r.enabled = False
+        await s.commit()
+    assert (await client.patch(f"/api/reminders/{rid}", json={"enabled": True}, headers=auth)).status_code == 200
+    async with db() as s:
+        assert await s.scalar(select(Reminder.last_sent_on).where(Reminder.id == rid)) is not None
