@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { BarSeries, LineSeries } from '../components/LazyCharts'
 import { capitalize, getProgram, programExerciseNames } from '../program'
+import { bestE1rm } from '../progression'
 import { currentRun, useStore } from '../store'
 import { exerciseSeries, formatKg, formatShortDate, formatTonnage, weeklyVolume } from '../stats'
 import { haptic } from '../telegram'
@@ -40,9 +41,10 @@ export function Progress() {
   const first = series[0]
   const lastP = series[series.length - 1]
   const best = series.length ? Math.max(...series.map((p) => p.maxWeight)) : 0
-  const bestE1 = series.length ? Math.max(...series.map((p) => p.e1rm)) : 0
-  const growth = first && lastP && first.e1rm ? ((lastP.e1rm - first.e1rm) / first.e1rm) * 100 : 0
   const since = period == null ? 0 : Date.now() - period * 86_400_000
+  // Same record function as the exercise sheet, so "Всё" shows the same 1RM there and here.
+  const bestE1 = bestE1rm(history.filter((w) => new Date(w.startedAt).getTime() >= since), name)?.e1rm ?? 0
+  const growth = first && lastP && first.e1rm ? ((lastP.e1rm - first.e1rm) / first.e1rm) * 100 : 0
   const weekly = weeklyVolume(currentRun(state).filter((w) => new Date(w.startedAt).getTime() >= since)).map((w) => ({
     ...w,
     label: `Н${w.week}`,

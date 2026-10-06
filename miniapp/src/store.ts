@@ -4,6 +4,7 @@ import { useSyncExternalStore } from 'react'
 import { getDay, getProgram, isDropset, programPosition, type ProgramExercise } from './program'
 import { api, ApiError, EMPTY_TARGETS, inTelegram, type Targets } from './api'
 import { buildDemoHistory, demoStartDate } from './mock'
+import { lastSameSession, suggestWeight } from './progression'
 
 export interface SetEntry {
   weight: number | null // kg
@@ -115,17 +116,12 @@ export function getState() {
 
 /** Last completed sets for an exercise, newest workout first. */
 export function lastSetsFor(name: string, history = state.history): SetEntry[] | null {
-  for (let i = history.length - 1; i >= 0; i--) {
-    const ex = history[i].exercises.find((e) => e.name === name)
-    const done = ex?.sets.filter((s) => s.done && s.weight != null)
-    if (done?.length) return done
-  }
-  return null
+  return lastSameSession(history, name)
 }
 
 function plannedLog(ex: ProgramExercise): ExerciseLog {
-  const last = lastSetsFor(ex.name)
-  const weight = last ? Math.max(...last.map((s) => s.weight ?? 0)) : null
+  // Record-based weight or double progression, whichever is higher (see progression.ts).
+  const weight = suggestWeight(state.history, ex)?.weight ?? null
   return {
     name: ex.name,
     target: ex.prescription.raw,

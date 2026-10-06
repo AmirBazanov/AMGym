@@ -29,7 +29,7 @@ data/programs/*.json <── importers/xlsx_program <── xlsx-програм�
 - Вес в кг, время в UTC, отображение в `TIMEZONE`.
 - Мини-апп доверяет только серверу; сервер проверяет Telegram initData по HMAC.
 - Пользовательские тексты по-русски, код и комментарии по-английски.
-- Проверки перед сдачей: `cd bot && ruff check src tests && pytest -q`; `cd miniapp && npm run typecheck && npm run build`.
+- Проверки перед сдачей: `cd bot && ruff check src tests && pytest -q`; `cd miniapp && npm run typecheck && npm run build && npm test`.
 
 ## Как делится работа между агентами
 

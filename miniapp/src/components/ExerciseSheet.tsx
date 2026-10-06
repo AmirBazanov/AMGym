@@ -1,6 +1,7 @@
 import { capitalize, getProgram, WEEKDAY_SHORT, formatPrescription } from '../program'
 import { useStore } from '../store'
-import { exerciseSeries, formatKg, formatLongDate } from '../stats'
+import { bestE1rm } from '../progression'
+import { exerciseSeries, formatDayMonth, formatKg, formatLongDate } from '../stats'
 import { LineSeries } from './LazyCharts'
 import { Sheet } from './Sheet'
 
@@ -10,7 +11,7 @@ export function ExerciseSheet({ name, onClose }: { name: string; onClose: () => 
   const series = exerciseSeries(history, name, null)
   const last = [...history].reverse().find((w) => w.exercises.some((e) => e.name === name))
   const lastEx = last?.exercises.find((e) => e.name === name)
-  const best = series.length ? Math.max(...series.map((p) => p.maxWeight)) : null
+  const record = bestE1rm(history, name)
 
   const plan = program.weeks.flatMap((w) =>
     w.days.flatMap((d) =>
@@ -21,9 +22,13 @@ export function ExerciseSheet({ name, onClose }: { name: string; onClose: () => 
   return (
     <Sheet onClose={onClose}>
       <h1 style={{ fontSize: 22 }}>{capitalize(name)}</h1>
-      <div className="hint">
-        {plan.length} раз в программе{best != null && ` · рекорд ${formatKg(best)} кг`}
-      </div>
+      <div className="hint">{plan.length} раз в программе</div>
+      {record && (
+        <div className="hint num">
+          Рекорд: 1ПМ {formatKg(Math.round(record.e1rm))} кг ({formatKg(record.weight)} × {record.reps},{' '}
+          {formatDayMonth(record.date)})
+        </div>
+      )}
 
       {series.length > 1 && (
         <>

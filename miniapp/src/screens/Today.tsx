@@ -18,10 +18,24 @@ import {
   programPosition,
   WEEKDAY_LONG,
   WEEKDAY_SHORT,
+  type ProgramExercise,
 } from '../program'
+import { suggestWeight } from '../progression'
 import { actions, currentRun, isStarted, lastSetsFor, useStore, type Workout } from '../store'
 import { formatKg } from '../stats'
 import { confirm, haptic } from '../telegram'
+
+/** Why the day's weight is what it is, under the exercise name. */
+function SuggestHint({ history, exercise }: { history: Workout[]; exercise: ProgramExercise }) {
+  const s = suggestWeight(history, exercise)
+  if (!s) return null
+  return (
+    <div className="ex-suggest num">
+      {/* The step is already visible in the weight, keep the line short on narrow screens. */}
+      предложено {formatKg(s.weight)} кг: {s.reason.replace(/, \+[\d,]+ кг$/, '')}
+    </div>
+  )
+}
 
 export function Today() {
   const state = useStore()
@@ -149,6 +163,7 @@ function DayPreview() {
                     </span>
                   )}
                 </div>
+                <SuggestHint history={history} exercise={e} />
               </div>
               <IconChevron />
             </button>
@@ -190,7 +205,7 @@ function mmss(sec: number) {
 }
 
 function ActiveWorkout({ workout }: { workout: Workout }) {
-  const { restSeconds, restEnd } = useStore()
+  const { restSeconds, restEnd, history } = useStore()
   const setRestEnd = actions.setRestEnd
   const [sheet, setSheet] = useState<string | null>(null)
   const now = useNow(true)
@@ -292,6 +307,7 @@ function ActiveWorkout({ workout }: { workout: Workout }) {
                   {pe && <IntensityBadge value={pe.intensity} />}
                   {ex.dropset && <DropBadge />}
                 </div>
+                {pe && <SuggestHint history={history} exercise={pe} />}
               </div>
               <IconChevron />
             </button>

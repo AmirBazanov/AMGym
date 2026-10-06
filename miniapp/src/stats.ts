@@ -71,6 +71,11 @@ export function formatLongDate(iso: string): string {
   return new Date(iso).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'long' })
 }
 
+/** "3 окт" (no trailing dot that ru-RU puts after short months). */
+export function formatDayMonth(iso: string): string {
+  return new Date(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }).replace(/\.$/, '')
+}
+
 export function formatKg(n: number): string {
   return Number.isInteger(n) ? `${n}` : n.toFixed(1).replace('.', ',')
 }
