@@ -1,0 +1,1786 @@
+{
+  "name": "Специализация на руки, 3 дня, дропсеты (8 недель)",
+  "source": "arms_specialization_8w.xlsx",
+  "weeks": [
+    {
+      "number": 1,
+      "days": [
+        {
+          "weekday": 1,
+          "title": "понедельник",
+          "exercises": [
+            {
+              "name": "сгибания с гантелями на бицепс с супинацией",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания с гантелями на бицепс с пронацией",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 3,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "3х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим в блоке из-за головы",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "жим гантелей сидя",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 3,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 3х 12-6-6"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 3,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "3х12-15"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 3,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 3х12-6-6"
+              },
+              "order": 6
+            }
+          ]
+        },
+        {
+          "weekday": 3,
+          "title": "среда",
+          "exercises": [
+            {
+              "name": "жим лёжа",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "тяга вертикального блока",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "присед со штангой",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "румынская тяга",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 4
+            }
+          ]
+        },
+        {
+          "weekday": 5,
+          "title": "пятница",
+          "exercises": [
+            {
+              "name": "сгибания на бицепс с ez грифом хватом снизу",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 3,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "3х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания на бицепс с ez грифом хватом сверху",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим лёжа",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "жим сидя в смите",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 3,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "3х8-12"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 3,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 3х 12-6-6"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 3,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "3х12-15"
+              },
+              "order": 6
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 2,
+      "days": [
+        {
+          "weekday": 1,
+          "title": "понедельник",
+          "exercises": [
+            {
+              "name": "сгибания с гантелями на бицепс с супинацией",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания с гантелями на бицепс с пронацией",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим в блоке из-за головы",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "жим гантелей сидя",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "4х12-15"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "4х12-15"
+              },
+              "order": 6
+            }
+          ]
+        },
+        {
+          "weekday": 3,
+          "title": "среда",
+          "exercises": [
+            {
+              "name": "жим лёжа",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "тяга вертикального блока",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "присед со штангой",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "румынская тяга",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 4
+            }
+          ]
+        },
+        {
+          "weekday": 5,
+          "title": "пятница",
+          "exercises": [
+            {
+              "name": "сгибания на бицепс с ez грифом хватом снизу",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания на бицепс с ez грифом хватом сверху",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим лёжа",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "жим сидя в смите",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "4х12-15"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "4х12-15"
+              },
+              "order": 6
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 3,
+      "days": [
+        {
+          "weekday": 1,
+          "title": "понедельник",
+          "exercises": [
+            {
+              "name": "сгибания с гантелями на бицепс с супинацией",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 3,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 3х 12-6-6"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания с гантелями на бицепс с пронацией",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим в блоке из-за головы",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "жим гантелей сидя",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 3,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 3х 12-6-6"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "4х12-15"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 3,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 3х 12-6-6"
+              },
+              "order": 6
+            }
+          ]
+        },
+        {
+          "weekday": 3,
+          "title": "среда",
+          "exercises": [
+            {
+              "name": "жим лёжа 30°",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "тяга горизонтального блока",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "присед в гаке лицом к спинке",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "румынская тяга",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 4
+            }
+          ]
+        },
+        {
+          "weekday": 5,
+          "title": "пятница",
+          "exercises": [
+            {
+              "name": "сгибания на бицепс с ez грифом хватом снизу",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания на бицепс с ez грифом хватом сверху",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим лёжа",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "жим сидя в смите",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 3,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 3х 12-6-6"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "4х12-15"
+              },
+              "order": 6
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 4,
+      "days": [
+        {
+          "weekday": 1,
+          "title": "понедельник",
+          "exercises": [
+            {
+              "name": "сгибания с гантелями на бицепс с супинацией",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания с гантелями на бицепс с пронацией",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим в блоке из-за головы",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "отведения гантелей на переднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "5х12-15"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "5х12-15"
+              },
+              "order": 6
+            }
+          ]
+        },
+        {
+          "weekday": 3,
+          "title": "среда",
+          "exercises": [
+            {
+              "name": "жим лёжа 30°",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "тяга горизонтального блока",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "присед в гаке лицом к спинке",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "румынская тяга",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 4
+            }
+          ]
+        },
+        {
+          "weekday": 5,
+          "title": "пятница",
+          "exercises": [
+            {
+              "name": "сгибания на бицепс с ez грифом хватом снизу",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания на бицепс с ez грифом хватом сверху",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим лёжа",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "жим сидя в смите",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "5х12-15"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "5х12-15"
+              },
+              "order": 6
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 5,
+      "days": [
+        {
+          "weekday": 1,
+          "title": "понедельник",
+          "exercises": [
+            {
+              "name": "сгибания с гантелями на бицепс с супинацией",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 4,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 4х 12-6-6"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания с гантелями на бицепс с пронацией",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим в блоке из-за головы",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 7,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "7х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "отведения гантелей на переднюю дельту",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 4,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 4х 12-6-6"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "5х12-15"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 4,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 4х 12-6-6"
+              },
+              "order": 6
+            }
+          ]
+        },
+        {
+          "weekday": 3,
+          "title": "среда",
+          "exercises": [
+            {
+              "name": "жим лёжа 30°",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "тяга горизонтального блока",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "присед в гаке лицом к спинке",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "румынская тяга",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 4
+            }
+          ]
+        },
+        {
+          "weekday": 5,
+          "title": "пятница",
+          "exercises": [
+            {
+              "name": "сгибания на бицепс с ez грифом хватом снизу",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания на бицепс с ez грифом хватом сверху",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 7,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "7х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим лёжа",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 7,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "7х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "жим сидя в смите",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 4,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 4х 12-6-6"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "5х12-15"
+              },
+              "order": 6
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 6,
+      "days": [
+        {
+          "weekday": 1,
+          "title": "понедельник",
+          "exercises": [
+            {
+              "name": "сгибания с гантелями на бицепс с супинацией",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания с гантелями на бицепс с пронацией",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим в блоке из-за головы",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "отведения гантелей на переднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "5х12-15"
+              },
+              "order": 6
+            }
+          ]
+        },
+        {
+          "weekday": 3,
+          "title": "среда",
+          "exercises": [
+            {
+              "name": "жим лёжа",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "тяга вертикального блока",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "присед со штангой",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "румынская тяга",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 4
+            }
+          ]
+        },
+        {
+          "weekday": 5,
+          "title": "пятница",
+          "exercises": [
+            {
+              "name": "сгибания на бицепс с ez грифом хватом снизу",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания на бицепс с ez грифом хватом сверху",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим лёжа",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "жим сидя в смите",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "5х12-15"
+              },
+              "order": 6
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 7,
+      "days": [
+        {
+          "weekday": 1,
+          "title": "понедельник",
+          "exercises": [
+            {
+              "name": "сгибания с гантелями на бицепс с супинацией",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 4,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 4х 12-6-6"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания с гантелями на бицепс с пронацией",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим в блоке из-за головы",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 7,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "7х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "отведения гантелей на переднюю дельту",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 4,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 4х 12-6-6"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 4,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 4х 12-6-6"
+              },
+              "order": 6
+            }
+          ]
+        },
+        {
+          "weekday": 3,
+          "title": "среда",
+          "exercises": [
+            {
+              "name": "жим лёжа",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "тяга вертикального блока",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "присед со штангой",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "румынская тяга",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 4
+            }
+          ]
+        },
+        {
+          "weekday": 5,
+          "title": "пятница",
+          "exercises": [
+            {
+              "name": "сгибания на бицепс с ez грифом хватом снизу",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания на бицепс с ez грифом хватом сверху",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 7,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "7х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим лёжа",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 7,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "7х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "жим сидя в смите",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "5х8-12"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 4,
+                "reps_min": null,
+                "reps_max": null,
+                "drop_reps": [
+                  12,
+                  6,
+                  6
+                ],
+                "raw": "дропсет 4х 12-6-6"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 5,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "5х12-15"
+              },
+              "order": 6
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 8,
+      "days": [
+        {
+          "weekday": 1,
+          "title": "понедельник",
+          "exercises": [
+            {
+              "name": "сгибания с гантелями на бицепс с супинацией",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания с гантелями на бицепс с пронацией",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 3,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "3х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим в блоке из-за головы",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "отведения гантелей на переднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "6х12-15"
+              },
+              "order": 6
+            }
+          ]
+        },
+        {
+          "weekday": 3,
+          "title": "среда",
+          "exercises": [
+            {
+              "name": "жим лёжа",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "тяга вертикального блока",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "присед со штангой",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "румынская тяга",
+              "intensity": "heavy",
+              "prescription": {
+                "sets": 4,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "4х8-12"
+              },
+              "order": 4
+            }
+          ]
+        },
+        {
+          "weekday": 5,
+          "title": "пятница",
+          "exercises": [
+            {
+              "name": "сгибания на бицепс с ez грифом хватом снизу",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 3,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "3х8-12"
+              },
+              "order": 1
+            },
+            {
+              "name": "сгибания на бицепс с ez грифом хватом сверху",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 2
+            },
+            {
+              "name": "французский жим лёжа",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 3
+            },
+            {
+              "name": "жим сидя в смите",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 4
+            },
+            {
+              "name": "отведения на дельты",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 8,
+                "reps_max": 12,
+                "drop_reps": null,
+                "raw": "6х8-12"
+              },
+              "order": 5
+            },
+            {
+              "name": "отведения пек дек на заднюю дельту",
+              "intensity": "medium",
+              "prescription": {
+                "sets": 6,
+                "reps_min": 12,
+                "reps_max": 15,
+                "drop_reps": null,
+                "raw": "6х12-15"
+              },
+              "order": 6
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

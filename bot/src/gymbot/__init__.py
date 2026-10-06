@@ -1,0 +1,1 @@
+"""GymAPP Telegram bot package."""

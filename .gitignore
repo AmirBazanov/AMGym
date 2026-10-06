@@ -1,0 +1,13 @@
+.env
+*.env.local
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+data/*.db
+data/*.db-*
+node_modules/
+miniapp/dist/
+*Zone.Identifier
+.claude/settings.local.json

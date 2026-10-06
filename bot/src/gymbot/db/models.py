@@ -1,0 +1,138 @@
+"""ORM models. Keep them dialect-neutral so SQLite -> Postgres is a URL change + migration.
+
+Rules: no SQLite-only types, timestamps stored in UTC, weights in kg as Numeric.
+Every schema change goes through an Alembic migration (see .claude/skills/db-migrations).
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+from sqlalchemy import JSON, BigInteger, Date, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    name: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Daily nutrition targets (stage 3)
+    kcal_target: Mapped[int | None] = mapped_column(Integer)
+    protein_target_g: Mapped[int | None] = mapped_column(Integer)
+
+
+class Exercise(Base):
+    """Canonical exercise. `aliases` holds spellings the LLM/user may use ("жим", "бench")."""
+
+    __tablename__ = "exercises"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), unique=True)
+    muscle_group: Mapped[str | None] = mapped_column(String(64))
+    aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
+# --- Ready-made programs (imported from xlsx, see docs/program-format.md) ---
+
+class Program(Base):
+    __tablename__ = "programs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    source: Mapped[str | None] = mapped_column(String(200))
+    weeks: Mapped[list[ProgramWeek]] = relationship(back_populates="program", cascade="all, delete-orphan")
+
+
+class ProgramWeek(Base):
+    __tablename__ = "program_weeks"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    program_id: Mapped[int] = mapped_column(ForeignKey("programs.id", ondelete="CASCADE"))
+    number: Mapped[int] = mapped_column(Integer)
+    program: Mapped[Program] = relationship(back_populates="weeks")
+    days: Mapped[list[ProgramDay]] = relationship(back_populates="week", cascade="all, delete-orphan")
+
+
+class ProgramDay(Base):
+    __tablename__ = "program_days"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    week_id: Mapped[int] = mapped_column(ForeignKey("program_weeks.id", ondelete="CASCADE"))
+    weekday: Mapped[int] = mapped_column(Integer)  # 1=Mon .. 7=Sun
+    week: Mapped[ProgramWeek] = relationship(back_populates="days")
+    items: Mapped[list[ProgramItem]] = relationship(back_populates="day", cascade="all, delete-orphan")
+
+
+class ProgramItem(Base):
+    __tablename__ = "program_items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    day_id: Mapped[int] = mapped_column(ForeignKey("program_days.id", ondelete="CASCADE"))
+    exercise_id: Mapped[int] = mapped_column(ForeignKey("exercises.id"))
+    order: Mapped[int] = mapped_column(Integer)
+    intensity: Mapped[str | None] = mapped_column(String(16))  # heavy | medium | light
+    sets: Mapped[int] = mapped_column(Integer)
+    reps_min: Mapped[int | None] = mapped_column(Integer)
+    reps_max: Mapped[int | None] = mapped_column(Integer)
+    drop_reps: Mapped[list[int] | None] = mapped_column(JSON)  # e.g. [12, 6, 6] for a drop set
+    day: Mapped[ProgramDay] = relationship(back_populates="items")
+    exercise: Mapped[Exercise] = relationship()
+
+
+class UserProgram(Base):
+    """Which program the user is running and since when (to know today's planned day)."""
+
+    __tablename__ = "user_programs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    program_id: Mapped[int] = mapped_column(ForeignKey("programs.id"))
+    started_on: Mapped[date] = mapped_column(Date)
+
+
+# --- Actual training log ---
+
+class Workout(Base):
+    __tablename__ = "workouts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    performed_on: Mapped[date] = mapped_column(Date, index=True)
+    program_day_id: Mapped[int | None] = mapped_column(ForeignKey("program_days.id"))
+    note: Mapped[str | None] = mapped_column(Text)
+    sets: Mapped[list[WorkoutSet]] = relationship(back_populates="workout", cascade="all, delete-orphan")
+
+
+class WorkoutSet(Base):
+    __tablename__ = "workout_sets"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workout_id: Mapped[int] = mapped_column(ForeignKey("workouts.id", ondelete="CASCADE"), index=True)
+    exercise_id: Mapped[int] = mapped_column(ForeignKey("exercises.id"), index=True)
+    set_index: Mapped[int] = mapped_column(Integer)
+    reps: Mapped[int] = mapped_column(Integer)
+    weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    drop_index: Mapped[int] = mapped_column(Integer, default=0)  # 0 = main set, 1.. = drops
+    raw_text: Mapped[str | None] = mapped_column(Text)  # original message, for audit/re-parse
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    workout: Mapped[Workout] = relationship(back_populates="sets")
+    exercise: Mapped[Exercise] = relationship()
+
+
+# --- Nutrition (stage 3) ---
+
+class FoodEntry(Base):
+    __tablename__ = "food_entries"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    eaten_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    description: Mapped[str] = mapped_column(Text)
+    grams: Mapped[Decimal | None] = mapped_column(Numeric(7, 1))
+    kcal: Mapped[Decimal] = mapped_column(Numeric(7, 1))
+    protein_g: Mapped[Decimal] = mapped_column(Numeric(6, 1))
+    fat_g: Mapped[Decimal] = mapped_column(Numeric(6, 1))
+    carbs_g: Mapped[Decimal] = mapped_column(Numeric(6, 1))
+    estimated: Mapped[bool] = mapped_column(default=True)  # LLM estimate vs. label data
