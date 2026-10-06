@@ -118,17 +118,24 @@ def _norm(text: str) -> str:
     return " ".join(text.casefold().split()).strip(" .,!?…")
 
 
-def _note(result: ParseResult, source_text: str) -> str:
-    """The model's explanation of an estimate, as a paragraph under the list (never an echo)."""
-    note = (result.note or "").strip()
-    return f"\n\n{note}" if note and _norm(note) != _norm(source_text) else ""
+def _tail(result: ParseResult, source_text: str) -> str:
+    """Paragraphs under a record's list: the model's note, then its question about an unclear word.
+
+    Neither is shown if it only repeats the user's text.
+    """
+    parts = [
+        f"{prefix}{text}"
+        for prefix, value in (("", result.note), ("Уточни: ", result.clarification))
+        if (text := (value or "").strip()) and _norm(text) != _norm(source_text)
+    ]
+    return "".join(f"\n\n{p}" for p in parts)
 
 
 def render_preview(result: ParseResult, source_text: str = "") -> str:
     """Preview of a parsed message. `source_text` is the user's text: it is never echoed back.
 
-    For a record the model's note (what it changed and why) goes after the list, so the question
-    "Записать?" stays the first line.
+    For a record the model's note (what it changed and why) and its question about an unclear word
+    ("Уточни: …") go after the list, so "Записать?" stays the first line.
     """
     if result.kind == "workout" and result.exercises:
         lines = []
@@ -139,7 +146,7 @@ def render_preview(result: ParseResult, source_text: str = "") -> str:
                 for s in ex.sets
             )
             lines.append(f"• {ex.exercise}: {sets}")
-        return "Записать?\n" + "\n".join(lines) + _note(result, source_text)
+        return "Записать?\n" + "\n".join(lines) + _tail(result, source_text)
     if result.kind == "food" and result.foods:
         lines = [
             f"• {f.description}{f' {f.grams:g} г' if f.grams else ''}: {f.kcal:.0f} ккал, "
@@ -147,14 +154,14 @@ def render_preview(result: ParseResult, source_text: str = "") -> str:
             for f in result.foods
         ]
         total = sum(f.kcal for f in result.foods)
-        return f"Записать еду? Всего {total:.0f} ккал\n" + "\n".join(lines) + _note(result, source_text)
+        return f"Записать еду? Всего {total:.0f} ккал\n" + "\n".join(lines) + _tail(result, source_text)
     answer = (result.clarification or "").strip()
     if not answer or _norm(answer) == _norm(source_text):
         return HINT
     return answer
 
 
-_PIECES = re.compile(r",?\s*\d+\s*шт\.?$")
+_PIECES = re.compile(r",?\s*\d+(?:[.,]\d+)?\s*шт\.?$")
 
 
 def _names(result: ParseResult) -> set[str]:
@@ -312,7 +319,8 @@ async def save(cb: CallbackQuery, settings: Settings, sessionmaker: Sessionmaker
         raise
     _forget(cb.from_user.id, token)
     if cb.message:
-        shown = re.sub(r"^Записать( еду)?\?\s*", "", render_preview(pending.result))
+        saved = pending.result.model_copy(update={"clarification": None})  # the question is moot now
+        shown = re.sub(r"^Записать( еду)?\?\s*", "", render_preview(saved))
         await cb.message.edit_text(f"{shown}\n\n{note}".strip())  # type: ignore[union-attr]
     await cb.answer()
 

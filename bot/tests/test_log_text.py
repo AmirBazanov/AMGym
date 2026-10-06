@@ -277,6 +277,10 @@ async def test_question_answer_never_echoes_user_text(llm, settings, db):
     assert reply != "три штуки" and "Не понял" in reply
 
 
+def half_flatbread() -> dict:
+    return {**food(1), "foods": [{**food(1)["foods"][0], "description": "Лепёшка, 0.5 шт"}]}
+
+
 def workout(*names: str, revises: bool = False) -> dict:
     return {
         "kind": "workout",
@@ -296,6 +300,8 @@ def workout(*names: str, revises: bool = False) -> dict:
         (workout("жим лёжа"), workout("жим лёжа", revises=True), True),
         (food(1, "жим лёжа"), workout("жим лёжа"), False),  # different kind
         (food(1), workout("присед", revises=True), True),  # the flag wins
+        (food(1, "лепёшка"), {**food(1), "foods": [*food(1, "плов")["foods"], *food(2, "лепёшка")["foods"]]}, True),
+        (half_flatbread(), food(1, "лепёшка"), True),  # fractional pieces are cut too
     ],
 )
 def test_is_revision(prev, new, expected):
@@ -402,3 +408,22 @@ async def test_note_reaches_the_reply(llm, settings, db):
     await send("три куриные самсы", llm, settings, db)
     msg = await send("самса была так себе, белка поменьше", llm, settings, db, T0 + timedelta(minutes=1))
     assert "Белок 45 → 34 г" in msg.answer.await_args.args[0]
+
+
+async def test_answer_to_question_inside_record_revises_it(llm, settings, db):
+    first_answer = {**food(1, "плов"), "clarification": "Косушка — это что?"}
+    llm.answers = [first_answer, food(1, "плов")]  # the model forgot revises, the name matches
+    first = await send("плов, косушку", llm, settings, db)
+    assert "Уточни: Косушка — это что?" in first.answer.await_args.args[0]
+    second = await send("каса, пиала плова", llm, settings, db, T0 + timedelta(minutes=1))
+    assert json.loads(llm.last_messages()[-2])["clarification"] == "Косушка — это что?"  # the model saw it
+    assert token_of(first) not in log_text.PENDING
+    assert log_text.PENDING[token_of(second)].raw_text == "плов, косушку\nкаса, пиала плова"
+
+
+async def test_saved_message_drops_the_question(llm, settings, db):
+    llm.answers = [{**food(1, "плов"), "clarification": "Косушка — это что?"}]
+    msg = await send("плов, косушку", llm, settings, db)
+    cb = callback(f"save:{token_of(msg)}")
+    await log_text.save(cb, settings, db)
+    assert "Уточни" not in cb.message.edit_text.await_args.args[0]

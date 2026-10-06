@@ -11,6 +11,13 @@ from gymbot.config import Settings
 
 TIMEOUT = 30.0
 
+# Vocabulary hint for Whisper (`prompt`, it reads ~224 tokens): words it otherwise mishears,
+# e.g. "касушку" (a bowl-sized portion) came out as "косушку", "лепёшка" as "лепёка".
+STT_HINT = (
+    "Дневник питания и тренировок: плов, каса, касушка, лепёшка, самса, лагман, шурпа, манты, чучвара, "
+    "творог, гречка, грудка; жим лёжа, присед, тяга, подходы, повторения, дропсет, килограмм."
+)
+
 
 class STTError(RuntimeError):
     """Recognition failed. The message is for logs: status and a short body snippet, never the key."""
@@ -39,7 +46,7 @@ async def transcribe(
         resp = await http.post(
             f"{settings.stt_base_url.rstrip('/')}/audio/transcriptions",
             headers={"Authorization": f"Bearer {key}"},
-            data={"model": settings.stt_model, "language": "ru", "response_format": "json"},
+            data={"model": settings.stt_model, "language": "ru", "response_format": "json", "prompt": STT_HINT},
             files={"file": (filename, audio)},
             timeout=TIMEOUT,
         )

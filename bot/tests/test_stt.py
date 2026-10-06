@@ -3,7 +3,7 @@
 import httpx
 import pytest
 
-from gymbot.stt import STTError, STTRateLimited, transcribe
+from gymbot.stt import STT_HINT, STTError, STTRateLimited, transcribe
 
 SENTINEL = "gsk_SECRET_SENTINEL_123"
 AUDIO = b"OggS\x00\x01fake-audio-bytes\xff\xfe"
@@ -47,6 +47,13 @@ async def test_request_shape(stt_settings, base):
     assert b'name="file"' in body
     assert b'filename="voice.ogg"' in body
     assert AUDIO in body
+    assert b'name="prompt"' in body and STT_HINT.encode() in body
+
+
+def test_hint_is_short_and_has_domain_words():
+    assert len(STT_HINT) < 400  # the API reads only ~224 tokens of the prompt
+    for word in ("плов", "каса", "касушка", "лепёшка", "жим лёжа", "дропсет"):
+        assert word in STT_HINT
 
 
 async def test_filename_is_passed_through(stt_settings):

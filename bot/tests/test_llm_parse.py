@@ -64,6 +64,7 @@ def test_only_corrections_revise():
     assert flags == {
         "сделал жим лёжа 3 по 10 на 60": False,
         "съел 200г куриной грудки и 150г риса": False,
+        "плов, касушку и пол лепёшки": False,
         "три куриные самсы": False,
         "нет, четыре": True,
         "самса была так себе, белка поменьше": True,
@@ -108,3 +109,17 @@ def test_kcal_is_recomputed_when_it_contradicts_macros():
     assert close.kcal == 330  # within 15 %: the model's number stays
     zero = ParsedFood(description="вода", kcal=0, protein_g=0, fat_g=0, carbs_g=0)
     assert zero.kcal == 0
+
+
+def test_regional_portions_example():
+    r = example("плов, касушку и пол лепёшки")
+    assert r.kind == "food" and r.clarification is None and r.note is None
+    by_name = {f.description: f.grams for f in r.foods}
+    assert by_name == {"плов, каса": 300, "лепёшка, 0.5 шт": 125}
+    for word in ("каса", "касушка", "лепёшка ~250", "манты", "шашлык", "чучвара"):
+        assert word in SYSTEM_PROMPT
+
+
+def test_unknown_word_rule_in_prompt():
+    assert "не придумывай" in SYSTEM_PROMPT.lower() and "распознавания" in SYSTEM_PROMPT
+    assert "грамотно" in SYSTEM_PROMPT

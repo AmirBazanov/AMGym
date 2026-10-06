@@ -82,3 +82,15 @@ def test_note_that_echoes_user_is_hidden():
 
 def test_no_note_no_trailing_text():
     assert render_preview(ParseResult(kind="food", foods=[FOOD])).endswith("У90")
+
+
+def test_record_with_question_asks_after_list_and_note():
+    r = ParseResult(kind="food", foods=[FOOD], note="Порцию взял типичную.", clarification="Косушка — это что?")
+    out = render_preview(r, source_text="плов, косушку")
+    assert out.startswith("Записать еду?")
+    assert out.endswith("У90\n\nПорцию взял типичную.\n\nУточни: Косушка — это что?")
+
+
+def test_record_question_that_echoes_user_is_hidden():
+    r = ParseResult(kind="food", foods=[FOOD], clarification="косушка")
+    assert "Уточни" not in render_preview(r, source_text="Косушка")
