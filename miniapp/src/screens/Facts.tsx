@@ -14,7 +14,16 @@ import {
 import { IconPlus } from '../components/icons'
 import { Sheet } from '../components/Sheet'
 import { Switch } from '../components/Switch'
-import { activeCount, categoryLabel, cleanFactText, FACT_CATEGORIES, factTextError, knownCategory, sortFacts } from '../facts'
+import {
+  activeCount,
+  categoryLabel,
+  cleanFactText,
+  duplicateFactText,
+  FACT_CATEGORIES,
+  factTextError,
+  knownCategory,
+  sortFacts,
+} from '../facts'
 import { confirm, haptic } from '../telegram'
 import { useRemote } from '../useRemote'
 
@@ -125,6 +134,7 @@ export function Facts() {
             upsert(f)
             setEditing(null)
           }}
+          onExisting={upsert}
           onGone={(id) => {
             drop(id)
             setEditing(null)
@@ -174,11 +184,14 @@ function saveError(err: unknown): string {
 function FactSheet({
   fact,
   onSaved,
+  onExisting,
   onGone,
   onClose,
 }: {
   fact: Fact | null
   onSaved: (f: Fact) => void
+  /** POST hit an existing fact: show it in the list, but keep the sheet open with the explanation. */
+  onExisting: (f: Fact) => void
   onGone: (id: number) => void
   onClose: () => void
 }) {
@@ -197,14 +210,30 @@ function FactSheet({
     setBusy(true)
     setError(null)
     try {
-      const saved = fact
-        ? await updateFact(fact.id, { text: clean, category })
-        : await createFact({ text: clean, category })
+      if (fact) {
+        const saved = await updateFact(fact.id, { text: clean, category })
+        haptic.success()
+        return onSaved(saved)
+      }
+      const res = await createFact({ text: clean, category })
+      if (!res.created) {
+        // The server kept the old fact as it was: no success, say what it really is.
+        haptic.error()
+        onExisting(res.fact)
+        setError(duplicateFactText(res.fact))
+        setBusy(false)
+        return
+      }
       haptic.success()
-      onSaved(saved)
+      onSaved(res.fact)
     } catch (err) {
       haptic.error()
       if (fact && err instanceof ApiError && err.status === 404) return onGone(fact.id)
+      if (fact && err instanceof ApiError && err.status === 422) {
+        setError(duplicateFactText(null))
+        setBusy(false)
+        return
+      }
       setError(saveError(err))
       setBusy(false)
     }

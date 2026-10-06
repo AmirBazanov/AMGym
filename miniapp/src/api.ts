@@ -15,13 +15,18 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** Like api(), plus the HTTP status for endpoints where 200 and 201 mean different things. */
+export async function apiWithStatus<T>(path: string, init: RequestInit = {}): Promise<{ status: number; data: T }> {
   const res = await fetch(`./api${path}`, {
     ...init,
     headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData, ...init.headers },
   })
   if (!res.ok) throw new ApiError(res.status, `${res.status} ${await res.text()}`)
-  return (res.status === 204 ? undefined : await res.json()) as T
+  return { status: res.status, data: (res.status === 204 ? undefined : await res.json()) as T }
+}
+
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return (await apiWithStatus<T>(path, init)).data
 }
 
 // ---- Nutrition (contract: docs/superpowers/specs/2026-10-06-nutrition-reminders-voice-design.md, section 1) ----
@@ -205,10 +210,13 @@ export function getFacts(): Promise<Fact[]> {
   return api<Fact[]>('/facts')
 }
 
-export function createFact(body: FactInput): Promise<Fact> {
-  return api<Fact>('/facts', { method: 'POST', body: JSON.stringify(body) })
+/** 201: a new fact. 200: the same text already exists and the server returns that fact unchanged. */
+export async function createFact(body: FactInput): Promise<{ fact: Fact; created: boolean }> {
+  const res = await apiWithStatus<Fact>('/facts', { method: 'POST', body: JSON.stringify(body) })
+  return { fact: res.data, created: res.status === 201 }
 }
 
+/** 422 when the new text duplicates another fact. */
 export function updateFact(id: number, patch: FactPatch): Promise<Fact> {
   return api<Fact>(`/facts/${id}`, { method: 'PATCH', body: JSON.stringify(patch) })
 }
@@ -238,6 +246,8 @@ export interface DayPlan {
   readiness: Readiness
   summary: string | null
   exercises: DayPlanExercise[] // program day order; empty when not adjusted
+  week?: number // program week the plan is for; absent on older servers
+  weekday?: number // 1 = Monday .. 7 = Sunday, as ProgramDay.weekday; absent on older servers
 }
 
 /** 404 when today is not a training day. Never cached offline. */

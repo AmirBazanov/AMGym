@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import type { Fact } from './api'
-import { activeCount, categoryLabel, cleanFactText, FACT_CATEGORIES, factTextError, knownCategory, sortFacts } from './facts'
+import {
+  activeCount,
+  categoryLabel,
+  cleanFactText,
+  duplicateFactText,
+  FACT_CATEGORIES,
+  factTextError,
+  knownCategory,
+  sortFacts,
+} from './facts'
 
 const fact = (o: Partial<Fact>): Fact => ({ id: 1, text: 'x', category: 'other', createdAt: '2026-10-07T05:00:00Z', active: true, ...o })
 
@@ -73,5 +82,19 @@ describe('cleanFactText and factTextError', () => {
     expect(factTextError('a'.repeat(200), 200)).toBeNull()
     expect(factTextError('a'.repeat(201), 200)).toBe('long')
     expect(factTextError(`  ${'a'.repeat(200)}  `, 200)).toBeNull()
+  })
+})
+
+describe('duplicateFactText', () => {
+  it('names the category the existing fact really has', () => {
+    expect(duplicateFactText({ category: 'food', active: true })).toBe('Такой факт уже есть, категория: Еда.')
+  })
+
+  it('says when the existing fact is switched off', () => {
+    expect(duplicateFactText({ category: 'health', active: false })).toBe('Такой факт уже есть, категория: Здоровье, сейчас выключен.')
+  })
+
+  it('is short without the existing fact (PATCH 422)', () => {
+    expect(duplicateFactText(null)).toBe('Такой факт уже есть.')
   })
 })

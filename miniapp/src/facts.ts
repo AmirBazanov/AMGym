@@ -40,3 +40,9 @@ export function factTextError(text: string, max: number): 'empty' | 'long' | nul
   if (!t) return 'empty'
   return t.length > max ? 'long' : null
 }
+
+/** Shown instead of "saved" when the text is already remembered: says which category it really has. */
+export function duplicateFactText(existing: Pick<Fact, 'category' | 'active'> | null): string {
+  if (!existing) return 'Такой факт уже есть.'
+  return `Такой факт уже есть, категория: ${categoryLabel(existing.category)}${existing.active ? '' : ', сейчас выключен'}.`
+}

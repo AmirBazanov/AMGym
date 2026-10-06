@@ -230,7 +230,7 @@ export const actions = {
     if (!a || isStarted(a)) return
     const day = getDay(getProgram(a.programId), a.week, a.weekday)
     if (!day) return
-    const res = applyPlan(day, planMode() === 'adjusted' ? plan : null, state.history, localDate())
+    const res = applyPlan(day, planMode() === 'adjusted' ? plan : null, state.history, localDate(), a.week)
     const key = res.applied ? planKey(plan) : 'program'
     if ((state.activePlanKey ?? 'program') === key) return
     commit({ ...state, activePlanKey: key, active: { ...a, exercises: res.exercises.map(plannedLog) } })

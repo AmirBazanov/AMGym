@@ -32,11 +32,20 @@ export interface AppliedPlan {
 }
 
 /**
- * The plan belongs to `day` on `today`: it is adjusted, dated today, and every exercise it names
- * is in that day. The app may have prepared another day of the week than the server planned for.
+ * The plan belongs to `day` (of program `week`) on `today`: it is adjusted, dated today, its week and
+ * weekday (when the server sends them) match, and every exercise it names is in that day. The app may
+ * have prepared, or the user may be looking at, another day with the same exercises.
  */
-export function planFitsDay(day: ProgramDay | undefined, plan: DayPlan | null | undefined, today: string): boolean {
+export function planFitsDay(
+  day: ProgramDay | undefined,
+  plan: DayPlan | null | undefined,
+  today: string,
+  week?: number,
+): boolean {
   if (!day || !plan || !plan.adjusted || plan.date !== today || !plan.exercises.length) return false
+  // Newer servers name the program day; older answers without it fall back to the name check below.
+  if (plan.weekday != null && plan.weekday !== day.weekday) return false
+  if (plan.week != null && week != null && plan.week !== week) return false
   return plan.exercises.every((p) => day.exercises.some((e) => e.name === p.name))
 }
 
@@ -54,15 +63,29 @@ export function safeFactor(f: number | null | undefined): number {
 }
 
 /**
- * Weight × factor on the equipment step. A lighter factor rounds down and a heavier one up, so the
- * result never lands back on the base weight by rounding. Factor 1 keeps the base as is (it may be
- * off-step, e.g. 13.5 kg dumbbells from history).
+ * Weight × factor on the equipment step:
+ * - rounded to the nearest step (67.5 × 0.9 = 60.75 -> 60, 20 × 0.85 = 17 -> 17.5), a half towards the factor;
+ * - when that lands back on the base, one step further (10 × 0.95 on 1 kg steps -> 9), but only if the
+ *   step changes the weight by at most twice the requested amount: 5 kg × 0.9 stays 5, not 2.5 (−50 %);
+ * - never below one step (2.5 kg × 0.9 stays 2.5, never 0) and never across the base in the wrong direction.
+ * Factor 1 keeps the base as is (it may be off-step, e.g. 13.5 kg dumbbells from history).
  */
 export function scaleWeight(base: number | null, factor: number, step: number): number | null {
   if (base == null || factor === 1) return base
-  const x = (base * factor) / step
-  const steps = factor < 1 ? Math.floor(x + 1e-9) : Math.ceil(x - 1e-9)
-  return Math.max(0, roundToStep(steps * step, step))
+  if (base <= step && factor < 1) return base
+  const target = base * factor
+  // Nearest step; an exact half goes the way the factor asks (15 × 0.9 = 13.5 -> 13 on 1 kg steps).
+  const x = target / step
+  let r = roundToStep((factor < 1 ? Math.ceil(x - 0.5 - 1e-9) : Math.floor(x + 0.5 + 1e-9)) * step, step)
+  if (factor < 1 && r >= base) {
+    // Largest step multiple strictly below the base (the base itself may be off-step).
+    const lower = roundToStep((Math.ceil(base / step - 1e-9) - 1) * step, step)
+    r = base - lower <= 2 * (base - target) + 1e-9 ? lower : base
+  } else if (factor > 1 && r <= base) {
+    const upper = roundToStep((Math.floor(base / step + 1e-9) + 1) * step, step)
+    r = upper - base <= 2 * (target - base) + 1e-9 ? upper : base
+  }
+  return factor < 1 ? Math.min(base, Math.max(step, r)) : Math.max(base, r)
 }
 
 function adjustPrescription(p: Prescription, a: DayPlanExercise | undefined): Prescription {
@@ -87,9 +110,15 @@ function unchanged(e: ProgramExercise, history: Workout[]): AdjustedExercise {
  * factor, skip, replacement). Without a fitting plan, or when it would skip everything, the program
  * day as written (`applied` false), so the user always has something to train.
  */
-export function applyPlan(day: ProgramDay, plan: DayPlan | null, history: Workout[], today: string): AppliedPlan {
+export function applyPlan(
+  day: ProgramDay,
+  plan: DayPlan | null,
+  history: Workout[],
+  today: string,
+  week?: number,
+): AppliedPlan {
   const plain = (): AppliedPlan => ({ exercises: day.exercises.map((e) => unchanged(e, history)), skipped: [], applied: false })
-  if (!plan || !planFitsDay(day, plan, today)) return plain()
+  if (!plan || !planFitsDay(day, plan, today, week)) return plain()
 
   const exercises: AdjustedExercise[] = []
   const skipped: AppliedPlan['skipped'] = []

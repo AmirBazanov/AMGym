@@ -73,6 +73,26 @@ describe('planFitsDay', () => {
   it('is true when every plan name is in the day', () => {
     expect(planFitsDay(DAY, plan([pe(BENCH), pe(CURL)]), TODAY)).toBe(true)
   })
+
+  it('checks week and weekday when the server sends them', () => {
+    const p = plan([pe(BENCH)], { week: 4, weekday: 3 })
+    expect(planFitsDay(DAY, p, TODAY, 4)).toBe(true)
+    expect(planFitsDay(DAY, p, TODAY, 5)).toBe(false) // same exercises, another week (DayPreview chips)
+    expect(planFitsDay({ ...DAY, weekday: 5 }, p, TODAY, 4)).toBe(false) // same exercises, another day
+  })
+
+  it('falls back to the name check for answers without week and weekday', () => {
+    expect(planFitsDay(DAY, plan([pe(BENCH)]), TODAY, 5)).toBe(true)
+    expect(planFitsDay({ ...DAY, weekday: 5 }, plan([pe(BENCH)]), TODAY)).toBe(true)
+  })
+
+  it('applyPlan leaves another week as written', () => {
+    const p = plan([pe(BENCH, { sets: 2 })], { week: 4, weekday: 3 })
+    expect(applyPlan(DAY, p, [], TODAY, 4).applied).toBe(true)
+    const other = applyPlan(DAY, p, [], TODAY, 5)
+    expect(other.applied).toBe(false)
+    expect(other.exercises[0].exercise.prescription.sets).toBe(4)
+  })
 })
 
 describe('planKey', () => {
@@ -130,16 +150,34 @@ describe('scaleWeight', () => {
     expect(scaleWeight(13.5, 1, 1)).toBe(13.5)
   })
 
-  it('rounds a lighter weight down: 67.5 x 0.9 = 60.75 -> 60', () => {
+  it('rounds to the nearest step: 67.5 x 0.9 = 60.75 -> 60, 60 x 0.9 = 54 -> 55, 20 x 0.85 = 17 -> 17.5', () => {
     expect(scaleWeight(67.5, 0.9, 2.5)).toBe(60)
+    expect(scaleWeight(60, 0.9, 2.5)).toBe(55)
+    expect(scaleWeight(20, 0.85, 2.5)).toBe(17.5)
+  })
+
+  it('never goes below one step: 2.5 x 0.9 stays 2.5', () => {
+    expect(scaleWeight(2.5, 0.9, 2.5)).toBe(2.5)
+    expect(scaleWeight(2.5, 0.5, 2.5)).toBe(2.5)
+    expect(scaleWeight(5, 0.3, 2.5)).toBe(2.5)
+  })
+
+  it('does not step down by much more than asked: 5 x 0.9 stays 5 instead of 2.5 (-50 %)', () => {
+    expect(scaleWeight(5, 0.9, 2.5)).toBe(5)
+    expect(scaleWeight(5, 0.75, 2.5)).toBe(2.5)
   })
 
   it('does not round back to the base: 10 x 0.95 on step 1 -> 9', () => {
     expect(scaleWeight(10, 0.95, 1)).toBe(9)
   })
 
-  it('rounds a heavier weight up: 60 x 1.1 = 66 -> 67.5', () => {
-    expect(scaleWeight(60, 1.1, 2.5)).toBe(67.5)
+  it('rounds a heavier weight to the nearest step too: 60 x 1.1 = 66 -> 65', () => {
+    expect(scaleWeight(60, 1.1, 2.5)).toBe(65)
+  })
+
+  it('steps up from the base only when the step is at most twice the asked increase', () => {
+    expect(scaleWeight(10, 1.05, 1)).toBe(11)
+    expect(scaleWeight(20, 1.05, 2.5)).toBe(20)
   })
 
   it('returns a value on the step without float noise', () => {
@@ -154,8 +192,17 @@ describe('scaleWeight', () => {
     }
   })
 
-  it('never goes below zero', () => {
-    expect(scaleWeight(1, 0.3, 2.5)).toBe(0)
+  it('keeps a base below one step as is', () => {
+    expect(scaleWeight(1, 0.3, 2.5)).toBe(1)
+  })
+
+  it('never moves against the factor', () => {
+    for (const step of [1, 2.5]) {
+      for (const base of [2.5, 5, 7.5, 10, 13.5, 20, 60]) {
+        for (const factor of [0.5, 0.85, 0.9, 0.95]) expect(scaleWeight(base, factor, step)!).toBeLessThanOrEqual(base)
+        for (const factor of [1.05, 1.1]) expect(scaleWeight(base, factor, step)!).toBeGreaterThanOrEqual(base)
+      }
+    }
   })
 })
 

@@ -213,7 +213,7 @@ function DayPreview({ dp }: { dp: DayPlanState }) {
   const [sheet, setSheet] = useState<string | null>(null)
   const day = getDay(program, week, weekday)
   const mode = planMode(state)
-  const applied = day ? applyPlan(day, mode === 'adjusted' ? visiblePlan(dp) : null, history, localISODate()) : null
+  const applied = day ? applyPlan(day, mode === 'adjusted' ? visiblePlan(dp) : null, history, localISODate(), week) : null
   const weekDays = program.weeks.find((w) => w.number === week)?.days ?? []
   const doneHere = run.some((w) => w.week === week && w.weekday === weekday)
 
@@ -411,8 +411,8 @@ function ActiveWorkout({ workout, dp }: { workout: Workout; dp: DayPlanState }) 
   const plan = visiblePlan(dp)
   // Look exercises up in what the workout was built from, so replaced ones keep their prescription.
   const builtFromPlan = plan != null && state.activePlanKey === planKey(plan)
-  const built = day ? applyPlan(day, builtFromPlan ? plan : null, history, localISODate()) : null
-  const shown = day ? applyPlan(day, mode === 'adjusted' ? plan : null, history, localISODate()) : null
+  const built = day ? applyPlan(day, builtFromPlan ? plan : null, history, localISODate(), workout.week) : null
+  const shown = day ? applyPlan(day, mode === 'adjusted' ? plan : null, history, localISODate(), workout.week) : null
   const lookup = (name: string) => lookupExercise(built, day, name)
 
   const total = workout.exercises.reduce((n, e) => n + e.sets.length, 0)
