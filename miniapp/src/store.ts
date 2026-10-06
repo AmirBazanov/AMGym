@@ -2,7 +2,7 @@
 // Shapes mirror the future server models (Workout -> exercises -> sets) so the swap is mechanical.
 import { useSyncExternalStore } from 'react'
 import { getDay, getProgram, isDropset, programPosition, type ProgramExercise } from './program'
-import { api, ApiError, inTelegram } from './api'
+import { api, ApiError, EMPTY_TARGETS, inTelegram, type Targets } from './api'
 import { buildDemoHistory, demoStartDate } from './mock'
 
 export interface SetEntry {
@@ -43,6 +43,8 @@ export interface State {
   pending: Workout[]
   // Workouts the server refused (e.g. invalid values); kept so nothing is silently lost.
   rejected: Workout[]
+  // Daily nutrition targets (a setting like restSeconds). Food entries themselves are never cached here.
+  targets: Targets
 }
 
 interface ServerState {
@@ -50,6 +52,7 @@ interface ServerState {
   startDate: string
   restSeconds: number
   history: Workout[]
+  targets?: Targets // absent on servers older than the nutrition API
 }
 
 const KEY = 'gymapp.v1'
@@ -69,6 +72,7 @@ function initialState(): State {
     mode: inTelegram ? 'server' : 'demo',
     pending: [],
     rejected: [],
+    targets: EMPTY_TARGETS,
   }
 }
 
@@ -284,12 +288,27 @@ export const actions = {
 
   setProgram(programId: string, startDate: string) {
     commit({ ...state, programId, startDate: toMonday(startDate) })
-    pushSettings({ programId, startDate: toMonday(startDate) })
+    void pushSettings({ programId, startDate: toMonday(startDate) })
   },
 
   setRestSeconds(restSeconds: number) {
     commit({ ...state, restSeconds })
-    pushSettings({ restSeconds })
+    void pushSettings({ restSeconds })
+  },
+
+  /**
+   * Save nutrition targets. All four values are always sent, so null explicitly clears a target.
+   * Resolves to 'local' in the demo, 'saved' once the server accepted them, 'failed' otherwise.
+   * In server mode nothing is stored until the server answers: applyServer takes the targets from
+   * its response, so a failed save leaves the previous (server) targets and the edit stays unsaved.
+   */
+  async setTargets(targets: Targets): Promise<'local' | 'saved' | 'failed'> {
+    if (state.mode !== 'server') {
+      commit({ ...state, targets })
+      return 'local'
+    }
+    const res = await pushSettings({ targets })
+    return res?.targets ? 'saved' : 'failed'
   },
 
   resetDemo() {
@@ -317,6 +336,7 @@ function applyServer(server: ServerState) {
     programId: server.programId,
     startDate: server.startDate,
     restSeconds: server.restSeconds,
+    targets: server.targets ?? state.targets,
     history: [...server.history, ...pending, ...state.rejected].sort((a, b) => a.startedAt.localeCompare(b.startedAt)),
     pending,
   })
@@ -353,11 +373,17 @@ export async function flushPending(): Promise<void> {
   }
 }
 
-function pushSettings(patch: Partial<Pick<State, 'programId' | 'startDate' | 'restSeconds'>>) {
-  if (state.mode !== 'server') return
-  api<ServerState>('/settings', { method: 'PUT', body: JSON.stringify(patch) })
-    .then(applyServer)
-    .catch(() => undefined)
+/** Resolves to the server state after the update, or null when not in server mode or the request failed. */
+function pushSettings(
+  patch: Partial<Pick<State, 'programId' | 'startDate' | 'restSeconds' | 'targets'>>,
+): Promise<ServerState | null> {
+  if (state.mode !== 'server') return Promise.resolve(null)
+  return api<ServerState>('/settings', { method: 'PUT', body: JSON.stringify(patch) })
+    .then((server) => {
+      applyServer(server)
+      return server
+    })
+    .catch(() => null)
 }
 
 /**

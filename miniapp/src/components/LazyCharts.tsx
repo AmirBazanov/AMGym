@@ -5,6 +5,7 @@ const Line = lazy(() => import('./ProgressChart').then((m) => ({ default: m.Line
 const Bar = lazy(() => import('./ProgressChart').then((m) => ({ default: m.BarSeries })))
 
 type Props = ComponentProps<typeof Line>
+type BarProps = ComponentProps<typeof Bar>
 
 export function LineSeries(props: Props) {
   return (
@@ -14,7 +15,7 @@ export function LineSeries(props: Props) {
   )
 }
 
-export function BarSeries(props: Props) {
+export function BarSeries(props: BarProps) {
   return (
     <Suspense fallback={<div style={{ height: 180 }} />}>
       <Bar {...props} />

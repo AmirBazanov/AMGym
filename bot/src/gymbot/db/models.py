@@ -39,6 +39,8 @@ class User(Base):
     # Daily nutrition targets (stage 3)
     kcal_target: Mapped[int | None] = mapped_column(Integer)
     protein_target_g: Mapped[int | None] = mapped_column(Integer)
+    fat_target_g: Mapped[int | None] = mapped_column(Integer)
+    carbs_target_g: Mapped[int | None] = mapped_column(Integer)
     rest_seconds: Mapped[int] = mapped_column(Integer, default=90)
 
 

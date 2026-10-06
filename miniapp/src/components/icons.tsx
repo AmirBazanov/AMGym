@@ -34,6 +34,27 @@ export const IconProgress = () => (
     <path d="M15 7h4.5v4.5" />
   </svg>
 )
+export const IconNutrition = () => (
+  <svg {...base}>
+    <path d="M5 3v5.5a2.5 2.5 0 0 0 5 0V3M7.5 3v18" />
+    <path d="M18.5 21V3c-2.5 1.5-3.5 4.5-3.5 8v3h3.5" />
+  </svg>
+)
+export const IconChevronLeft = () => (
+  <svg {...base} width={22} height={22}>
+    <path d="M15 5l-7 7 7 7" />
+  </svg>
+)
+export const IconChevronRight = () => (
+  <svg {...base} width={22} height={22}>
+    <path d="M9 5l7 7-7 7" />
+  </svg>
+)
+export const IconClose = () => (
+  <svg {...base} width={18} height={18}>
+    <path d="M6 6l12 12M18 6L6 18" />
+  </svg>
+)
 export const IconCheck = () => (
   <svg {...base} strokeWidth={2.6}>
     <path d="M5 12.5l4.5 4.5L19 7.5" />

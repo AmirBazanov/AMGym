@@ -738,3 +738,108 @@ table.points td {
   padding: 8px 0;
   border-top: 1px solid var(--sep);
 }
+
+.btn:disabled {
+  opacity: 0.45;
+}
+
+/* ---------- nutrition ---------- */
+.date-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 4px;
+}
+.date-nav-label {
+  flex: 1;
+  text-align: center;
+  font-weight: 600;
+}
+.icon-btn {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--link);
+}
+.icon-btn:active {
+  background: var(--soft);
+}
+.icon-btn:disabled {
+  color: var(--hint);
+  opacity: 0.4;
+}
+.row .icon-btn {
+  margin-right: -10px;
+  color: var(--hint);
+}
+.macro-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+.macro-note {
+  font-size: 13px;
+  color: var(--hint);
+  margin-top: 4px;
+}
+.macro-note.over {
+  color: var(--danger);
+}
+.progress.over > div {
+  background: var(--danger);
+}
+.macro-totals {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.macro-totals .tile {
+  padding: 10px 8px;
+}
+.macro-totals .tile .v {
+  font-size: 19px;
+}
+.food-time {
+  flex: none;
+  width: 42px;
+  font-size: 14px;
+  color: var(--hint);
+}
+.target-field {
+  flex: none;
+  width: 104px;
+}
+.target-unit {
+  flex: none;
+  width: 32px;
+  font-size: 14px;
+}
+.legend-dash {
+  display: inline-block;
+  width: 14px;
+  margin-right: 6px;
+  vertical-align: middle;
+  border-top: 2px dashed var(--text);
+  opacity: 0.6;
+}
+table.nutrition-table td {
+  padding: 11px 0;
+}
+table.nutrition-table th + th,
+table.nutrition-table td + td {
+  padding-left: 6px;
+}
+table.nutrition-table tr.clickable {
+  cursor: pointer;
+}
+table.nutrition-table td.over {
+  color: var(--danger);
+}

@@ -1,4 +1,15 @@
-import { Area, AreaChart, Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 
 // Single-series charts: one hue (the Telegram button color), 2px line, recessive grid.
 const ACCENT = 'var(--accent)'
@@ -71,11 +82,13 @@ export function BarSeries({
   x,
   y,
   unit,
+  target,
 }: {
   data: object[]
   x: string
   y: string
   unit: string
+  target?: number | null // horizontal goal line, e.g. the daily kcal target
 }) {
   return (
     <ResponsiveContainer width="100%" height={180}>
@@ -85,6 +98,9 @@ export function BarSeries({
         <YAxis {...axis} width={40} />
         <Tooltip content={<Tip unit={unit} labelKey={x} />} cursor={{ fill: 'var(--soft)' }} />
         <Bar dataKey={y} fill={ACCENT} radius={[4, 4, 0, 0]} maxBarSize={36} isAnimationActive={false} />
+        {target != null && (
+          <ReferenceLine y={target} stroke="var(--text)" strokeDasharray="4 4" strokeOpacity={0.6} ifOverflow="extendDomain" />
+        )}
       </BarChart>
     </ResponsiveContainer>
   )

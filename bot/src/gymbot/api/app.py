@@ -2,7 +2,7 @@
 
 
 from collections.abc import AsyncIterator
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
@@ -13,25 +13,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gymbot.api.auth import InitDataError, TelegramUser, validate_init_data
 from gymbot.config import Settings
-from gymbot.db.models import User, UserProgram
+from gymbot.db.models import FoodEntry, User, UserProgram
 from gymbot.db.session import Sessionmaker
+from gymbot.services import nutrition as nut
 from gymbot.services import workouts as ws
 from gymbot.services.access import is_allowed
 from gymbot.services.programs import load_program
 from gymbot.services.users import active_program, get_or_create_user, set_program
+
+NUTRITION_MIN_DATE = date(2000, 1, 1)
 
 
 class StateOut(BaseModel):
     programId: str
     startDate: date
     restSeconds: int
+    targets: nut.Targets
     history: list[ws.WorkoutOut]
+
+
+class TargetsIn(BaseModel):
+    """Partial update of the daily norm: omitted keys stay, null resets."""
+
+    kcal: int | None = Field(default=None, ge=0, le=10000)
+    protein: int | None = Field(default=None, ge=0, le=1000)
+    fat: int | None = Field(default=None, ge=0, le=1000)
+    carbs: int | None = Field(default=None, ge=0, le=1000)
 
 
 class SettingsIn(BaseModel):
     programId: str | None = None
     startDate: date | None = None
     restSeconds: int | None = Field(default=None, ge=15, le=600)
+    targets: TargetsIn | None = None
 
 
 def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
@@ -72,7 +86,11 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
         weeks = len((await load_program(session, up.program_id)).weeks)
         history = [ws.serialize(w, up, weeks, tz) for w in await ws.list_workouts(session, user)]
         return StateOut(
-            programId=up.program.slug, startDate=up.started_on, restSeconds=user.rest_seconds, history=history
+            programId=up.program.slug,
+            startDate=up.started_on,
+            restSeconds=user.rest_seconds,
+            targets=nut.user_targets(user),
+            history=history,
         )
 
     @app.get("/api/health")
@@ -91,6 +109,8 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
         user, up = await current(session, tg)
         if body.restSeconds is not None:
             user.rest_seconds = body.restSeconds
+        if body.targets is not None:
+            nut.set_targets(user, body.targets.model_dump(exclude_unset=True))
         if body.programId or body.startDate:
             try:
                 up = await set_program(
@@ -122,6 +142,34 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
         if w is None:
             raise HTTPException(404, "not found")
         await session.delete(w)
+        await session.commit()
+
+    def nutrition_date(value: date | None, name: str) -> date:
+        """Default to today in TIMEZONE; reject dates whose day bounds would overflow datetime (500)."""
+        today = datetime.now(tz).date()
+        if value is None:
+            return today
+        if not NUTRITION_MIN_DATE <= value <= today + timedelta(days=366):
+            raise HTTPException(422, f"{name} out of range")
+        return value
+
+    @app.get("/api/nutrition/day")
+    async def nutrition_day(session: Session, tg: TgUser, date: date | None = None) -> nut.DaySummary:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        return await nut.day_summary(session, user, nutrition_date(date, "date"), tz)
+
+    @app.get("/api/nutrition/week")
+    async def nutrition_week(session: Session, tg: TgUser, end: date | None = None) -> nut.WeekSummary:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        return await nut.week_summary(session, user, nutrition_date(end, "end"), tz)
+
+    @app.delete("/api/food/{food_id}", status_code=204)
+    async def delete_food(food_id: int, session: Session, tg: TgUser) -> None:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        entry = await session.get(FoodEntry, food_id)
+        if entry is None or entry.user_id != user.id:
+            raise HTTPException(404, "not found")
+        await session.delete(entry)
         await session.commit()
 
     @app.middleware("http")

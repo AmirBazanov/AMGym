@@ -1,19 +1,21 @@
 import { useState } from 'react'
-import { IconHistory, IconProgram, IconProgress, IconToday } from './components/icons'
+import { IconHistory, IconNutrition, IconProgram, IconProgress, IconToday } from './components/icons'
 import { ConfirmHost } from './components/ConfirmHost'
 import { History } from './screens/History'
+import { Nutrition } from './screens/Nutrition'
 import { ProgramScreen } from './screens/Program'
 import { Progress } from './screens/Progress'
 import { Today } from './screens/Today'
 import { haptic } from './telegram'
 
-type Tab = 'today' | 'program' | 'history' | 'progress'
+type Tab = 'today' | 'program' | 'history' | 'progress' | 'nutrition'
 
 const TABS: { key: Tab; label: string; Icon: () => React.JSX.Element }[] = [
   { key: 'today', label: 'Сегодня', Icon: IconToday },
   { key: 'program', label: 'Программа', Icon: IconProgram },
   { key: 'history', label: 'История', Icon: IconHistory },
   { key: 'progress', label: 'Прогресс', Icon: IconProgress },
+  { key: 'nutrition', label: 'Питание', Icon: IconNutrition },
 ]
 
 function initialTab(): Tab {
@@ -31,6 +33,7 @@ export default function App() {
         {tab === 'program' && <ProgramScreen />}
         {tab === 'history' && <History />}
         {tab === 'progress' && <Progress />}
+        {tab === 'nutrition' && <Nutrition />}
       </main>
       <nav className="tabbar">
         <div className="tabbar-inner">
