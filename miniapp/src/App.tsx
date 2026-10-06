@@ -1,9 +1,56 @@
-// Stage 2 screens (see ROADMAP.md): Сегодня, Программы, Упражнения, Прогресс.
+import { useState } from 'react'
+import { IconHistory, IconProgram, IconProgress, IconToday } from './components/icons'
+import { ConfirmHost } from './components/ConfirmHost'
+import { History } from './screens/History'
+import { ProgramScreen } from './screens/Program'
+import { Progress } from './screens/Progress'
+import { Today } from './screens/Today'
+import { haptic } from './telegram'
+
+type Tab = 'today' | 'program' | 'history' | 'progress'
+
+const TABS: { key: Tab; label: string; Icon: () => React.JSX.Element }[] = [
+  { key: 'today', label: 'Сегодня', Icon: IconToday },
+  { key: 'program', label: 'Программа', Icon: IconProgram },
+  { key: 'history', label: 'История', Icon: IconHistory },
+  { key: 'progress', label: 'Прогресс', Icon: IconProgress },
+]
+
+function initialTab(): Tab {
+  const t = new URLSearchParams(location.search).get('tab')
+  return TABS.some((x) => x.key === t) ? (t as Tab) : 'today'
+}
+
 export default function App() {
+  const [tab, setTab] = useState<Tab>(initialTab)
+
   return (
-    <main style={{ padding: 16, fontFamily: 'system-ui', color: 'var(--tg-theme-text-color)' }}>
-      <h1>GymAPP</h1>
-      <p>Мини-апп: тренировка на сегодня, программы, упражнения, прогресс.</p>
-    </main>
+    <>
+      <main className="app">
+        {tab === 'today' && <Today />}
+        {tab === 'program' && <ProgramScreen />}
+        {tab === 'history' && <History />}
+        {tab === 'progress' && <Progress />}
+      </main>
+      <nav className="tabbar">
+        <div className="tabbar-inner">
+          {TABS.map(({ key, label, Icon }) => (
+            <button
+              key={key}
+              className={`tab ${tab === key ? 'active' : ''}`}
+              onClick={() => {
+                if (tab !== key) haptic.select()
+                setTab(key)
+                window.scrollTo({ top: 0 })
+              }}
+            >
+              <Icon />
+              {label}
+            </button>
+          ))}
+        </div>
+      </nav>
+      <ConfirmHost />
+    </>
   )
 }

@@ -5,5 +5,13 @@ import react from '@vitejs/plugin-react'
 // (see .claude/skills/run-miniapp). `allowedHosts: true` lets the tunnel hostname through.
 export default defineConfig({
   plugins: [react()],
-  server: { host: true, port: 5173, allowedHosts: true, proxy: { '/api': 'http://localhost:8000' } },
+  base: './',
+  // The program JSON is imported from ../data/programs, outside the Vite root.
+  server: {
+    host: true,
+    port: 5173,
+    allowedHosts: true,
+    fs: { allow: ['..'] },
+    proxy: { '/api': 'http://localhost:8000' },
+  },
 })
