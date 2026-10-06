@@ -13,6 +13,7 @@ from sqlalchemy import select
 from gymbot.db.models import FoodEntry
 from gymbot.handlers import log_text
 from gymbot.llm.openrouter import OpenRouterClient
+from gymbot.llm.prompts import EXAMPLES
 from gymbot.llm.schemas import ParseResult
 
 T0 = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
@@ -53,6 +54,10 @@ class FakeLLM:
         async with asyncio.timeout(2):
             while len(self.bodies) < n:
                 await asyncio.sleep(0.001)
+
+    def had_history(self) -> bool:
+        """Whether the last request had dialog turns between the few-shot examples and the text."""
+        return self.last_messages()[-2] != EXAMPLES[-1][1]
 
     def last_messages(self) -> list[str]:
         return [m["content"] for m in self.bodies[-1]["messages"]]
@@ -126,7 +131,7 @@ async def test_context_expires(llm, settings, db):
     llm.answers = [food(1), food(1, "гречка")]
     await send("три куриные самсы", llm, settings, db)
     await send("гречка 200 г", llm, settings, db, T0 + log_text.CONTEXT_TTL + timedelta(seconds=1))
-    assert "три куриные самсы" not in llm.last_messages()
+    assert not llm.had_history()
     assert len(log_text.PENDING) == 2  # unrelated record: the first preview stays valid
 
 
@@ -140,7 +145,7 @@ async def test_save_clears_context(llm, settings, db):
     assert [(r.raw_text, float(r.grams)) for r in rows] == [("три куриные самсы", 450.0)]
 
     await send("ещё две", llm, settings, db, T0 + timedelta(minutes=1))
-    assert "три куриные самсы" not in llm.last_messages()
+    assert not llm.had_history()
 
 
 async def test_drop_clears_context(llm, settings, db):
@@ -148,7 +153,7 @@ async def test_drop_clears_context(llm, settings, db):
     msg = await send("три куриные самсы", llm, settings, db)
     await log_text.drop(callback(f"drop:{token_of(msg)}"))
     await send("гречка", llm, settings, db, T0 + timedelta(minutes=1))
-    assert "три куриные самсы" not in llm.last_messages()
+    assert not llm.had_history()
 
 
 async def test_saving_old_preview_keeps_newer_context(llm, settings, db):
@@ -340,3 +345,60 @@ async def test_food_saved_with_message_time_not_tap_time(llm, settings, db):
     async with db() as s:
         row = (await s.scalars(select(FoodEntry))).one()
     assert row.eaten_at.replace(tzinfo=None) == sent_at.replace(tzinfo=None)
+
+
+async def say(transcript, llm, settings, db, at=T0):
+    """A voice message as handlers/voice.py passes it on."""
+    msg = message("", at)
+    msg.text = None
+    await log_text.process_text(
+        msg, transcript, settings, db, llm.client,
+        raw_text=f"[voice] {transcript}", prefix=f"Распознал: «{transcript}»\n\n",
+    )
+    return msg
+
+
+async def test_voice_marker_only_in_raw_text_not_for_the_model(llm, settings, db):
+    llm.answers = [workout("жим лёжа")]
+    msg = await say("жим лёжа три по десять на шестьдесят", llm, settings, db)
+    assert llm.last_messages()[-1] == "жим лёжа три по десять на шестьдесят"
+    assert log_text.PENDING[token_of(msg)].raw_text == "[voice] жим лёжа три по десять на шестьдесят"
+    assert log_text.CONTEXT[USER].texts == ["жим лёжа три по десять на шестьдесят"]
+    reply = msg.answer.await_args.args[0]
+    assert reply.startswith("Распознал: «жим лёжа три по десять на шестьдесят»\n\nЗаписать?")
+
+    await log_text.save(callback(f"save:{token_of(msg)}"), settings, db)
+    from gymbot.db.models import WorkoutSet
+
+    async with db() as s:
+        raw = {r.raw_text for r in (await s.scalars(select(WorkoutSet))).all()}
+    assert raw == {"[voice] жим лёжа три по десять на шестьдесят"}
+
+
+async def test_voice_in_chain_marks_only_its_own_line(llm, settings, db):
+    llm.answers = [food(1), food(3, revises=True), food(4, revises=True)]
+    await send("самса", llm, settings, db)
+    second = await say("три штуки", llm, settings, db, T0 + timedelta(minutes=1))
+    assert log_text.PENDING[token_of(second)].raw_text == "самса\n[voice] три штуки"
+    third = await send("нет, четыре", llm, settings, db, T0 + timedelta(minutes=2))
+    assert log_text.PENDING[token_of(third)].raw_text == "самса\n[voice] три штуки\nнет, четыре"
+    sent = llm.last_messages()
+    assert sent[-3] == "самса\nтри штуки"  # the history the model sees has no marker
+    assert not any("[voice]" in m for m in sent)
+
+
+async def test_voice_question_keeps_marker_through_clarification(llm, settings, db):
+    llm.answers = [food(1), UNKNOWN, food(4, revises=True)]
+    await send("самса", llm, settings, db)
+    asked = await say("ммм", llm, settings, db, T0 + timedelta(minutes=1))
+    assert asked.answer.await_args.args[0] == "Распознал: «ммм»\n\nСколько штук?"
+    third = await send("четыре", llm, settings, db, T0 + timedelta(minutes=2))
+    assert log_text.PENDING[token_of(third)].raw_text == "самса\n[voice] ммм\nчетыре"
+    assert not any("[voice]" in m for m in llm.last_messages())
+
+
+async def test_note_reaches_the_reply(llm, settings, db):
+    llm.answers = [food(3), {**food(3, revises=True), "note": "Белок 45 → 34 г: самса так себе, больше теста."}]
+    await send("три куриные самсы", llm, settings, db)
+    msg = await send("самса была так себе, белка поменьше", llm, settings, db, T0 + timedelta(minutes=1))
+    assert "Белок 45 → 34 г" in msg.answer.await_args.args[0]

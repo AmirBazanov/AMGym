@@ -63,3 +63,22 @@ def test_echoed_clarification_is_replaced_with_hint():
 def test_question_answer_shown_when_not_echo():
     r = ParseResult(kind="question", clarification="Напиши, что съел или сделал.")
     assert render_preview(r, source_text="привет") == "Напиши, что съел или сделал."
+
+
+FOOD = {"description": "самса, 3 шт", "grams": 360, "kcal": 1000, "protein_g": 30, "fat_g": 60, "carbs_g": 90}
+
+
+def test_note_shown_after_the_list():
+    r = ParseResult(kind="food", foods=[FOOD], revises=True, note="Белок 40 → 30 г: больше теста.")
+    out = render_preview(r, source_text="самса так себе")
+    assert out.startswith("Записать еду?")
+    assert out.endswith("\n\nБелок 40 → 30 г: больше теста.")
+
+
+def test_note_that_echoes_user_is_hidden():
+    r = ParseResult(kind="food", foods=[FOOD], note="Самса так себе.")
+    assert "так себе" not in render_preview(r, source_text="самса так себе")
+
+
+def test_no_note_no_trailing_text():
+    assert render_preview(ParseResult(kind="food", foods=[FOOD])).endswith("У90")

@@ -23,6 +23,12 @@ CONTEXT_TTL and sent to the model as history with the next message, so "три �
 - Save or cancel of the preview the context belongs to ends the dialog: the context is deleted,
   so the next record is parsed fresh. Pressing an older preview does not touch a newer context.
 - Off-topic questions (kind="question") do not take part: the context stays as it was.
+
+Voice messages (handlers/voice.py) go through the same process_text with the transcript as the text.
+Each message of a chain has two forms: the clean text (Exchange.texts), which the model sees, and
+the raw form (Exchange.raws), which is stored: the same text for typed messages, "[voice] <transcript>"
+for voice ones. So the marker is on every voice line of a chain and only there
+("самса\n[voice] три штуки"), and the model never sees it.
 """
 
 from __future__ import annotations
@@ -58,26 +64,41 @@ class Pending:
 
 
 @dataclass
+class Question:
+    """Messages after a record that the model answered with a clarifying question (see Exchange)."""
+
+    texts: list[str]
+    raws: list[str]
+    result: ParseResult
+
+
+@dataclass
 class Exchange:
     """One user's dialog about one record (see the module docstring)."""
 
-    texts: list[str]  # every message behind `result`, oldest first; the whole chain goes to raw_text
+    texts: list[str]  # every message behind `result`, oldest first, as the model sees them
+    raws: list[str]  # the same messages as stored: "[voice] ..." for voice ones; joined into raw_text
     result: ParseResult  # the record, or the model's clarifying question while there is no record yet
     at: datetime  # send time of the last message (Telegram, UTC)
     token: str | None = None  # preview of the record in PENDING
     # Messages after the record that the model answered with a clarifying question, and that answer.
-    question: tuple[list[str], ParseResult] | None = None
+    question: Question | None = None
 
     @property
     def raw_text(self) -> str:
-        return "\n".join(self.texts)
+        return "\n".join(self.raws)
 
     def all_texts(self) -> list[str]:
-        return [*self.texts, *(self.question[0] if self.question else [])]
+        return [*self.texts, *(self.question.texts if self.question else [])]
+
+    def all_raws(self) -> list[str]:
+        return [*self.raws, *(self.question.raws if self.question else [])]
 
     def history(self) -> list[tuple[str, str]]:
         """(user text, assistant JSON) turns for the model; only the last MAX_CHAIN messages of each."""
-        turns = [(self.texts, self.result), *([self.question] if self.question else [])]
+        turns = [(self.texts, self.result)]
+        if self.question:
+            turns.append((self.question.texts, self.question.result))
         return [("\n".join(texts[-MAX_CHAIN:]), result.model_dump_json()) for texts, result in turns]
 
 
@@ -97,8 +118,18 @@ def _norm(text: str) -> str:
     return " ".join(text.casefold().split()).strip(" .,!?…")
 
 
+def _note(result: ParseResult, source_text: str) -> str:
+    """The model's explanation of an estimate, as a paragraph under the list (never an echo)."""
+    note = (result.note or "").strip()
+    return f"\n\n{note}" if note and _norm(note) != _norm(source_text) else ""
+
+
 def render_preview(result: ParseResult, source_text: str = "") -> str:
-    """Preview of a parsed message. `source_text` is the user's text: it is never echoed back."""
+    """Preview of a parsed message. `source_text` is the user's text: it is never echoed back.
+
+    For a record the model's note (what it changed and why) goes after the list, so the question
+    "Записать?" stays the first line.
+    """
     if result.kind == "workout" and result.exercises:
         lines = []
         for ex in result.exercises:
@@ -108,7 +139,7 @@ def render_preview(result: ParseResult, source_text: str = "") -> str:
                 for s in ex.sets
             )
             lines.append(f"• {ex.exercise}: {sets}")
-        return "Записать?\n" + "\n".join(lines)
+        return "Записать?\n" + "\n".join(lines) + _note(result, source_text)
     if result.kind == "food" and result.foods:
         lines = [
             f"• {f.description}{f' {f.grams:g} г' if f.grams else ''}: {f.kcal:.0f} ккал, "
@@ -116,7 +147,7 @@ def render_preview(result: ParseResult, source_text: str = "") -> str:
             for f in result.foods
         ]
         total = sum(f.kcal for f in result.foods)
-        return f"Записать еду? Всего {total:.0f} ккал\n" + "\n".join(lines)
+        return f"Записать еду? Всего {total:.0f} ккал\n" + "\n".join(lines) + _note(result, source_text)
     answer = (result.clarification or "").strip()
     if not answer or _norm(answer) == _norm(source_text):
         return HINT
@@ -183,7 +214,29 @@ def confirm_kb(token: str) -> InlineKeyboardMarkup:
 async def log_free_text(
     message: Message, settings: Settings, sessionmaker: Sessionmaker, llm: OpenRouterClient
 ) -> None:
-    text = message.text or ""
+    await process_text(message, message.text or "", settings, sessionmaker, llm)
+
+
+async def process_text(
+    message: Message,
+    text: str,
+    settings: Settings,
+    sessionmaker: Sessionmaker,
+    llm: OpenRouterClient,
+    *,
+    raw_text: str | None = None,
+    prefix: str = "",
+) -> None:
+    """Parse `text`, reply with a preview and a confirm button (or the model's answer), keep the context.
+
+    `text` is what the model and the dialog context see: the typed text or a clean voice transcript.
+    `raw_text` is how this one message is stored (default: `text`); voice passes "[voice] <transcript>".
+    In a chain each message keeps its own form, so a typed "самса" corrected by voice "три штуки" is
+    saved as "самса\n[voice] три штуки", and the history sent to the model has no marker at all.
+    /undo groups sets by equal raw_text, which still holds: all sets of one record share it.
+    `prefix` goes before every reply, e.g. "Распознал: «...»\n\n" so the user sees what was heard.
+    """
+    raw = text if raw_text is None else raw_text
     user_id = message.from_user.id  # type: ignore[union-attr]
     async with sessionmaker() as session:
         catalog = await exercise_catalog(session)
@@ -192,9 +245,9 @@ async def log_free_text(
     try:
         result = await llm.parse_message(text, catalog, prev.history() if prev else None)
     except LLMError:
-        await message.answer("Нейросеть сейчас недоступна, попробуй ещё раз чуть позже.")
+        await message.answer(prefix + "Нейросеть сейчас недоступна, попробуй ещё раз чуть позже.")
         return
-    preview = render_preview(result, source_text=text)
+    preview = prefix + render_preview(result, source_text=text)
     if result.kind == "question":
         await message.answer(preview)
         return
@@ -205,26 +258,27 @@ async def log_free_text(
     savable = (result.kind == "workout" and result.exercises) or (result.kind == "food" and result.foods)
     if not savable:  # the model asks a clarifying question
         if prev is None:
-            exchange = Exchange([text], result, message.date)
+            exchange = Exchange([text], [raw], result, message.date)
         elif prev.token:  # keep the record the question is about
-            asked = [*(prev.question[0] if prev.question else []), text]
-            exchange = Exchange(prev.texts, prev.result, message.date, prev.token, (asked, result))
+            q = prev.question
+            asked = Question([*(q.texts if q else []), text], [*(q.raws if q else []), raw], result)
+            exchange = Exchange(prev.texts, prev.raws, prev.result, message.date, prev.token, asked)
         else:  # no record yet: keep collecting the answers
-            exchange = Exchange([*prev.texts, text], result, message.date)
+            exchange = Exchange([*prev.texts, text], [*prev.raws, raw], result, message.date)
         _remember(user_id, exchange)
         await message.answer(preview)
         return
-    texts = [text]
+    texts, raws = [text], [raw]
     if prev is not None:
         if prev.token is None:  # answers to the model's questions before any record
-            texts = [*prev.texts, text]
+            texts, raws = [*prev.texts, text], [*prev.raws, raw]
         elif is_revision(prev.result, result):
             PENDING.pop(prev.token, None)  # replaced by this preview, see the module docstring
-            texts = [*prev.all_texts(), text]
+            texts, raws = [*prev.all_texts(), text], [*prev.all_raws(), raw]
     if len(PENDING) >= MAX_PENDING:
         PENDING.pop(next(iter(PENDING)))
     token = secrets.token_hex(6)
-    exchange = Exchange(texts, result, message.date, token)
+    exchange = Exchange(texts, raws, result, message.date, token)
     PENDING[token] = Pending(user_id, result, exchange.raw_text, message.date)
     _remember(user_id, exchange)
     await message.answer(preview, reply_markup=confirm_kb(token))

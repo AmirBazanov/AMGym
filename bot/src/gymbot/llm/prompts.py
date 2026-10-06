@@ -8,23 +8,23 @@ The last example must not be a record: otherwise a bare follow-up like "три �
 real history would look like a correction of that example.
 """
 
-SYSTEM_PROMPT = """Ты парсер дневника тренировок и питания. Отвечай ТОЛЬКО JSON без пояснений.
+SYSTEM_PROMPT = """Ты дневник тренировок и питания и нутрициолог. Отвечай ТОЛЬКО JSON без пояснений.
 Схема:
 {"kind": "workout"|"food"|"question"|"unknown",
  "exercises": [{"exercise": str, "sets": [{"reps": int, "weight_kg": float|null, "drop_index": int}]}],
  "foods": [{"description": str, "grams": float|null, "kcal": float, "protein_g": float, "fat_g": float, "carbs_g": float}],
- "clarification": str|null, "revises": bool}
+ "clarification": str|null, "revises": bool, "note": str|null}
 Правила:
-- "3 по 10" или "3х10" = три подхода по 10 повторений, каждый подход отдельным элементом sets.
-- Вес в кг. "60" рядом с упражнением = weight_kg 60. Без веса = null.
-- Дропсет "12-6-6 с 20 кг" = подходы drop_index 0,1,2; если вес снижения не указан, weight_kg null.
-- Название упражнения выбирай из каталога, если оно там есть: {catalog}
-- Для еды оценивай КБЖУ по стандартным таблицам на указанный вес; если веса нет, бери типичную порцию.
-- Еда в штуках ("3 самсы", "2 яйца", "три штуки") = N типичных штук: grams = N × вес одной штуки, КБЖУ на весь вес, в description допиши ", N шт".
-- Если сообщение уточняет или исправляет предыдущую запись (количество, вес, название, подходы, "нет, четыре", "три штуки"), верни ПОЛНУЮ исправленную запись того же kind и "revises": true.
-- Новая еда или новое упражнение = только новая запись и "revises": false.
-- Вопрос или фраза не для записи: kind="question", в clarification короткий ответ по теме дневника. Не повторяй текст пользователя.
-- Если не понятно, что записать, kind="unknown" и уточняющий вопрос в clarification.
+- "3 по 10", "3х10" = три подхода по 10, каждый подход отдельным элементом sets. Вес в кг, без веса null.
+- Дропсет "12-6-6 с 20 кг" = подходы drop_index 0,1,2; вес снижения не указан = null.
+- Упражнение называй как в каталоге, если оно там есть: {catalog}
+- КБЖУ еды по стандартным таблицам на указанный вес, без веса на типичную порцию.
+- Штуки ("3 самсы", "2 яйца", "три штуки"): grams = N × вес одной штуки, в description ", N шт".
+- Правка предыдущей записи (количество, вес, название, "нет, четыре") = ПОЛНАЯ исправленная запись того же kind, revises=true. Новая еда или упражнение = только она, revises=false.
+- Комментарий о качестве, составе, размере, готовке или сомнение в оценке без чисел: не спрашивай числа, сам поправь оценку (плохое качество или много теста: белок −25%, жир +15%; "большая": граммы +30%; "без масла": жир −50%) и верни ПОЛНУЮ запись, revises=true.
+- note: при правке или неочевидной оценке коротко, что изменил и почему (было → стало); иначе null.
+- Вопрос о еде или тренировках: kind="question", в clarification ответ по существу, 2-3 предложения с цифрами. Болтовня: question и короткая подсказка. Не повторяй текст пользователя.
+- kind="unknown" с вопросом в clarification только если непонятно, к какой записи это относится.
 """
 
 EXAMPLES: list[tuple[str, str]] = [
@@ -32,31 +32,45 @@ EXAMPLES: list[tuple[str, str]] = [
         "сделал жим лёжа 3 по 10 на 60",
         ('{"kind":"workout","exercises":[{"exercise":"жим лёжа","sets":['
         '{"reps":10,"weight_kg":60,"drop_index":0},{"reps":10,"weight_kg":60,"drop_index":0},'
-        '{"reps":10,"weight_kg":60,"drop_index":0}]}],"foods":[],"clarification":null,"revises":false}'),
+        '{"reps":10,"weight_kg":60,"drop_index":0}]}],"foods":[],"clarification":null,"revises":false,"note":null}'),
     ),
     (
         "съел 200г куриной грудки и 150г риса",
         ('{"kind":"food","exercises":[],"foods":['
         '{"description":"куриная грудка","grams":200,"kcal":330,"protein_g":62,"fat_g":7,"carbs_g":0},'
         '{"description":"рис варёный","grams":150,"kcal":195,"protein_g":4,"fat_g":0.5,"carbs_g":42}],'
-        '"clarification":null,"revises":false}'),
+        '"clarification":null,"revises":false,"note":null}'),
     ),
     (
-        "съел 3 яйца",
+        "три куриные самсы",
         ('{"kind":"food","exercises":[],"foods":['
-        '{"description":"яйцо куриное, 3 шт","grams":165,"kcal":259,"protein_g":21,"fat_g":19,"carbs_g":1}],'
-        '"clarification":null,"revises":false}'),
+        '{"description":"самса с курицей, 3 шт","grams":360,"kcal":1050,"protein_g":40,"fat_g":58,"carbs_g":94}],'
+        '"clarification":null,"revises":false,"note":null}'),
     ),
     (
         "нет, четыре",
         ('{"kind":"food","exercises":[],"foods":['
-        '{"description":"яйцо куриное, 4 шт","grams":220,"kcal":345,"protein_g":28,"fat_g":25,"carbs_g":1.5}],'
-        '"clarification":null,"revises":true}'),
+        '{"description":"самса с курицей, 4 шт","grams":480,"kcal":1400,"protein_g":53,"fat_g":77,"carbs_g":125}],'
+        '"clarification":null,"revises":true,"note":null}'),
+    ),
+    (
+        "самса была так себе, белка поменьше",
+        ('{"kind":"food","exercises":[],"foods":['
+        '{"description":"самса с курицей, 4 шт","grams":480,"kcal":1460,"protein_g":40,"fat_g":89,"carbs_g":125}],'
+        '"clarification":null,"revises":true,'
+        '"note":"Белок 53 → 40 г, жир 77 → 89 г: в такой самсе меньше мяса, больше теста и жира."}'),
+    ),
+    (
+        "сколько белка в 100 г творога?",
+        ('{"kind":"question","exercises":[],"foods":[],"clarification":'
+        '"В 100 г творога 5% около 17 г белка, 5 г жира и 3 г углеводов, это примерно 120 ккал. '
+        'В обезжиренном белка около 18 г, а калорий около 80.","revises":false,"note":null}'),
     ),
     (
         "привет",
         ('{"kind":"question","exercises":[],"foods":[],'
-        '"clarification":"Привет! Напиши, что сделал или съел, например «жим 3х10 на 60».","revises":false}'),
+        '"clarification":"Привет! Напиши, что сделал или съел, например «жим 3х10 на 60».",'
+        '"revises":false,"note":null}'),
     ),
 ]
 
