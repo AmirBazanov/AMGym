@@ -20,7 +20,7 @@ from gymbot.llm.prompts import build_messages
 from gymbot.llm.schemas import ParseResult
 
 log = logging.getLogger(__name__)
-JSON_BLOCK = re.compile(r"\{.*\}", re.S)
+JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)
 
 
 class LLMError(RuntimeError):

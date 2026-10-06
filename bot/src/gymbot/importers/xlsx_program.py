@@ -37,9 +37,9 @@ INTENSITY = {"тяжелая": "heavy", "тяжёлая": "heavy", "средня
 # Typos found in the source sheet, fixed on import so exercises dedupe correctly.
 NAME_FIXES = {"тяжа ": "тяга "}
 
-WEEK_RE = re.compile(r"^неделя\s*(\d+)$", re.I)
-SETS_RE = re.compile(r"^(\d+)\s*[хx]\s*(\d+)\s*-\s*(\d+)$", re.I)
-DROP_RE = re.compile(r"^дропсет\s*(\d+)\s*[хx]\s*(\d+(?:\s*-\s*\d+)+)$", re.I)
+WEEK_RE = re.compile(r"^неделя\s*(\d+)$", re.IGNORECASE)
+SETS_RE = re.compile(r"^(\d+)\s*[хx]\s*(\d+)\s*-\s*(\d+)$", re.IGNORECASE)
+DROP_RE = re.compile(r"^дропсет\s*(\d+)\s*[хx]\s*(\d+(?:\s*-\s*\d+)+)$", re.IGNORECASE)
 
 
 @dataclass

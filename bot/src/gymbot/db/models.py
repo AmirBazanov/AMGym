@@ -6,15 +6,15 @@ Every schema change goes through an Alembic migration (see .claude/skills/db-mig
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
-from sqlalchemy import JSON, BigInteger, MetaData, Date, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import JSON, BigInteger, Date, DateTime, ForeignKey, Integer, MetaData, Numeric, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
