@@ -216,3 +216,35 @@ export function updateFact(id: number, patch: FactPatch): Promise<Fact> {
 export function deleteFact(id: number): Promise<void> {
   return api<void>(`/facts/${id}`, { method: 'DELETE' })
 }
+
+// ---- Adaptive day plan: the server adjusts today's program day to wellbeing, food and recovery. ----
+
+export type Readiness = 'normal' | 'light' | 'rest'
+
+export interface DayPlanExercise {
+  name: string // ProgramExercise.name of the program day
+  sets: number | null
+  repsMin: number | null
+  repsMax: number | null
+  weightFactor: number | null // 0.9 = 10 % lighter
+  skip: boolean
+  replaceWith: string | null
+  reason: string | null
+}
+
+export interface DayPlan {
+  date: string // YYYY-MM-DD in the server TIMEZONE
+  adjusted: boolean
+  readiness: Readiness
+  summary: string | null
+  exercises: DayPlanExercise[] // program day order; empty when not adjusted
+}
+
+/** 404 when today is not a training day. Never cached offline. */
+export function getTodayPlan(): Promise<DayPlan> {
+  return api<DayPlan>('/plan/today')
+}
+
+export function regenerateTodayPlan(): Promise<DayPlan> {
+  return api<DayPlan>('/plan/today/regenerate', { method: 'POST' })
+}

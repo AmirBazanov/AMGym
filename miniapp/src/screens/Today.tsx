@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { ApiError, getTodayPlan, regenerateTodayPlan, type DayPlan } from '../api'
 import { useScrollActive } from '../components/useScrollActive'
 import { DropBadge, IntensityBadge } from '../components/Badges'
 import { ExerciseSheet } from '../components/ExerciseSheet'
@@ -19,11 +20,14 @@ import {
   programPosition,
   WEEKDAY_LONG,
   WEEKDAY_SHORT,
+  type ProgramDay,
   type ProgramExercise,
 } from '../program'
+import { applyPlan, planKey, planNote, planTitle, type AdjustedExercise, type AppliedPlan, type PlanMode } from '../plan'
 import { suggestWeight } from '../progression'
-import { actions, currentRun, isStarted, lastSetsFor, useStore, type Workout } from '../store'
+import { actions, currentRun, isStarted, lastSetsFor, planMode, useStore, type Workout } from '../store'
 import { formatKg } from '../stats'
+import { useRemote } from '../useRemote'
 import { confirm, haptic } from '../telegram'
 import { entriesCount, formatWellbeing, groupByDate, localISODate } from '../wellbeing'
 
@@ -39,8 +43,145 @@ function SuggestHint({ history, exercise }: { history: Workout[]; exercise: Prog
   )
 }
 
+/** "3 × 8–12" and "(по плану 5 × 8–12)" as two unbreakable pieces, so a range never splits at 360 px. */
+function PlanTarget({ adj }: { adj: AdjustedExercise }) {
+  const now = formatPrescription(adj.exercise.prescription)
+  const was = formatPrescription(adj.original.prescription)
+  return (
+    <>
+      <span className="ex-target num">{now}</span>
+      {now !== was && <span className="ex-was num">(по плану {was})</span>}
+    </>
+  )
+}
+
+/** Weight hint for a day exercise; with a plan factor it explains the corrected weight instead. */
+function PlanHint({ history, adj }: { history: Workout[]; adj: AdjustedExercise }) {
+  const note = planNote(adj)
+  return (
+    <>
+      {adj.factor !== 1 && adj.weight != null && adj.baseWeight != null ? (
+        <div className="ex-suggest num">
+          предложено {formatKg(adj.weight)} кг: {Math.round(adj.factor * 100)} % от {formatKg(adj.baseWeight)} кг
+        </div>
+      ) : (
+        <SuggestHint history={history} exercise={adj.exercise} />
+      )}
+      {note && <div className="ex-plan-note">по плану: {note}</div>}
+    </>
+  )
+}
+
+interface DayPlanState {
+  /** Last good answer: undefined = unknown (loading, offline, 401), null = no plan today (404). */
+  plan: DayPlan | null | undefined
+  busy: boolean
+  failed: boolean
+  regenerate: () => void
+}
+
+/** Today's adaptive plan. Loaded on open and on return to the app; a failed refetch keeps the last answer. */
+function useDayPlan(): DayPlanState {
+  const r = useRemote<DayPlan>('plan:today', getTodayPlan)
+  const [plan, setPlan] = useState<DayPlan | null | undefined>(undefined)
+  const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    if (r.data) setPlan(r.data)
+    else if (r.error instanceof ApiError && r.error.status === 404) setPlan(null)
+  }, [r.data, r.error])
+
+  async function regenerate() {
+    if (busy) return
+    haptic.tap()
+    setBusy(true)
+    setFailed(false)
+    try {
+      setPlan(await regenerateTodayPlan())
+      haptic.success()
+    } catch (err) {
+      haptic.error()
+      if (err instanceof ApiError && err.status === 404) setPlan(null)
+      else setFailed(true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return { plan, busy, failed, regenerate }
+}
+
+/** The plan to show and apply: adjusted and dated today (server TIMEZONE = phone time zone, as elsewhere). */
+function visiblePlan(dp: DayPlanState): DayPlan | null {
+  const p = dp.plan
+  return p && p.adjusted && p.date === localISODate() ? p : null
+}
+
+function PlanBanner({
+  dp,
+  mode,
+  started,
+  applied,
+}: {
+  dp: DayPlanState
+  mode: PlanMode
+  started: boolean
+  applied: AppliedPlan | null
+}) {
+  const plan = visiblePlan(dp)
+  if (!plan) return null
+  const rest = plan.readiness === 'rest'
+  return (
+    <div className={`card plan-banner ${rest ? 'plan-rest' : ''}`}>
+      <div className="plan-title">{planTitle(plan)}</div>
+      {mode === 'adjusted' && applied?.applied && applied.skipped.length > 0 && (
+        <div className="hint plan-skipped">Сегодня без: {applied.skipped.map((x) => x.name).join(', ')}</div>
+      )}
+      <div className="segmented plan-toggle" role="group" aria-label="План на сегодня">
+        {(
+          [
+            ['program', 'Как в программе'],
+            ['adjusted', 'С поправкой'],
+          ] as const
+        ).map(([m, label]) => (
+          <button
+            type="button"
+            key={m}
+            className={mode === m ? 'active' : ''}
+            aria-pressed={mode === m}
+            onClick={() => {
+              if (mode === m) return
+              haptic.select()
+              actions.setPlanMode(m)
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {started && <div className="hint plan-started">Тренировка уже идёт: переключатель не меняет её подходы.</div>}
+      <button type="button" className="btn ghost plan-regen" disabled={dp.busy} onClick={dp.regenerate}>
+        {dp.busy ? 'Пересчитываю…' : 'Пересчитать'}
+      </button>
+      {dp.failed && <div className="hint plan-error">Не удалось пересчитать. Проверь интернет и попробуй ещё раз.</div>}
+    </div>
+  )
+}
+
 export function Today() {
   const state = useStore()
+  const dp = useDayPlan()
+  const mode = planMode(state)
+  // Rebuild the prepared (not started) workout when the plan's content or the mode changes; never on
+  // an unknown answer (offline, 401), so a failed refetch does not undo the correction.
+  const planContent = dp.plan === undefined ? null : planKey(visiblePlan(dp))
+  const activeId = state.active?.id
+  useEffect(() => {
+    if (planContent != null) actions.applyDayPlan(visiblePlan(dp))
+    // `dp` is rebuilt every render; planContent describes it fully.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planContent, mode, activeId])
   return (
     <>
       {state.pending.length > 0 && (
@@ -54,12 +195,12 @@ export function Today() {
           телефоне.
         </div>
       )}
-      {state.active ? <ActiveWorkout workout={state.active} /> : <DayPreview />}
+      {state.active ? <ActiveWorkout workout={state.active} dp={dp} /> : <DayPreview dp={dp} />}
     </>
   )
 }
 
-function DayPreview() {
+function DayPreview({ dp }: { dp: DayPlanState }) {
   const state = useStore()
   const { programId, startDate, history } = state
   const run = currentRun(state)
@@ -71,6 +212,8 @@ function DayPreview() {
   const [weekday, setWeekday] = useState(suggested.weekday)
   const [sheet, setSheet] = useState<string | null>(null)
   const day = getDay(program, week, weekday)
+  const mode = planMode(state)
+  const applied = day ? applyPlan(day, mode === 'adjusted' ? visiblePlan(dp) : null, history, localISODate()) : null
   const weekDays = program.weeks.find((w) => w.number === week)?.days ?? []
   const doneHere = run.some((w) => w.week === week && w.weekday === weekday)
 
@@ -93,10 +236,10 @@ function DayPreview() {
         {day && (
           <div className="hero-meta">
             <span>{dayFocus(day)}</span>
-            <span>{plural(day.exercises.length, ['упражнение', 'упражнения', 'упражнений'])}</span>
+            <span>{plural(applied!.exercises.length, ['упражнение', 'упражнения', 'упражнений'])}</span>
             <span>
               {plural(
-                day.exercises.reduce((n, e) => n + e.prescription.sets, 0),
+                applied!.exercises.reduce((n, a) => n + a.exercise.prescription.sets, 0),
                 ['подход', 'подхода', 'подходов'],
               )}
             </span>
@@ -113,6 +256,7 @@ function DayPreview() {
       </div>
 
       <WellbeingToday />
+      <PlanBanner dp={dp} mode={mode} started={false} applied={applied} />
 
       <div className="spacer" />
       <div className="chips" ref={chipsRef}>
@@ -149,16 +293,17 @@ function DayPreview() {
 
       <h2>Упражнения{doneHere && ' · уже выполнено'}</h2>
       <div className="list">
-        {day?.exercises.map((e) => {
+        {applied?.exercises.map((a) => {
+          const e = a.exercise
           const last = lastSetsFor(e.name, history)
-          const lastTop = last ? last.reduce((a, b) => ((b.weight ?? 0) > (a.weight ?? 0) ? b : a)) : null
+          const lastTop = last ? last.reduce((x, y) => ((y.weight ?? 0) > (x.weight ?? 0) ? y : x)) : null
           return (
-            <button className="row" key={e.order} onClick={() => setSheet(e.name)}>
+            <button className="row" key={a.original.order} onClick={() => setSheet(e.name)}>
               <div className="ex-num">{e.order}</div>
               <div className="grow">
                 <div className="title">{capitalize(e.name)}</div>
                 <div className="ex-meta">
-                  <span className="ex-target num">{formatPrescription(e.prescription)}</span>
+                  <PlanTarget adj={a} />
                   <IntensityBadge value={e.intensity} />
                   {isDropset(e.prescription) && <DropBadge />}
                   {lastTop && (
@@ -167,7 +312,7 @@ function DayPreview() {
                     </span>
                   )}
                 </div>
-                <SuggestHint history={history} exercise={e} />
+                <PlanHint history={history} adj={a} />
               </div>
               <IconChevron />
             </button>
@@ -229,6 +374,16 @@ function WellbeingToday({ hint = true }: { hint?: boolean }) {
   )
 }
 
+/** The day exercise behind a logged one: from the list the workout was built from, else the program as written. */
+function lookupExercise(built: AppliedPlan | null, day: ProgramDay | undefined, name: string): AdjustedExercise | undefined {
+  const hit = built?.exercises.find((a) => a.exercise.name === name)
+  if (hit) return hit
+  const e = day?.exercises.find((x) => x.name === name)
+  if (!e) return undefined
+  const target = formatPrescription(e.prescription)
+  return { exercise: e, original: e, replaced: false, weight: null, baseWeight: null, factor: 1, reason: null, target, changed: false }
+}
+
 function useNow(active: boolean) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -244,13 +399,21 @@ function mmss(sec: number) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
-function ActiveWorkout({ workout }: { workout: Workout }) {
-  const { restSeconds, restEnd, history } = useStore()
+function ActiveWorkout({ workout, dp }: { workout: Workout; dp: DayPlanState }) {
+  const state = useStore()
+  const { restSeconds, restEnd, history } = state
   const setRestEnd = actions.setRestEnd
   const [sheet, setSheet] = useState<string | null>(null)
   const now = useNow(true)
   const program = getProgram(workout.programId)
   const day = getDay(program, workout.week, workout.weekday)
+  const mode = planMode(state)
+  const plan = visiblePlan(dp)
+  // Look exercises up in what the workout was built from, so replaced ones keep their prescription.
+  const builtFromPlan = plan != null && state.activePlanKey === planKey(plan)
+  const built = day ? applyPlan(day, builtFromPlan ? plan : null, history, localISODate()) : null
+  const shown = day ? applyPlan(day, mode === 'adjusted' ? plan : null, history, localISODate()) : null
+  const lookup = (name: string) => lookupExercise(built, day, name)
 
   const total = workout.exercises.reduce((n, e) => n + e.sets.length, 0)
   const done = workout.exercises.reduce((n, e) => n + e.sets.filter((s) => s.done).length, 0)
@@ -284,7 +447,7 @@ function ActiveWorkout({ workout }: { workout: Workout }) {
   }
 
   const defaultReps = (ei: number) => {
-    const p = day?.exercises.find((e) => e.name === workout.exercises[ei].name)?.prescription
+    const p = lookup(workout.exercises[ei].name)?.exercise.prescription
     return p?.drop_reps?.[0] ?? p?.reps_max ?? null
   }
 
@@ -330,9 +493,11 @@ function ActiveWorkout({ workout }: { workout: Workout }) {
       </div>
       {/* Also during the workout: a sore shoulder matters when picking the weight. The hint only before it starts. */}
       <WellbeingToday hint={!started} />
+      <PlanBanner dp={dp} mode={mode} started={started} applied={shown} />
 
       {workout.exercises.map((ex, ei) => {
-        const pe = day?.exercises.find((e) => e.name === ex.name)
+        const adj = lookup(ex.name)
+        const pe = adj?.exercise
         const exDone = ex.sets.length > 0 && ex.sets.every((s) => s.done)
         const p = pe?.prescription
         const repsHint =
@@ -345,11 +510,11 @@ function ActiveWorkout({ workout }: { workout: Workout }) {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div className="ex-name">{capitalize(ex.name)}</div>
                 <div className="ex-meta">
-                  {pe && <span className="ex-target num">{formatPrescription(pe.prescription)}</span>}
+                  {adj && <PlanTarget adj={adj} />}
                   {pe && <IntensityBadge value={pe.intensity} />}
                   {ex.dropset && <DropBadge />}
                 </div>
-                {pe && <SuggestHint history={history} exercise={pe} />}
+                {adj && <PlanHint history={history} adj={adj} />}
               </div>
               <IconChevron />
             </button>

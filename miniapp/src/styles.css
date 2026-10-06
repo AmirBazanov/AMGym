@@ -426,6 +426,7 @@ h2 {
   color: var(--hint);
 }
 .ex-target {
+  white-space: nowrap;
   color: var(--text);
   font-weight: 600;
 }
@@ -1145,4 +1146,47 @@ table.nutrition-table td.over {
   background: var(--accent);
   color: var(--accent-text);
   font-weight: 600;
+}
+
+/* ---------- adaptive day plan ---------- */
+.plan-banner {
+  margin-top: 12px;
+  border-left: 4px solid var(--accent);
+}
+.plan-banner.plan-rest {
+  border-left-color: var(--medium);
+}
+.plan-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.plan-skipped,
+.plan-started {
+  margin-top: 6px;
+}
+.plan-error {
+  margin-top: 6px;
+  color: var(--danger);
+}
+.segmented.plan-toggle {
+  margin-top: 10px;
+  background: var(--bg);
+}
+.segmented.plan-toggle button {
+  height: 44px;
+}
+.btn.ghost.plan-regen {
+  min-height: 44px;
+  margin-top: 6px;
+  font-size: 15px;
+}
+.ex-plan-note {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--medium);
+  overflow-wrap: anywhere;
+}
+.ex-was {
+  white-space: nowrap;
+  color: var(--hint);
 }

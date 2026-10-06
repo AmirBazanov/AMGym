@@ -1,10 +1,11 @@
 // Local-only state until the stage 2 API exists: everything lives in localStorage.
 // Shapes mirror the future server models (Workout -> exercises -> sets) so the swap is mechanical.
 import { useSyncExternalStore } from 'react'
-import { getDay, getProgram, isDropset, programPosition, type ProgramExercise } from './program'
-import { api, ApiError, EMPTY_PROFILE, EMPTY_TARGETS, inTelegram, type Profile, type Targets } from './api'
+import { getDay, getProgram, isDropset, programPosition } from './program'
+import { api, ApiError, EMPTY_PROFILE, EMPTY_TARGETS, inTelegram, type DayPlan, type Profile, type Targets } from './api'
 import { buildDemoHistory, demoStartDate } from './mock'
-import { lastSameSession, suggestWeight } from './progression'
+import { applyPlan, planKey, type AdjustedExercise, type PlanMode } from './plan'
+import { lastSameSession } from './progression'
 
 export interface SetEntry {
   weight: number | null // kg
@@ -48,6 +49,10 @@ export interface State {
   targets: Targets
   // Profile for the bot's AI advice (weight, height, goal...). Same server-first rules as targets.
   profile: Profile
+  // "Как в программе" / "С поправкой" for the adaptive day plan; only counts on `date` (local).
+  planChoice: { date: string; mode: PlanMode } | null
+  // planKey() the not-yet-started active workout was built from ('program' = as written).
+  activePlanKey: string | null
 }
 
 interface ServerState {
@@ -82,6 +87,8 @@ function initialState(): State {
     rejected: [],
     targets: EMPTY_TARGETS,
     profile: EMPTY_PROFILE,
+    planChoice: null,
+    activePlanKey: null,
   }
 }
 
@@ -131,15 +138,20 @@ export function lastSetsFor(name: string, history = state.history): SetEntry[] |
   return lastSameSession(history, name)
 }
 
-function plannedLog(ex: ProgramExercise): ExerciseLog {
-  // Record-based weight or double progression, whichever is higher (see progression.ts).
-  const weight = suggestWeight(state.history, ex)?.weight ?? null
+function plannedLog(adj: AdjustedExercise): ExerciseLog {
+  // Record-based weight or double progression, whichever is higher (see progression.ts), × the plan factor.
+  const ex = adj.exercise
   return {
     name: ex.name,
-    target: ex.prescription.raw,
+    target: adj.changed ? adj.target : adj.original.prescription.raw,
     dropset: isDropset(ex.prescription),
-    sets: Array.from({ length: ex.prescription.sets }, () => ({ weight, reps: null, done: false })),
+    sets: Array.from({ length: ex.prescription.sets }, () => ({ weight: adj.weight, reps: null, done: false })),
   }
+}
+
+/** Today's choice for the adaptive plan; a new day starts with the correction on. */
+export function planMode(s: State = state): PlanMode {
+  return s.planChoice?.date === localDate() ? s.planChoice.mode : 'adjusted'
 }
 
 /** Program weeks are counted Monday to Sunday, so the start date snaps to its Monday. */
@@ -197,9 +209,31 @@ export const actions = {
         weekday,
         startedAt: new Date().toISOString(),
         finishedAt: null,
-        exercises: day.exercises.map(plannedLog),
+        exercises: applyPlan(day, null, state.history, localDate()).exercises.map(plannedLog),
       },
+      activePlanKey: 'program',
     })
+  },
+
+  setPlanMode(mode: PlanMode) {
+    commit({ ...state, planChoice: { date: localDate(), mode } })
+  },
+
+  /**
+   * Rebuilds the prepared workout from the adaptive plan (or back from the program) while no set is
+   * ticked. prepareToday runs before the plan is fetched, so Today calls this whenever the plan or the
+   * mode changes. Idempotent on the plan's content: a refetch of the same plan keeps weight edits.
+   * A started workout is never touched.
+   */
+  applyDayPlan(plan: DayPlan | null) {
+    const a = state.active
+    if (!a || isStarted(a)) return
+    const day = getDay(getProgram(a.programId), a.week, a.weekday)
+    if (!day) return
+    const res = applyPlan(day, planMode() === 'adjusted' ? plan : null, state.history, localDate())
+    const key = res.applied ? planKey(plan) : 'program'
+    if ((state.activePlanKey ?? 'program') === key) return
+    commit({ ...state, activePlanKey: key, active: { ...a, exercises: res.exercises.map(plannedLog) } })
   },
 
   updateSet(exIdx: number, setIdx: number, patch: Partial<SetEntry>) {
