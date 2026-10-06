@@ -4,7 +4,7 @@
    ```bash
    curl -fsSL https://raw.githubusercontent.com/AmirBazanov/AMGym/main/deploy/setup-ec2.sh -o setup-ec2.sh && bash setup-ec2.sh main
    ```
-   Скрипт ставит Node 22, uv, cloudflared, делает swap 1 ГБ, клонирует репозиторий в `~/amgym`, ставит зависимости и systemd-сервис `gymbot`.
+   Скрипт ставит Node 22, uv, cloudflared (amd64 и arm64), делает swap 1 ГБ, клонирует репозиторий в `~/amgym`, ставит зависимости бота и мини-аппа (`npm ci`), собирает мини-апп и ставит systemd-сервис `gymbot`. Пока ветка не слита в `main`, подставь её имя вместо `main` в обоих местах команды.
 2. С локальной машины скопируй секреты и базу (база необязательна, без неё начнётся с чистой):
    ```bash
    scp -i key.pem .env ubuntu@SERVER_IP:~/amgym/.env

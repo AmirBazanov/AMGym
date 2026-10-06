@@ -30,7 +30,7 @@ command -v "$HOME/.local/bin/uv" >/dev/null || curl -LsSf https://astral.sh/uv/i
 
 echo "== cloudflared"
 if ! command -v cloudflared >/dev/null; then
-  curl -fsSL -o /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+  curl -fsSL -o /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(dpkg --print-architecture).deb
   sudo dpkg -i /tmp/cloudflared.deb >/dev/null
 fi
 
@@ -44,10 +44,18 @@ fi
 echo "== python deps"
 "$HOME/.local/bin/uv" sync --project "$APP_DIR/bot" -q
 
+echo "== mini app deps + build (npm ci keeps package-lock.json untouched so git pull stays fast-forward)"
+(cd "$APP_DIR/miniapp" && npm ci --silent && npm run build --silent)
+
+mkdir -p "$APP_DIR/data"
+
 if [ ! -f "$APP_DIR/.env" ]; then
   cp "$APP_DIR/.env.example" "$APP_DIR/.env"
+  chmod 600 "$APP_DIR/.env"
   echo "!! $APP_DIR/.env created from the example: copy your real .env here (scp) before starting"
 fi
+
+chmod 600 "$APP_DIR/.env"
 
 echo "== systemd service"
 sed "s#__HOME__#$HOME#g; s#__USER__#$USER#g" "$APP_DIR/deploy/gymbot.service" | sudo tee /etc/systemd/system/$SERVICE.service >/dev/null
