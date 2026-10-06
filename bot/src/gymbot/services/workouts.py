@@ -211,7 +211,9 @@ async def delete_last_chat_sets(session: AsyncSession, user: User) -> int:
     for s in batch:
         await session.delete(s)
     await session.flush()
-    workout = await session.get(Workout, last.workout_id, options=[selectinload(Workout.sets)])
+    workout = await session.get(
+        Workout, last.workout_id, options=[selectinload(Workout.sets)], populate_existing=True
+    )
     if workout is not None and not workout.sets:
         await session.delete(workout)
     return len(batch)

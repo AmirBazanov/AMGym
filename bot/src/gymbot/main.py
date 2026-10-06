@@ -79,12 +79,19 @@ async def run() -> None:
         )
     )
 
+    log.info("API and Mini App on http://localhost:%s", settings.api_port)
+    if not settings.run_bot:
+        try:
+            await server.serve()
+        finally:
+            await engine.dispose()
+        return
+
     bot = Bot(settings.bot_token)
     dp = Dispatcher(settings=settings, sessionmaker=sessionmaker)
     dp.update.outer_middleware(AllowedUsers(settings.allowed_user_ids))
     dp.include_routers(common.router, log_text.router)  # log_text last: it catches all text
     await setup_bot_ui(bot, settings)
-    log.info("API and Mini App on http://localhost:%s", settings.api_port)
     polling = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
     try:
         await server.serve()  # returns on Ctrl+C (uvicorn handles the signals)

@@ -25,7 +25,16 @@ import { confirm, haptic } from '../telegram'
 
 export function Today() {
   const state = useStore()
-  return state.active ? <ActiveWorkout workout={state.active} /> : <DayPreview />
+  return (
+    <>
+      {state.pending.length > 0 && (
+        <div className="card notice">
+          Не отправлено на сервер: {state.pending.length}. Отправлю, когда появится связь.
+        </div>
+      )}
+      {state.active ? <ActiveWorkout workout={state.active} /> : <DayPreview />}
+    </>
+  )
 }
 
 function DayPreview() {

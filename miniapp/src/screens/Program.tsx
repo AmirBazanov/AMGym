@@ -156,7 +156,7 @@ function Exercises({ onOpen }: { onOpen: (name: string) => void }) {
 }
 
 function Choose() {
-  const { programId, startDate, restSeconds } = useStore()
+  const { programId, startDate, restSeconds, mode } = useStore()
   return (
     <>
       <h2>Активная программа</h2>
@@ -197,33 +197,42 @@ function Choose() {
         ))}
       </div>
 
-      <h2>Данные</h2>
-      <div className="list">
-        <button
-          className="row"
-          onClick={async () => {
-            if (await confirm('Заменить историю демо-данными? Дата старта станет демо-понедельником.')) actions.resetDemo()
-          }}
-        >
-          <div className="grow" style={{ color: 'var(--link)' }}>
-            Заполнить демо-историей
+      {mode === 'demo' ? (
+        <>
+          <h2>Данные</h2>
+          <div className="list">
+            <button
+              className="row"
+              onClick={async () => {
+                if (await confirm('Заменить историю демо-данными? Дата старта станет демо-понедельником.'))
+                  actions.resetDemo()
+              }}
+            >
+              <div className="grow" style={{ color: 'var(--link)' }}>
+                Заполнить демо-историей
+              </div>
+            </button>
+            <button
+              className="row"
+              onClick={async () => {
+                if (await confirm('Удалить всю историю тренировок?')) actions.clearAll()
+              }}
+            >
+              <div className="grow" style={{ color: 'var(--danger)' }}>
+                Очистить историю
+              </div>
+            </button>
           </div>
-        </button>
-        <button
-          className="row"
-          onClick={async () => {
-            if (await confirm('Удалить всю историю тренировок?')) actions.clearAll()
-          }}
-        >
-          <div className="grow" style={{ color: 'var(--danger)' }}>
-            Очистить историю
-          </div>
-        </button>
-      </div>
-      <p className="hint" style={{ padding: '8px 4px' }}>
-        Пока всё хранится только на этом устройстве. Когда появится сервер, тренировки будут синхронизироваться с
-        ботом.
-      </p>
+          <p className="hint" style={{ padding: '8px 4px' }}>
+            Это демо: данные хранятся только в этом браузере. Открой дневник из бота в Telegram, и тренировки
+            будут сохраняться на сервере вместе с записями из чата.
+          </p>
+        </>
+      ) : (
+        <p className="hint" style={{ padding: '16px 4px' }}>
+          Тренировки сохраняются на сервере бота. Записи текстом в чате бота тоже попадают сюда.
+        </p>
+      )}
     </>
   )
 }

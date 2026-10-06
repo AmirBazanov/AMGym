@@ -39,7 +39,10 @@ async def start(message: Message, settings: Settings) -> None:
         if url
         else ReplyKeyboardRemove()
     )
-    await message.answer(HELP, reply_markup=kb)
+    text = HELP
+    if not settings.allowed_user_ids and message.from_user:
+        text += f"\n\nБот сейчас открыт для всех. Впиши свой id {message.from_user.id} в ALLOWED_USER_IDS в .env."
+    await message.answer(text, reply_markup=kb)
 
 
 @router.message(Command("today"))

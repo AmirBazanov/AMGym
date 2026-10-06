@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     # Local browser testing only: requests without Telegram initData act as this Telegram user.
     # Leave empty in any internet-facing setup.
     dev_user_id: int | None = None
+    # false = only the HTTP server (Mini App + API), handy for UI work without Telegram access.
+    run_bot: bool = True
 
 
 def get_settings() -> Settings:

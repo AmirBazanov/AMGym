@@ -2,6 +2,7 @@
 // Shapes mirror the future server models (Workout -> exercises -> sets) so the swap is mechanical.
 import { useSyncExternalStore } from 'react'
 import { getDay, getProgram, isDropset, programPosition, type ProgramExercise } from './program'
+import { api, inTelegram } from './api'
 import { buildDemoHistory, demoStartDate } from './mock'
 
 export interface SetEntry {
@@ -35,6 +36,17 @@ export interface State {
   active: Workout | null
   skipAutoStart: string | null // local date the user cancelled today's prepared workout
   history: Workout[]
+  // 'server': history lives on the bot's server (opened from Telegram); 'demo': local-only preview.
+  mode: 'server' | 'demo'
+  // Finished workouts not yet accepted by the server (offline in the gym); retried on every sync.
+  pending: Workout[]
+}
+
+interface ServerState {
+  programId: string
+  startDate: string
+  restSeconds: number
+  history: Workout[]
 }
 
 const KEY = 'gymapp.v1'
@@ -49,7 +61,10 @@ function initialState(): State {
     restEnd: null,
     skipAutoStart: null,
     active: null,
-    history: buildDemoHistory(program, startDate),
+    // Inside Telegram the real history comes from the server; never show demo data there.
+    history: inTelegram ? [] : buildDemoHistory(program, startDate),
+    mode: inTelegram ? 'server' : 'demo',
+    pending: [],
   }
 }
 
@@ -174,9 +189,22 @@ export const actions = {
   updateSet(exIdx: number, setIdx: number, patch: Partial<SetEntry>) {
     const a = state.active
     if (!a) return
-    const exercises = a.exercises.map((ex, i) =>
-      i !== exIdx ? ex : { ...ex, sets: ex.sets.map((s, j) => (j === setIdx ? { ...s, ...patch } : s)) },
-    )
+    const exercises = a.exercises.map((ex, i) => {
+      if (i !== exIdx) return ex
+      const old = ex.sets[setIdx]
+      const sets = ex.sets.map((s, j) => {
+        if (j === setIdx) {
+          const next = { ...s, ...patch }
+          // Ticking a set without a weight reuses the previous set's weight.
+          if (patch.done && next.weight == null) next.weight = ex.sets[j - 1]?.weight ?? null
+          return next
+        }
+        // A new weight carries over to the following sets that still had the old one.
+        if ('weight' in patch && j > setIdx && !s.done && s.weight === old.weight) return { ...s, weight: patch.weight! }
+        return s
+      })
+      return { ...ex, sets }
+    })
     // The clock starts with the first ticked set, not when the template was prepared.
     const startedAt = patch.done && !isStarted(a) ? new Date().toISOString() : a.startedAt
     commit({ ...state, active: { ...a, startedAt, exercises } })
@@ -219,10 +247,19 @@ export const actions = {
     const exercises = a.exercises
       .map((ex) => ({ ...ex, sets: ex.sets.filter((s) => s.done) }))
       .filter((ex) => ex.sets.length)
-    const history = exercises.length
-      ? [...state.history, { ...a, exercises, finishedAt: new Date().toISOString() }]
-      : state.history
-    commit({ ...state, active: null, history })
+    if (!exercises.length) {
+      commit({ ...state, active: null })
+      return
+    }
+    const done: Workout = { ...a, exercises, finishedAt: new Date().toISOString() }
+    const server = state.mode === 'server'
+    commit({
+      ...state,
+      active: null,
+      history: [...state.history, done],
+      pending: server ? [...state.pending, done] : state.pending,
+    })
+    if (server) void flushPending()
   },
 
   cancelWorkout() {
@@ -230,15 +267,25 @@ export const actions = {
   },
 
   deleteWorkout(id: string) {
-    commit({ ...state, history: state.history.filter((w) => w.id !== id) })
+    const wasPending = state.pending.some((w) => w.id === id)
+    commit({
+      ...state,
+      history: state.history.filter((w) => w.id !== id),
+      pending: state.pending.filter((w) => w.id !== id),
+    })
+    if (state.mode === 'server' && !wasPending) {
+      api(`/workouts/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => void syncFromServer())
+    }
   },
 
   setProgram(programId: string, startDate: string) {
     commit({ ...state, programId, startDate: toMonday(startDate) })
+    pushSettings({ programId, startDate: toMonday(startDate) })
   },
 
   setRestSeconds(restSeconds: number) {
     commit({ ...state, restSeconds })
+    pushSettings({ restSeconds })
   },
 
   resetDemo() {
@@ -253,4 +300,62 @@ export const actions = {
   setRestEnd(restEnd: number | null) {
     commit({ ...state, restEnd })
   },
+}
+
+// ---- Server sync (when opened from Telegram) ----
+
+function applyServer(server: ServerState) {
+  const known = new Set(server.history.map((w) => w.id))
+  const pending = state.pending.filter((w) => !known.has(w.id))
+  commit({
+    ...state,
+    mode: 'server',
+    programId: server.programId,
+    startDate: server.startDate,
+    restSeconds: server.restSeconds,
+    history: [...server.history, ...pending].sort((a, b) => a.startedAt.localeCompare(b.startedAt)),
+    pending,
+  })
+}
+
+let flushing = false
+
+/** Upload finished workouts the server has not accepted yet. Each POST is idempotent by client id. */
+export async function flushPending(): Promise<void> {
+  if (flushing) return
+  flushing = true
+  try {
+    for (const w of [...state.pending]) {
+      const saved = await api<Workout>('/workouts', { method: 'POST', body: JSON.stringify(w) })
+      commit({
+        ...state,
+        history: state.history.map((h) => (h.id === w.id ? saved : h)),
+        pending: state.pending.filter((p) => p.id !== w.id),
+      })
+    }
+  } catch {
+    // Offline or server down: keep them pending, the next sync retries.
+  } finally {
+    flushing = false
+  }
+}
+
+function pushSettings(patch: Partial<Pick<State, 'programId' | 'startDate' | 'restSeconds'>>) {
+  if (state.mode !== 'server') return
+  api<ServerState>('/settings', { method: 'PUT', body: JSON.stringify(patch) })
+    .then(applyServer)
+    .catch(() => undefined)
+}
+
+/**
+ * Load settings and history from the server. Outside Telegram the server may still answer
+ * (local dev with DEV_USER_ID); otherwise the app stays a local demo.
+ */
+export async function syncFromServer(): Promise<void> {
+  try {
+    await flushPending()
+    applyServer(await api<ServerState>('/state'))
+  } catch {
+    if (!inTelegram && state.mode !== 'demo') commit({ ...state, mode: 'demo' })
+  }
 }

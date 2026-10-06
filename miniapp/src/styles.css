@@ -687,6 +687,11 @@ h2 {
   }
 }
 
+.notice {
+  margin-bottom: 12px;
+  font-size: 14px;
+  color: var(--hint);
+}
 .dialog {
   width: 100%;
   max-width: 340px;
