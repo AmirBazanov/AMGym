@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 
 function parse(v: string): number | null {
-  const n = parseFloat(v.replace(',', '.'))
+  const n = Number.parseFloat(v.replace(',', '.'))
   return Number.isFinite(n) && n >= 0 ? n : null
 }
 
@@ -30,7 +30,7 @@ export function NumField({
       value={text}
       onFocus={(e) => e.target.select()}
       onChange={(e) => {
-        const t = e.target.value.replace(/[^\d.,]/g, '')
+        const t = e.target.value.replace(decimal ? /[^\d.,]/g : /\D/g, '')
         setText(t)
         onChange(parse(t))
       }}

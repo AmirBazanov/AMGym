@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { BarSeries, LineSeries } from '../components/LazyCharts'
 import { capitalize, getProgram, programExerciseNames } from '../program'
-import { useStore } from '../store'
+import { currentRun, useStore } from '../store'
 import { exerciseSeries, formatKg, formatShortDate, formatTonnage, weeklyVolume } from '../stats'
 import { haptic } from '../telegram'
 
@@ -18,7 +18,8 @@ const PERIODS: { days: number | null; label: string }[] = [
 ]
 
 export function Progress() {
-  const { history, programId } = useStore()
+  const state = useStore()
+  const { history, programId } = state
   const program = getProgram(programId)
   const done = new Set(history.flatMap((w) => w.exercises.map((e) => e.name)))
   const names = programExerciseNames(program).filter((n) => done.has(n))
@@ -42,7 +43,7 @@ export function Progress() {
   const bestE1 = series.length ? Math.max(...series.map((p) => p.e1rm)) : 0
   const growth = first && lastP && first.e1rm ? ((lastP.e1rm - first.e1rm) / first.e1rm) * 100 : 0
   const since = period == null ? 0 : Date.now() - period * 86_400_000
-  const weekly = weeklyVolume(history.filter((w) => new Date(w.startedAt).getTime() >= since)).map((w) => ({
+  const weekly = weeklyVolume(currentRun(state).filter((w) => new Date(w.startedAt).getTime() >= since)).map((w) => ({
     ...w,
     label: `Н${w.week}`,
     tons: Math.round(w.volume / 100) / 10,

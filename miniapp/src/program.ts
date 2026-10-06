@@ -86,12 +86,12 @@ export function formatPrescription(p: Prescription): string {
 
 /** Which program week/day falls on a given date, counting from the program start (a Monday). */
 export function programPosition(program: Program, startISO: string, date = new Date()) {
-  const start = new Date(startISO + 'T00:00:00')
-  const today = new Date(date.getFullYear(), date.getMonth(), date.getDate())
-  const days = Math.floor((today.getTime() - start.getTime()) / 86_400_000)
+  const [y, m, d] = startISO.split('-').map(Number)
+  // UTC day numbers avoid off-by-one around DST switches.
+  const days = (Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) - Date.UTC(y, m - 1, d)) / 86_400_000
   const weeks = program.weeks.length
   const week = Math.min(Math.max(Math.floor(days / 7) + 1, 1), weeks)
-  const weekday = ((today.getDay() + 6) % 7) + 1
+  const weekday = ((date.getDay() + 6) % 7) + 1
   return { week, weekday, finished: days >= weeks * 7, notStarted: days < 0 }
 }
 
@@ -102,8 +102,11 @@ export function nextTrainingDay(program: Program, week: number, weekday: number)
   if (today) return { week, weekday, isToday: true }
   const later = w?.days.find((d) => d.weekday > weekday)
   if (later) return { week, weekday: later.weekday, isToday: false }
-  const nw = program.weeks.find((x) => x.number === week + 1) ?? program.weeks[0]
-  return { week: nw.number, weekday: nw.days[0].weekday, isToday: false }
+  const nw = program.weeks.find((x) => x.number === week + 1 && x.days.length)
+  if (nw) return { week: nw.number, weekday: nw.days[0].weekday, isToday: false }
+  // Past the last training day: stay on the last day of the program.
+  const last = w?.days[w.days.length - 1]
+  return { week, weekday: last?.weekday ?? weekday, isToday: false }
 }
 
 /** Short muscle-group title for a day, derived from the program structure. */

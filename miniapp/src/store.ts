@@ -31,6 +31,7 @@ export interface State {
   programId: string
   startDate: string // YYYY-MM-DD, a Monday
   restSeconds: number
+  restEnd: number | null // epoch ms when the current rest ends
   active: Workout | null
   history: Workout[]
 }
@@ -44,6 +45,7 @@ function initialState(): State {
     programId: program.id,
     startDate,
     restSeconds: 90,
+    restEnd: null,
     active: null,
     history: buildDemoHistory(program, startDate),
   }
@@ -107,6 +109,19 @@ function plannedLog(ex: ProgramExercise): ExerciseLog {
   }
 }
 
+/** Program weeks are counted Monday to Sunday, so the start date snaps to its Monday. */
+function toMonday(iso: string): string {
+  const d = new Date(iso + 'T00:00:00')
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7))
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/** Workouts of the current run of the active program (ignores other programs and earlier starts). */
+export function currentRun(s: State = state): Workout[] {
+  const since = new Date(s.startDate + 'T00:00:00').getTime()
+  return s.history.filter((w) => w.programId === s.programId && new Date(w.startedAt).getTime() >= since)
+}
+
 export const actions = {
   startWorkout(week: number, weekday: number) {
     const program = getProgram(state.programId)
@@ -167,7 +182,7 @@ export const actions = {
   },
 
   setProgram(programId: string, startDate: string) {
-    commit({ ...state, programId, startDate })
+    commit({ ...state, programId, startDate: toMonday(startDate) })
   },
 
   setRestSeconds(restSeconds: number) {
@@ -175,10 +190,15 @@ export const actions = {
   },
 
   resetDemo() {
-    commit(initialState())
+    const startDate = demoStartDate()
+    commit({ ...state, startDate, history: buildDemoHistory(getProgram(state.programId), startDate) })
   },
 
   clearAll() {
-    commit({ ...initialState(), history: [] })
+    commit({ ...state, history: [] })
+  },
+
+  setRestEnd(restEnd: number | null) {
+    commit({ ...state, restEnd })
   },
 }

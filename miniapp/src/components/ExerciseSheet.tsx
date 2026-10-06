@@ -52,7 +52,7 @@ export function ExerciseSheet({ name, onClose }: { name: string; onClose: () => 
       <h2>По программе</h2>
       <div className="list">
         {plan.map(({ week, weekday, e }) => (
-          <div className="row" key={`${week}-${weekday}`}>
+          <div className="row" key={`${week}-${weekday}-${e.order}`}>
             <div className="grow">
               Неделя {week} · {WEEKDAY_SHORT[weekday]}
             </div>

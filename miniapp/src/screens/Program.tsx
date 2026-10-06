@@ -15,8 +15,8 @@ import {
   PROGRAMS,
   WEEKDAY_LONG,
 } from '../program'
-import { actions, useStore } from '../store'
-import { haptic } from '../telegram'
+import { actions, currentRun, useStore } from '../store'
+import { confirm, haptic } from '../telegram'
 
 type Tab = 'plan' | 'exercises' | 'settings'
 
@@ -68,7 +68,9 @@ export function ProgramScreen() {
 }
 
 function Plan({ onOpen }: { onOpen: (name: string) => void }) {
-  const { programId, startDate, history } = useStore()
+  const state = useStore()
+  const { programId, startDate } = state
+  const run = currentRun(state)
   const program = getProgram(programId)
   const current = programPosition(program, startDate).week
   const [week, setWeek] = useState(current)
@@ -94,7 +96,7 @@ function Plan({ onOpen }: { onOpen: (name: string) => void }) {
         ))}
       </div>
       {w.days.map((d) => {
-        const done = history.some((h) => h.week === week && h.weekday === d.weekday)
+        const done = run.some((h) => h.week === week && h.weekday === d.weekday)
         return (
           <div key={d.weekday}>
             <h2>
@@ -197,12 +199,22 @@ function Choose() {
 
       <h2>Данные</h2>
       <div className="list">
-        <button className="row" onClick={() => actions.resetDemo()}>
+        <button
+          className="row"
+          onClick={async () => {
+            if (await confirm('Заменить историю демо-данными? Дата старта станет демо-понедельником.')) actions.resetDemo()
+          }}
+        >
           <div className="grow" style={{ color: 'var(--link)' }}>
             Заполнить демо-историей
           </div>
         </button>
-        <button className="row" onClick={() => actions.clearAll()}>
+        <button
+          className="row"
+          onClick={async () => {
+            if (await confirm('Удалить всю историю тренировок?')) actions.clearAll()
+          }}
+        >
           <div className="grow" style={{ color: 'var(--danger)' }}>
             Очистить историю
           </div>

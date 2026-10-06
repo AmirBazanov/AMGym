@@ -49,12 +49,14 @@ export const haptic = {
 }
 
 export function confirm(message: string): Promise<boolean> {
-  if (tg?.showConfirm) {
+  const show = tg?.showConfirm
+  if (!show) return askInPage(message)
+  return new Promise((resolve) => {
     try {
-      return new Promise((resolve) => tg!.showConfirm!(message, resolve))
+      show.call(tg, message, resolve)
     } catch {
-      // Older clients throw outside of supported versions; fall back to the browser dialog.
+      // Older clients throw outside of supported versions; fall back to the in-page dialog.
+      askInPage(message).then(resolve)
     }
-  }
-  return askInPage(message)
+  })
 }

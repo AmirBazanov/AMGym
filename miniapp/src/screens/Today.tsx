@@ -17,7 +17,7 @@ import {
   WEEKDAY_LONG,
   WEEKDAY_SHORT,
 } from '../program'
-import { actions, lastSetsFor, useStore, type Workout } from '../store'
+import { actions, currentRun, lastSetsFor, useStore, type Workout } from '../store'
 import { formatKg } from '../stats'
 import { confirm, haptic } from '../telegram'
 
@@ -27,7 +27,9 @@ export function Today() {
 }
 
 function DayPreview() {
-  const { programId, startDate, history } = useStore()
+  const state = useStore()
+  const { programId, startDate, history } = state
+  const run = currentRun(state)
   const program = getProgram(programId)
   const pos = programPosition(program, startDate)
   const suggested = nextTrainingDay(program, pos.week, pos.weekday)
@@ -37,10 +39,18 @@ function DayPreview() {
   const [sheet, setSheet] = useState<string | null>(null)
   const day = getDay(program, week, weekday)
   const weekDays = program.weeks.find((w) => w.number === week)?.days ?? []
-  const doneHere = history.some((w) => w.week === week && w.weekday === weekday)
+  const doneHere = run.some((w) => w.week === week && w.weekday === weekday)
 
-  const isToday = week === pos.week && weekday === pos.weekday
-  const label = isToday ? 'Сегодня' : suggested.isToday ? 'Выбранный день' : 'Следующая тренировка'
+  const isToday = !pos.finished && !pos.notStarted && week === pos.week && weekday === pos.weekday
+  const label = pos.finished
+    ? 'Программа завершена'
+    : pos.notStarted
+      ? 'Программа ещё не началась'
+      : isToday
+        ? 'Сегодня'
+        : suggested.isToday
+          ? 'Выбранный день'
+          : 'Следующая тренировка'
 
   return (
     <>
@@ -78,7 +88,7 @@ function DayPreview() {
             onClick={() => {
               haptic.select()
               setWeek(w.number)
-              if (!w.days.some((d) => d.weekday === weekday)) setWeekday(w.days[0].weekday)
+              if (w.days.length && !w.days.some((d) => d.weekday === weekday)) setWeekday(w.days[0].weekday)
             }}
           >
             Н{w.number}
@@ -163,8 +173,8 @@ function mmss(sec: number) {
 }
 
 function ActiveWorkout({ workout }: { workout: Workout }) {
-  const { restSeconds } = useStore()
-  const [restEnd, setRestEnd] = useState<number | null>(null)
+  const { restSeconds, restEnd } = useStore()
+  const setRestEnd = actions.setRestEnd
   const [sheet, setSheet] = useState<string | null>(null)
   const now = useNow(true)
   const program = getProgram(workout.programId)
@@ -224,7 +234,10 @@ function ActiveWorkout({ workout }: { workout: Workout }) {
       {workout.exercises.map((ex, ei) => {
         const pe = day?.exercises[ei]
         const exDone = ex.sets.length > 0 && ex.sets.every((s) => s.done)
-        const repsHint = pe?.prescription.drop_reps?.join('-') ?? (pe ? `${pe.prescription.reps_min}–${pe.prescription.reps_max}` : '')
+        const p = pe?.prescription
+        const repsHint =
+          p?.drop_reps?.join('-') ??
+          (p?.reps_min != null ? (p.reps_max && p.reps_max !== p.reps_min ? `${p.reps_min}–${p.reps_max}` : `${p.reps_min}`) : '')
         return (
           <div className="ex-card" key={ei}>
             <button className="ex-head" style={{ width: '100%', textAlign: 'left' }} onClick={() => setSheet(ex.name)}>
