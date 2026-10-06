@@ -18,8 +18,10 @@ class Settings(BaseSettings):
 
     openrouter_api_key: str = ""
     # Free models rotate on OpenRouter; pick a current one at https://openrouter.ai/models?max_price=0
-    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct:free"
-    openrouter_fallback_models: list[str] = []
+    # Checked 2026-10-06: the free tier is small and changes often. If parsing starts failing with
+    # "all models failed", pick a current free model there and set OPENROUTER_MODEL in .env.
+    openrouter_model: str = "inclusionai/ling-3.1-flash"
+    openrouter_fallback_models: list[str] = ["inclusionai/ling-3.0-flash-sante:free", "apodex/apodex-1.1-mini:free"]
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
     miniapp_url: str = ""  # public HTTPS URL of the Mini App (Telegram requires HTTPS)

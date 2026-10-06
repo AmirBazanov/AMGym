@@ -1,6 +1,5 @@
 """HTTP API for the Mini App, plus the built Mini App itself (miniapp/dist) on the same port."""
 
-from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import date, datetime
