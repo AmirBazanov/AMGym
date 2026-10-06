@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # HTTP server: the Mini App API and the built Mini App itself (miniapp/dist) on one port,
     # so a single HTTPS tunnel is enough for Telegram.
-    api_host: str = "0.0.0.0"
+    api_host: str = "127.0.0.1"  # the tunnel connects locally; no need to listen on the LAN
     api_port: int = 8000
     miniapp_dist: Path = ROOT / "miniapp" / "dist"
     programs_dir: Path = ROOT / "data" / "programs"

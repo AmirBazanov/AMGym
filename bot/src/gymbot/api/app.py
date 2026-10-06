@@ -16,6 +16,7 @@ from gymbot.config import Settings
 from gymbot.db.models import User, UserProgram
 from gymbot.db.session import Sessionmaker
 from gymbot.services import workouts as ws
+from gymbot.services.access import is_allowed
 from gymbot.services.programs import load_program
 from gymbot.services.users import active_program, get_or_create_user, set_program
 
@@ -42,17 +43,21 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
             yield session
             await session.commit()
 
-    def tg_user(x_telegram_init_data: Annotated[str, Header()] = "") -> TelegramUser:
+    async def tg_user(request: Request, x_telegram_init_data: Annotated[str, Header()] = "") -> TelegramUser:
         if not x_telegram_init_data:
-            if settings.dev_user_id:
+            # Dev bypass only for direct local requests, never through the tunnel (cloudflared adds
+            # cf-connecting-ip) or from another machine.
+            local = request.client is not None and request.client.host in ("127.0.0.1", "::1", "testclient")
+            if settings.dev_user_id and local and "cf-connecting-ip" not in request.headers:
                 return TelegramUser(id=settings.dev_user_id, name="dev")
             raise HTTPException(401, "open the app from Telegram")
         try:
             user = validate_init_data(x_telegram_init_data, settings.bot_token)
         except InitDataError as e:
             raise HTTPException(401, f"invalid initData: {e}") from e
-        if settings.allowed_user_ids and user.id not in settings.allowed_user_ids:
-            raise HTTPException(403, "this is a personal app")
+        async with sessionmaker() as session:
+            if not await is_allowed(session, settings, user.id):
+                raise HTTPException(403, "this is a personal app")
         return user
 
     Session = Annotated[AsyncSession, Depends(get_session)]
@@ -77,7 +82,9 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
     @app.get("/api/state")
     async def get_state(session: Session, tg: TgUser) -> StateOut:
         user, up = await current(session, tg)
-        return await state_for(session, user, up)
+        out = await state_for(session, user, up)
+        await session.commit()  # first visit creates the user and their program
+        return out
 
     @app.put("/api/settings")
     async def put_settings(body: SettingsIn, session: Session, tg: TgUser) -> StateOut:
@@ -91,12 +98,17 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
                 )
             except LookupError as e:
                 raise HTTPException(404, "unknown program") from e
-        return await state_for(session, user, up)
+        out = await state_for(session, user, up)
+        await session.commit()  # commit before answering, so the client never sees OK for a lost write
+        return out
 
     @app.post("/api/workouts")
     async def post_workout(body: ws.WorkoutIn, session: Session, tg: TgUser) -> ws.WorkoutOut:
         user, up = await current(session, tg)
-        saved = await ws.save_from_miniapp(session, user, up, body, tz)
+        try:
+            saved = await ws.save_from_miniapp(session, user, up, body, tz)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
         await session.commit()
         w = await ws.get_workout(session, user, saved.id)
         assert w is not None
@@ -110,6 +122,7 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
         if w is None:
             raise HTTPException(404, "not found")
         await session.delete(w)
+        await session.commit()
 
     @app.middleware("http")
     async def no_cache_index(request: Request, call_next):  # type: ignore[no-untyped-def]

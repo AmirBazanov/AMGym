@@ -2,7 +2,7 @@
 // Shapes mirror the future server models (Workout -> exercises -> sets) so the swap is mechanical.
 import { useSyncExternalStore } from 'react'
 import { getDay, getProgram, isDropset, programPosition, type ProgramExercise } from './program'
-import { api, inTelegram } from './api'
+import { api, ApiError, inTelegram } from './api'
 import { buildDemoHistory, demoStartDate } from './mock'
 
 export interface SetEntry {
@@ -19,6 +19,7 @@ export interface ExerciseLog {
 }
 
 export interface Workout {
+  clientId?: string | null // set on workouts returned by the server: the id this app generated
   id: string
   programId: string
   week: number
@@ -40,6 +41,8 @@ export interface State {
   mode: 'server' | 'demo'
   // Finished workouts not yet accepted by the server (offline in the gym); retried on every sync.
   pending: Workout[]
+  // Workouts the server refused (e.g. invalid values); kept so nothing is silently lost.
+  rejected: Workout[]
 }
 
 interface ServerState {
@@ -65,6 +68,7 @@ function initialState(): State {
     history: inTelegram ? [] : buildDemoHistory(program, startDate),
     mode: inTelegram ? 'server' : 'demo',
     pending: [],
+    rejected: [],
   }
 }
 
@@ -305,7 +309,7 @@ export const actions = {
 // ---- Server sync (when opened from Telegram) ----
 
 function applyServer(server: ServerState) {
-  const known = new Set(server.history.map((w) => w.id))
+  const known = new Set(server.history.map((w) => w.clientId).filter(Boolean))
   const pending = state.pending.filter((w) => !known.has(w.id))
   commit({
     ...state,
@@ -313,7 +317,7 @@ function applyServer(server: ServerState) {
     programId: server.programId,
     startDate: server.startDate,
     restSeconds: server.restSeconds,
-    history: [...server.history, ...pending].sort((a, b) => a.startedAt.localeCompare(b.startedAt)),
+    history: [...server.history, ...pending, ...state.rejected].sort((a, b) => a.startedAt.localeCompare(b.startedAt)),
     pending,
   })
 }
@@ -326,15 +330,24 @@ export async function flushPending(): Promise<void> {
   flushing = true
   try {
     for (const w of [...state.pending]) {
-      const saved = await api<Workout>('/workouts', { method: 'POST', body: JSON.stringify(w) })
-      commit({
-        ...state,
-        history: state.history.map((h) => (h.id === w.id ? saved : h)),
-        pending: state.pending.filter((p) => p.id !== w.id),
-      })
+      try {
+        const saved = await api<Workout>('/workouts', { method: 'POST', body: JSON.stringify(w) })
+        commit({
+          ...state,
+          history: state.history.map((h) => (h.id === w.id ? saved : h)),
+          pending: state.pending.filter((p) => p.id !== w.id),
+        })
+      } catch (e) {
+        // The server looked at it and said no (bad values): retrying won't help, set it aside.
+        if (e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 401 && e.status !== 403) {
+          commit({ ...state, pending: state.pending.filter((p) => p.id !== w.id), rejected: [...state.rejected, w] })
+          continue
+        }
+        throw e
+      }
     }
   } catch {
-    // Offline or server down: keep them pending, the next sync retries.
+    // Offline, server down or login expired: keep them pending, the next sync retries.
   } finally {
     flushing = false
   }
@@ -353,6 +366,7 @@ function pushSettings(patch: Partial<Pick<State, 'programId' | 'startDate' | 're
  */
 export async function syncFromServer(): Promise<void> {
   try {
+    while (flushing) await new Promise((r) => setTimeout(r, 100))
     await flushPending()
     applyServer(await api<ServerState>('/state'))
   } catch {

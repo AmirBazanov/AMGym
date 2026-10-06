@@ -22,7 +22,6 @@ def workout(wid="abc", **over):
                 "sets": [
                     {"weight": 14, "reps": 10, "done": True},
                     {"weight": 14, "reps": 9, "done": False},  # not done
-                    {"weight": 14, "reps": None, "done": True},  # no reps
                     {"weight": 16, "reps": 8, "done": True},
                 ],
             },
@@ -131,5 +130,24 @@ async def test_delete_other_users_workout_404(client, auth):
     st = (await client.get("/api/state", headers=auth)).json()
     wid = (await client.post("/api/workouts", json=workout(programId=st["programId"]), headers=auth)).json()["id"]
     other = {"X-Telegram-Init-Data": init_data(99)}
-    assert (await client.delete(f"/api/workouts/{wid}", headers=other)).status_code == 404
+    # Another Telegram user is not the owner (first user) of this personal app at all.
+    assert (await client.delete(f"/api/workouts/{wid}", headers=other)).status_code == 403
     assert len((await client.get("/api/state", headers=auth)).json()["history"]) == 1
+
+
+async def test_post_workout_done_set_without_reps_is_rejected(client, auth):
+    bad = workout(wid="noreps")
+    bad["exercises"][0]["sets"].append({"weight": 14, "reps": None, "done": True})
+    assert (await client.post("/api/workouts", json=bad, headers=auth)).status_code == 422
+
+
+async def test_first_user_becomes_owner(client, auth):
+    assert (await client.get("/api/state", headers=auth)).status_code == 200
+    stranger = {"X-Telegram-Init-Data": init_data(12345)}
+    assert (await client.get("/api/state", headers=stranger)).status_code == 403
+
+
+async def test_dev_bypass_refused_through_tunnel(tmp_path, make_client):
+    async with make_client(make_settings(tmp_path, dev_user_id=7)) as c:
+        assert (await c.get("/api/state")).status_code == 200
+        assert (await c.get("/api/state", headers={"cf-connecting-ip": "1.2.3.4"})).status_code == 401

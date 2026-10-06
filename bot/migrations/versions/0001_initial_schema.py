@@ -2,7 +2,7 @@
 
 Revision ID: 0001
 Revises: 
-Create Date: 2026-10-06 09:54:46.466105
+Create Date: 2026-10-06 10:09:28.189344
 
 """
 from typing import Sequence, Union
@@ -61,6 +61,7 @@ def upgrade() -> None:
     sa.Column('fat_g', sa.Numeric(precision=6, scale=1), nullable=False),
     sa.Column('carbs_g', sa.Numeric(precision=6, scale=1), nullable=False),
     sa.Column('estimated', sa.Boolean(), nullable=False),
+    sa.Column('raw_text', sa.Text(), nullable=True),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_food_entries_user_id_users'), ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_food_entries'))
     )

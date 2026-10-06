@@ -32,6 +32,12 @@ export function Today() {
           Не отправлено на сервер: {state.pending.length}. Отправлю, когда появится связь.
         </div>
       )}
+      {state.rejected.length > 0 && (
+        <div className="card notice">
+          Сервер не принял тренировок: {state.rejected.length} (неверные значения). Они остались в истории на этом
+          телефоне.
+        </div>
+      )}
       {state.active ? <ActiveWorkout workout={state.active} /> : <DayPreview />}
     </>
   )
@@ -205,10 +211,18 @@ function ActiveWorkout({ workout }: { workout: Workout }) {
     }
   }, [restEnd, restLeft])
 
+  const [needReps, setNeedReps] = useState<string | null>(null)
   const toggle = (ei: number, si: number) => {
     const s = workout.exercises[ei].sets[si]
     const next = !s.done
-    const reps = s.reps ?? (next ? defaultReps(ei) : null)
+    // Reps: what was typed, else the previous set's, else the top of the planned range.
+    const reps = s.reps ?? (next ? (workout.exercises[ei].sets[si - 1]?.reps ?? defaultReps(ei)) : null)
+    if (next && reps == null) {
+      haptic.error()
+      setNeedReps(`${ei}-${si}`)
+      return
+    }
+    setNeedReps(null)
     actions.updateSet(ei, si, { done: next, reps })
     haptic.tap()
     if (next) setRestEnd(Date.now() + restSeconds * 1000)
@@ -295,7 +309,8 @@ function ActiveWorkout({ workout }: { workout: Workout }) {
                   <NumField decimal value={s.weight} onChange={(v) => actions.updateSet(ei, si, { weight: v })} />
                   <NumField
                     value={s.reps}
-                    placeholder={repsHint}
+                    invalid={needReps === `${ei}-${si}`}
+                    placeholder={needReps === `${ei}-${si}` ? 'повт.?' : repsHint}
                     onChange={(v) => actions.updateSet(ei, si, { reps: v })}
                   />
                   <button

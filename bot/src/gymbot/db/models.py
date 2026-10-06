@@ -157,3 +157,4 @@ class FoodEntry(Base):
     fat_g: Mapped[Decimal] = mapped_column(Numeric(6, 1))
     carbs_g: Mapped[Decimal] = mapped_column(Numeric(6, 1))
     estimated: Mapped[bool] = mapped_column(default=True)  # LLM estimate vs. label data
+    raw_text: Mapped[str | None] = mapped_column(Text)  # original message

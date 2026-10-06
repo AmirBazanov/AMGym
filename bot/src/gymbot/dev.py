@@ -66,6 +66,8 @@ def start_tunnel(port: int) -> tuple[subprocess.Popen[str], str]:
 
 def main() -> None:
     settings = get_settings()
+    if settings.dev_user_id:
+        sys.exit("Remove DEV_USER_ID from .env: it skips Telegram login and must not go through a public tunnel")
     build_miniapp()
     tunnel = None
     if not settings.miniapp_url:

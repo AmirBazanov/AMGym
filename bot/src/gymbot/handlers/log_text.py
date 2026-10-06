@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import secrets
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -32,6 +32,7 @@ class Pending:
     user_id: int
     result: ParseResult
     raw_text: str
+    sent_at: datetime  # when the message was sent: a set written at 23:59 belongs to that day
 
 
 # Parsed messages waiting for "Сохранить". In memory: a restart just means pressing again after resending.
@@ -91,7 +92,7 @@ async def log_free_text(message: Message, settings: Settings, sessionmaker: Sess
     if len(PENDING) >= MAX_PENDING:
         PENDING.pop(next(iter(PENDING)))
     token = secrets.token_hex(6)
-    PENDING[token] = Pending(message.from_user.id, result, text)  # type: ignore[union-attr]
+    PENDING[token] = Pending(message.from_user.id, result, text, message.date)  # type: ignore[union-attr]
     await message.answer(preview, reply_markup=confirm_kb(token))
 
 
@@ -106,11 +107,23 @@ async def drop(cb: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("save:"))
 async def save(cb: CallbackQuery, settings: Settings, sessionmaker: Sessionmaker) -> None:
     token = (cb.data or "").split(":", 1)[1]
-    pending = PENDING.get(token)
+    # pop, not get: updates run concurrently, a double tap must not save the sets twice.
+    pending = PENDING.pop(token, None)
     if pending is None or pending.user_id != cb.from_user.id:
-        await cb.answer("Эта запись устарела, отправь сообщение ещё раз.", show_alert=True)
+        await cb.answer("Эта запись уже сохранена или устарела.", show_alert=True)
         return
-    today = datetime.now(ZoneInfo(settings.timezone)).date()
+    today = pending.sent_at.astimezone(ZoneInfo(settings.timezone)).date()
+    try:
+        note = await _save(pending, cb, today, sessionmaker)
+    except Exception:
+        PENDING[token] = pending  # let the user press again
+        raise
+    if cb.message:
+        await cb.message.edit_text(f"{render_preview(pending.result).removeprefix('Записать?')}\n\n{note}".strip())  # type: ignore[union-attr]
+    await cb.answer()
+
+
+async def _save(pending: Pending, cb: CallbackQuery, today: date, sessionmaker: Sessionmaker) -> str:
     async with sessionmaker() as session:
         user = await get_or_create_user(session, cb.from_user.id, cb.from_user.full_name)
         if pending.result.kind == "workout":
@@ -127,11 +140,9 @@ async def save(cb: CallbackQuery, settings: Settings, sessionmaker: Sessionmaker
                         protein_g=Decimal(str(f.protein_g)),
                         fat_g=Decimal(str(f.fat_g)),
                         carbs_g=Decimal(str(f.carbs_g)),
+                        raw_text=pending.raw_text,
                     )
                 )
             note = "Еда сохранена ✅"
         await session.commit()
-    PENDING.pop(token, None)
-    if cb.message:
-        await cb.message.edit_text(f"{render_preview(pending.result).removeprefix('Записать?')}\n\n{note}".strip())  # type: ignore[union-attr]
-    await cb.answer()
+    return note

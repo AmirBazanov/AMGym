@@ -43,10 +43,12 @@ class WorkoutIn(BaseModel):
 
 class WorkoutOut(WorkoutIn):
     source: str = "miniapp"
+    clientId: str | None = None  # the Mini App's own id, so it can match its offline queue
 
 
 def _aware(dt: datetime) -> datetime:
-    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    """SQLite drops the offset: store UTC, read naive values back as UTC."""
+    return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 def _item_target(item: ProgramItem | None) -> tuple[str, bool]:
@@ -95,6 +97,7 @@ def serialize(w: Workout, up: UserProgram, weeks: int, tz: ZoneInfo) -> WorkoutO
         finishedAt=_aware(w.finished_at) if w.finished_at else None,
         exercises=exercises,
         source=w.source,
+        clientId=w.client_id,
     )
 
 
@@ -137,8 +140,10 @@ async def save_from_miniapp(
     for ex in data.exercises:
         exercise = await get_or_create_exercise(session, ex.name)
         for s in ex.sets:
-            if not s.done or not s.reps:
+            if not s.done:
                 continue
+            if not s.reps:
+                raise ValueError(f"set without reps: {ex.name}")
             w.sets.append(
                 WorkoutSet(
                     exercise_id=exercise.id,
