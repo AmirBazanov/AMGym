@@ -17,8 +17,10 @@ from gymbot.services.users import get_or_create_user
 
 router = Router(name="advice")
 
-# Only at the start of the message, so "съел совет..." style food text still goes to the parser.
-ADVICE_TEXT = re.compile(r"^\s*(совет|что посоветуешь|рекомендац)", re.IGNORECASE)
+# Whole words at the start of the message only: "советская колбаса 100 г" and "съел ..." go to the parser.
+ADVICE_TEXT = re.compile(
+    r"^\s*(совет(ы|уй|ов)?|что посоветуешь|посоветуй|рекомендаци[ия])\b", re.IGNORECASE
+)
 UNAVAILABLE = "Нейросеть сейчас недоступна, попробуй ещё раз чуть позже."
 
 

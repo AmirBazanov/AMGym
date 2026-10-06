@@ -211,12 +211,13 @@ async def test_generate_propagates_llm_error(db, full_user):
 
 
 @pytest.mark.parametrize("text", ["совет", "Советы на неделю", "  что посоветуешь?", "Рекомендации по сну",
-                                  "рекомендацию дай"])
+                                  "рекомендация", "посоветуй что-нибудь", "советуй", "советов дай", "СОВЕТ!"])
 def test_trigger_matches(text):
     assert advice_handler.ADVICE_TEXT.match(text)
 
 
-@pytest.mark.parametrize("text", ["съел совет", "жим 3х10 на 60", "посоветуй", "что съесть"])
+@pytest.mark.parametrize("text", ["съел совет", "жим 3х10 на 60", "что съесть", "советская колбаса 100 г",
+                                  "Советский пломбир", "советник", "рекомендованная доза"])
 def test_trigger_ignores(text):
     assert not advice_handler.ADVICE_TEXT.match(text)
 

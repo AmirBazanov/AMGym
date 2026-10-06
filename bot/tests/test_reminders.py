@@ -11,6 +11,7 @@ from gymbot.config import Settings
 from gymbot.db.models import FoodEntry, Reminder, User
 from gymbot.llm.openrouter import LLMError
 from gymbot.services import advice as advice_module
+from gymbot.services import reminders as rem_module
 from gymbot.services.reminders import (
     CLOSED,
     GRACE,
@@ -656,6 +657,14 @@ async def test_weekday_spill_of_another_day_not_sent(db):
 # ---- kind=advice ----
 
 
+@pytest.fixture(autouse=True)
+def _clear_advice_cooldown():
+    # The cooldown is per process; reminder ids repeat across tests (fresh DB each time).
+    rem_module._advice_retry_at.clear()
+    yield
+    rem_module._advice_retry_at.clear()
+
+
 def _fake_advice(monkeypatch, result="СОВЕТ"):
     """Replace advice.generate; returns the list of recorded calls (user, now_utc)."""
     calls: list[tuple[User, datetime]] = []
@@ -697,10 +706,42 @@ async def test_advice_llm_error_does_not_claim_and_retries(db, monkeypatch):
     bot = FakeBot()
     assert await _tick(db, bot, at(9, 30), llm=object()) == 0
     assert bot.calls == [] and await _last_sent(db, rid) is None
-    _fake_advice(monkeypatch)
-    assert await _tick(db, bot, at(9, 31), llm=object()) == 1
-    assert bot.calls == [(42, "СОВЕТ", None)]
+    calls = _fake_advice(monkeypatch)
+    assert await _tick(db, bot, at(9, 40), llm=object()) == 1  # after the 10-minute cooldown
+    assert bot.calls == [(42, "СОВЕТ", None)] and len(calls) == 1
     assert await _last_sent(db, rid) == DAY
+
+
+async def test_advice_llm_error_cooldown_10_minutes(db, monkeypatch):
+    calls = _fake_advice(monkeypatch, LLMError("model is down"))
+    rid = await _rem(db, await _user(db), kind="advice", text=None)
+    bot = FakeBot()
+    assert await _tick(db, bot, at(9, 30), llm=object()) == 0
+    assert len(calls) == 1
+    # Checks every 30 s right after the failure do not call the model again.
+    assert await _tick(db, bot, at(9, 30) + timedelta(seconds=30), llm=object()) == 0
+    assert await _tick(db, bot, at(9, 39), llm=object()) == 0
+    assert len(calls) == 1
+    # 10 minutes later: one more attempt (fails again -> next one at 09:50).
+    assert await _tick(db, bot, at(9, 40), llm=object()) == 0
+    assert len(calls) == 2
+    assert await _tick(db, bot, at(9, 45), llm=object()) == 0
+    assert len(calls) == 2
+    assert await _tick(db, bot, at(9, 50), llm=object()) == 0
+    assert len(calls) == 3  # at most 3 attempts in the 30-minute window
+    assert await _tick(db, bot, at(10, 0), llm=object()) == 0  # window closed
+    assert len(calls) == 3 and bot.calls == [] and await _last_sent(db, rid) is None
+
+
+async def test_advice_cooldown_does_not_block_other_reminders(db, monkeypatch):
+    calls = _fake_advice(monkeypatch, LLMError("model is down"))
+    uid = await _user(db)
+    await _rem(db, uid, kind="advice", text=None)
+    bot = FakeBot()
+    assert await _tick(db, bot, at(9, 30), llm=object()) == 0
+    await _rem(db, uid, minute=9 * 60 + 31)  # a text reminder due during the cooldown
+    assert await _tick(db, bot, at(9, 31), llm=object()) == 1
+    assert bot.calls == [(42, "Креатин", None)] and len(calls) == 1
 
 
 async def test_advice_is_sent_after_quick_reminders(db, monkeypatch):

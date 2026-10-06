@@ -11,7 +11,9 @@ A reminder with `weekday` (0=Mon..6=Sun) is due only when the local day returned
 weekday, so a Sunday 23:50 reminder that spills past midnight still counts as Sunday.
 
 kind=advice asks the LLM for advice (gymbot.services.advice) before claiming, like nutrition builds its
-summary: when the model fails nothing is claimed and the next check within GRACE retries.
+summary: when the model fails nothing is claimed, and the next attempt waits ADVICE_RETRY (per process,
+in memory), so a model that is down costs at most ~3 attempts per GRACE window instead of one per check:
+the free OpenRouter quota is shared with chat parsing.
 
 Delivery is "at most once per claim", not strictly at most once per day:
 - a crash between claim and send loses that day's reminder;
@@ -49,6 +51,9 @@ GRACE = timedelta(minutes=30)
 CHECK_SECONDS = 30
 MAX_PER_USER = 20
 KINDS = ("text", "nutrition", "advice")
+ADVICE_RETRY = timedelta(minutes=10)
+# reminder id -> earliest next advice attempt (UTC) after an LLM failure. Lost on restart, which is fine.
+_advice_retry_at: dict[int, datetime] = {}
 
 NO_TARGETS = "Норма КБЖУ не задана, задай её в дневнике → Питание → Настройки"
 CLOSED = "КБЖУ на сегодня закрыт"
@@ -210,6 +215,8 @@ async def tick(
     `settings.miniapp_url` is read here, at send time. kind=advice needs `llm`; without it they are skipped.
     """
     today = now_utc.astimezone(tz).date()
+    for rid in [rid for rid, at in _advice_retry_at.items() if at <= now_utc]:
+        del _advice_retry_at[rid]
     rows = (
         await session.execute(
             select(Reminder, User)
@@ -231,6 +238,8 @@ async def tick(
         if reminder.kind == "advice" and llm is None:
             log.warning("reminder %s: kind=advice but no LLM client, skipped", reminder.id)
             continue
+        if reminder.kind == "advice" and reminder.id in _advice_retry_at:
+            continue  # the model failed recently; wait for ADVICE_RETRY
         due.append(
             _Due(
                 reminder.id, user.id, user.telegram_id, reminder.minute_of_day, reminder.kind, reminder.text,
@@ -251,9 +260,10 @@ async def tick(
             if not await _claim(session, item):
                 continue  # sent by another check/process, or disabled/re-timed meanwhile
         except LLMError as e:
-            # Nothing was claimed: the next check within GRACE retries.
+            # Nothing was claimed: retry within GRACE, but not before ADVICE_RETRY.
             await session.rollback()
-            log.warning("reminder %s: advice not generated, will retry: %s", item.id, e)
+            _advice_retry_at[item.id] = now_utc + ADVICE_RETRY
+            log.warning("reminder %s: advice not generated, retry after %s: %s", item.id, ADVICE_RETRY, e)
             continue
         except Exception:
             await session.rollback()
