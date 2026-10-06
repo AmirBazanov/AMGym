@@ -149,6 +149,14 @@ def test_mild_pain_on_a_normal_day():
     assert by["французский жим в блоке из-за головы"].weightFactor == 1
 
 
+def test_sore_date_is_the_local_workout_day():
+    # 22:30 UTC on Oct 3 is 01:30 Moscow on Oct 4: the workout's local day.
+    at = datetime(2026, 10, 3, 22, 30, tzinfo=UTC)
+    recent = [RecentSets(at, "сгибания с гантелями на бицепс с супинацией", 6, date(2026, 10, 4))]
+    draft = plan.rule_draft(inputs(texts=["бицепс забит"], recent=recent), NOW)
+    assert "после 04.10" in draft.exercises[1].reason
+
+
 def test_sore_muscles_after_heavy_session():
     recent = [RecentSets(NOW - timedelta(hours=30), "сгибания с гантелями на бицепс с супинацией", 6)]
     sore = inputs(texts=["бицепс забит после пятницы"], recent=recent)
@@ -192,14 +200,52 @@ def test_refinement_keeps_program_names_and_readiness():
     assert out.exercises[0].sets == 4 and out.exercises[0].reason == "меньше объёма"
 
 
-def test_refinement_clamps_numbers():
+def test_refinement_never_heavier_than_the_light_draft():
     draft = plan.rule_draft(inputs(sleep_hours=5), NOW)
     data = answer(draft, items={0: {"weightFactor": 3.0, "sets": 40, "repsMin": 0, "repsMax": 500},
+                                1: {"weightFactor": 1.5, "sets": 10},
+                                2: {"weightFactor": 0.8, "sets": 3},
                                 3: {"repsMin": 10, "repsMax": 12}})
     out = plan.apply_refinement(draft, data, inputs(sleep_hours=5))
     e = out.exercises[0]
-    assert (e.weightFactor, e.sets, e.repsMin, e.repsMax) == (1.5, 10, 8, 50)
+    # sets <= draft sets, factor <= draft factor on a light day; reps outside 1..50 fall back / are clamped
+    assert (e.weightFactor, e.sets, e.repsMin, e.repsMax) == (0.9, 5, 8, 50)
+    assert (out.exercises[1].weightFactor, out.exercises[1].sets) == (0.9, 2)
+    assert (out.exercises[2].weightFactor, out.exercises[2].sets) == (0.8, 3)  # lighter is fine
     assert (out.exercises[3].repsMin, out.exercises[3].repsMax) == (None, None)  # dropset
+
+
+def test_refinement_on_a_normal_day_never_above_the_program():
+    i = inputs(facts=[("не делаю становую", "training")])
+    draft = plan.rule_draft(i, NOW)
+    assert draft.readiness == "normal" and plan.needs_model(i, draft)
+    data = answer(draft, items={0: {"weightFactor": 1.3, "sets": 8}, 1: {"weightFactor": 0.8}})
+    out = plan.apply_refinement(draft, data, i)
+    assert (out.exercises[0].weightFactor, out.exercises[0].sets) == (1.0, 6)
+    assert out.exercises[1].weightFactor == 0.8
+
+
+def test_refinement_keeps_pain_protected_reps_and_sets():
+    i = inputs(sleep_hours=5, pains=[Pain("левое плечо", None)])
+    draft = plan.rule_draft(i, NOW)
+    pos = 4  # отведения на дельты: draft 2 sets, 12–15, ×0.7
+    assert (draft.exercises[pos].sets, draft.exercises[pos].weightFactor) == (2, 0.7)
+    data = answer(draft, items={pos: {"sets": 10, "repsMin": 30, "repsMax": 50, "weightFactor": 1.4},
+                                0: {"repsMin": 12, "repsMax": 20}})
+    out = plan.apply_refinement(draft, data, i)
+    e = out.exercises[pos]
+    assert (e.sets, e.repsMin, e.repsMax, e.weightFactor) == (2, 12, 15, 0.7)
+    assert (out.exercises[0].repsMin, out.exercises[0].repsMax) == (12, 20)  # unprotected reps may change
+
+
+def test_replacement_that_loads_the_painful_place_is_dropped():
+    i = inputs(sleep_hours=8, pains=[Pain("левое плечо", 2)])
+    draft = plan.rule_draft(i, NOW)
+    data = answer(draft, items={3: {"replaceWith": "армейский жим с гантелями"},
+                                0: {"replaceWith": "молотковые сгибания с гантелями"}})
+    out = plan.apply_refinement(draft, data, i)
+    assert out.exercises[3].replaceWith is None
+    assert out.exercises[0].replaceWith == "молотковые сгибания с гантелями"
 
 
 @pytest.mark.parametrize(
@@ -395,8 +441,8 @@ async def test_normal_day_does_not_call_the_model(db, settings):
     await _user_on_program(db)
     llm = FakeLLM(settings)
     built = await _build(db, settings, llm.client)
-    assert built.out.model_dump() == {"date": MON, "adjusted": False, "readiness": "normal", "summary": None,
-                                      "exercises": []}
+    assert built.out.model_dump() == {"date": MON, "week": 1, "weekday": 1, "adjusted": False,
+                                      "readiness": "normal", "summary": None, "exercises": []}
     assert llm.requests == 0
 
 
@@ -522,3 +568,54 @@ def test_help_and_commands_mention_plan():
     from gymbot.handlers.common import HELP
 
     assert "/plan" in HELP
+
+
+async def test_concurrent_save_uses_the_other_plan(db, settings, monkeypatch):
+    """IntegrityError on the unique (user, day): the plan saved by the other writer is returned."""
+    uid = await _user_on_program(db)
+    await _wellbeing(db, uid, NOW - timedelta(hours=2), sleep_hours=Decimal(5))
+    async with db() as s:  # the other writer's plan for today
+        s.add(DayPlan(user_id=uid, plan_date=MON, readiness="rest", summary="Чужой.", inputs_hash="x" * 64,
+                      exercises_json=json.dumps([{"name": a.name, "sets": a.sets, "repsMin": None, "repsMax": None,
+                                                  "weightFactor": 1.0, "skip": True, "replaceWith": None,
+                                                  "reason": None} for a in ARMS], ensure_ascii=False)))
+        await s.commit()
+    real, calls = plan._stored, []
+
+    async def racing(session, user_id, day):  # not seen before the insert: the race window
+        calls.append(day)
+        return None if len(calls) <= 2 else await real(session, user_id, day)
+
+    monkeypatch.setattr(plan, "_stored", racing)
+    built = await _build(db, settings, None)
+    assert built.out.readiness == "rest" and built.out.summary == "Чужой." and len(calls) == 3
+
+
+async def test_repeated_rebuild_after_wellbeing_does_not_call_the_model(db, settings, monkeypatch):
+    monkeypatch.setattr(plan, "utcnow", lambda: NOW)
+    uid = await _user_on_program(db)
+    await _wellbeing(db, uid, NOW - timedelta(hours=2), sleep_hours=Decimal(5))
+    llm = FakeLLM(settings)
+    msg = SimpleNamespace(answer=AsyncMock())
+    await plan_handler.send_after_wellbeing(msg, 42, settings, db, llm.client)
+    calls = llm.requests
+    assert calls >= 1 and msg.answer.await_count == 1
+    await plan_handler.send_after_wellbeing(msg, 42, settings, db, llm.client)
+    assert llm.requests == calls  # same inputs: the stored plan is reused
+
+
+async def test_save_by_another_user_keeps_the_record(db, settings):
+    from gymbot.handlers import log_text
+    from gymbot.llm.schemas import ParseResult
+
+    log_text.PENDING["t"] = log_text.Pending(
+        42, ParseResult.model_validate({"kind": "wellbeing", "wellbeing": {"sleep_hours": 5}}), "сон", NOW
+    )
+    cb = SimpleNamespace(
+        data="save:t", from_user=SimpleNamespace(id=777, full_name="Чужой"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()), answer=AsyncMock(),
+    )
+    await log_text.save(cb, settings, db, None)
+    assert cb.answer.await_args.kwargs.get("show_alert") is True
+    assert "t" in log_text.PENDING
+    log_text.PENDING.clear()

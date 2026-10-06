@@ -428,6 +428,8 @@ async def save(
     # pop, not get: updates run concurrently, a double tap must not save the sets twice.
     pending = PENDING.pop(token, None)
     if pending is None or pending.user_id != cb.from_user.id:
+        if pending is not None:
+            PENDING[token] = pending  # someone else's preview: leave it to its owner
         await cb.answer("Эта запись уже сохранена или устарела.", show_alert=True)
         return
     today = pending.sent_at.astimezone(ZoneInfo(settings.timezone)).date()

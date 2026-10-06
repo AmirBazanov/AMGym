@@ -70,7 +70,8 @@ async def send_after_wellbeing(
     Never raises: the record is already saved, a failing plan must not look like a failed save.
     """
     try:
-        built = await build_for(telegram_id, None, settings, sessionmaker, llm, force=True, start_program=False)
+        # Not forced: the new record changes the inputs hash anyway, an unchanged state reuses the plan.
+        built = await build_for(telegram_id, None, settings, sessionmaker, llm, start_program=False)
         if built is not None and built.out.adjusted:
             await answer_to.answer(plan.plan_text(built), reply_markup=open_diary_kb(settings))
     except Exception:

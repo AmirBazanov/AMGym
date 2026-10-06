@@ -45,7 +45,7 @@ from gymbot.services.wellbeing import parse_pains, recent_entries
 
 log = logging.getLogger(__name__)
 
-PLAN_VERSION = 1  # bump when the rules change: stored plans are rebuilt
+PLAN_VERSION = 2  # bump when the rules change: stored plans are rebuilt (2: the model can only lighten)
 SHORT_SLEEP_REST, SHORT_SLEEP_LIGHT = 4, 6  # hours
 LOW_KCAL = 0.7  # yesterday's kcal below this share of the norm: light day
 LIGHT_FACTOR, PAIN_FACTOR, MILD_PAIN_FACTOR, SORE_FACTOR = 0.9, 0.7, 0.85, 0.85
@@ -77,6 +77,8 @@ class PlanExercise(BaseModel):
 
 class DayPlanOut(BaseModel):
     date: date
+    week: int  # program week and weekday (1=Mon..7=Sun) the plan was built for
+    weekday: int
     adjusted: bool
     readiness: Readiness
     summary: str | None
@@ -111,12 +113,15 @@ class RecentSets:
     at: datetime  # when the workout started (UTC)
     name: str
     sets: int  # main sets, drops not counted
+    day: date | None = None  # Workout.performed_on, the local day in TIMEZONE
 
 
 @dataclass
 class PlanInputs:
     today: date
     items: list[DayItem]
+    week: int = 1  # program week and weekday (1=Mon) of `items`
+    weekday: int = 1
     sleep_hours: float | None = None  # newest value of today's and yesterday's wellbeing
     energy: int | None = None
     pains: list[Pain] = field(default_factory=list)
@@ -142,7 +147,10 @@ def day_names(programs_dir: Path, slug: str, week: int, weekday: int) -> dict[in
     return {}
 
 
-async def _program_day(session: AsyncSession, user: User, settings: Settings, today: date) -> list[DayItem] | None:
+async def _program_day(
+    session: AsyncSession, user: User, settings: Settings, today: date
+) -> tuple[list[DayItem], int, int] | None:
+    """(items, week, weekday) of today's program day, None on a rest day or outside the program."""
     # Read-only like advice._program_line: the API and /plan start a program first (users.active_program).
     up = await session.scalar(
         select(UserProgram).where(UserProgram.user_id == user.id).order_by(UserProgram.id.desc()).limit(1)
@@ -157,11 +165,12 @@ async def _program_day(session: AsyncSession, user: User, settings: Settings, to
     if day is None:
         return None
     names = day_names(settings.programs_dir, program.slug, pos.week, pos.weekday)
-    return [
+    items = [
         DayItem(i.order, names.get(i.order, i.exercise.name), i.sets, i.reps_min, i.reps_max,
                 list(i.drop_reps) if i.drop_reps else None)
         for i in sorted(day.items, key=lambda i: i.order)
     ]
+    return items, pos.week, pos.weekday
 
 
 async def collect_inputs(
@@ -169,9 +178,10 @@ async def collect_inputs(
 ) -> PlanInputs | None:
     """Everything the plan depends on; None when today is not a training day of the user's program."""
     today = now_utc.astimezone(tz).date()
-    items = await _program_day(session, user, settings, today)
-    if items is None:
+    found = await _program_day(session, user, settings, today)
+    if found is None:
         return None
+    items, week, weekday = found
     entries = await recent_entries(session, user, today, 2, tz)  # today and yesterday, newest first
     pains: dict[str, Pain] = {}
     for e in entries:  # the newest mention of a place wins
@@ -180,25 +190,27 @@ async def collect_inputs(
     yesterday = await day_summary(session, user, today - timedelta(days=1), tz)
     rows = (
         await session.execute(
-            select(Workout.started_at, Exercise.name, func.count(WorkoutSet.id))
+            select(Workout.started_at, Workout.performed_on, Exercise.name, func.count(WorkoutSet.id))
             .join(WorkoutSet, WorkoutSet.workout_id == Workout.id)
             .join(Exercise, Exercise.id == WorkoutSet.exercise_id)
             .where(Workout.user_id == user.id, Workout.performed_on >= today - timedelta(days=WORKOUT_DAYS - 1),
                    Workout.performed_on < today, WorkoutSet.drop_index == 0)
-            .group_by(Workout.id, Workout.started_at, Exercise.name)
+            .group_by(Workout.id, Workout.started_at, Workout.performed_on, Exercise.name)
             .order_by(Workout.started_at, Exercise.name)
         )
     ).all()
     return PlanInputs(
         today=today,
         items=items,
+        week=week,
+        weekday=weekday,
         sleep_hours=next((float(e.sleep_hours) for e in entries if e.sleep_hours is not None), None),
         energy=next((e.energy for e in entries if e.energy is not None), None),
         pains=list(pains.values()),
         texts=[t for e in entries for t in (e.note, e.raw_text) if t],
         kcal_yesterday=yesterday.totals.kcal if yesterday.entries else None,
         kcal_target=user.kcal_target,
-        recent=[RecentSets(_aware(at), name, n) for at, name, n in rows],
+        recent=[RecentSets(_aware(at), name, n, day) for at, day, name, n in rows],
         facts=[(f.text, f.category) for f in await active_facts(session, user.id)],
     )
 
@@ -294,7 +306,8 @@ def _sore_groups(inputs: PlanInputs, now_utc: datetime) -> dict[str, date]:
     for g in reported:
         recent = [r for r in inputs.recent if now_utc - r.at < timedelta(hours=SORE_HOURS) and muscle_group(r.name) == g]
         if sum(r.sets for r in recent) >= HEAVY_SETS:
-            out[g] = max(r.at for r in recent).date()
+            last = max(recent, key=lambda r: r.at)
+            out[g] = last.day or last.at.date()
     return out
 
 
@@ -433,12 +446,20 @@ def _factor(value: Any, default: float) -> float:
     return round(min(max(float(value), 0.3), 1.5), 2)
 
 
+def _not_above(value: int | None, limit: int | None) -> int | None:
+    return limit if value is None or (limit is not None and value > limit) else value
+
+
 def apply_refinement(draft: Draft, data: Any, inputs: PlanInputs) -> Draft:
     """The model's answer checked against the draft; any structural mismatch returns the draft itself.
 
-    Names always stay the program's; numbers are clamped; readiness is the rules' one; a rest day stays
-    all skipped; exercises the rules lightened or skipped for pain do not get heavier or come back;
-    replacements outside the muscle group or equipment are dropped.
+    Names always stay the program's; readiness is the rules' one; a rest day stays all skipped. The
+    model can only make the day lighter, never heavier (enforced here, not in the prompt):
+    - sets <= the draft's;
+    - weightFactor <= the draft's on a light day and on exercises lightened for pain, else <= 1.0
+      (never above the program);
+    - on exercises lightened for pain reps do not go above the draft's, skipped ones stay skipped;
+    - a replacement must be in the same muscle group and equipment and must not load a painful place.
     """
     if not isinstance(data, dict):
         return draft
@@ -458,23 +479,28 @@ def apply_refinement(draft: Draft, data: Any, inputs: PlanInputs) -> Draft:
         if d.skip:
             out.append(d)
             continue
+        protected = idx in draft.protected
         reps_min = reps_max = None
         if not it.dropset:
             reps_min = _int(item.get("repsMin"), 1, 50, d.repsMin)
             reps_max = _int(item.get("repsMax"), 1, 50, d.repsMax)
+            if protected:
+                reps_min = _not_above(reps_min, d.repsMin)
+                reps_max = _not_above(reps_max, d.repsMax)
             if reps_min is not None and reps_max is not None and reps_max < reps_min:
                 reps_max = reps_min
-        factor = _factor(item.get("weightFactor"), d.weightFactor)
-        if idx in draft.protected:
-            factor = min(factor, d.weightFactor)
+        cap = d.weightFactor if protected or draft.readiness != "normal" else 1.0
+        factor = min(_factor(item.get("weightFactor"), d.weightFactor), cap)
         replacement = _text(item.get("replaceWith"), 80)
-        if replacement and not valid_replacement(d.name, replacement):
+        if replacement and (
+            not valid_replacement(d.name, replacement) or any(loads(p.place, replacement) for p in inputs.pains)
+        ):
             log.info("plan: replacement %r for %r dropped", replacement, d.name)
             replacement = None
         out.append(
             PlanExercise(
                 name=d.name,
-                sets=_int(item.get("sets"), 1, 10, d.sets) or d.sets,
+                sets=min(_int(item.get("sets"), 1, 10, d.sets) or d.sets, d.sets),
                 repsMin=reps_min,
                 repsMax=reps_max,
                 weightFactor=factor,
@@ -546,10 +572,13 @@ def inputs_hash(inputs: PlanInputs, draft: Draft) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def plan_out(row: DayPlan) -> DayPlanOut:
+def plan_out(row: DayPlan, inputs: PlanInputs) -> DayPlanOut:
+    """`inputs` are the ones the row was built from (same hash): they give the program week and weekday."""
     exercises = [PlanExercise.model_validate(e) for e in json.loads(row.exercises_json or "[]")]
     return DayPlanOut(
         date=row.plan_date,
+        week=inputs.week,
+        weekday=inputs.weekday,
         adjusted=bool(exercises),
         readiness=row.readiness,  # type: ignore[arg-type]
         summary=row.summary if exercises else None,
@@ -585,22 +614,23 @@ async def get_or_build(
     None when today is not a training day. Commits: before the model call (no transaction is held while
     the model thinks) and after saving the plan. Without `llm` only the rules are used.
     """
+    user_id = user.id  # `user` expires on the rollback below; never touch it after that
     inputs = await collect_inputs(session, user, settings, tz, now_utc)
     if inputs is None:
         return None
     draft = rule_draft(inputs, now_utc)
     key = inputs_hash(inputs, draft)
-    async with _locks[user.id]:
-        row = await _stored(session, user.id, inputs.today)
+    async with _locks[user_id]:
+        row = await _stored(session, user_id, inputs.today)
         if row is not None and row.inputs_hash == key and not force:
-            return Built(plan_out(row), inputs.items)
+            return Built(plan_out(row, inputs), inputs.items)
         await session.commit()
         final = draft
         if llm is not None and needs_model(inputs, draft):
             final = await refine_with_llm(llm, inputs, draft)
-        row = await _stored(session, user.id, inputs.today)
+        row = await _stored(session, user_id, inputs.today)
         if row is None:
-            row = DayPlan(user_id=user.id, plan_date=inputs.today)
+            row = DayPlan(user_id=user_id, plan_date=inputs.today)
             session.add(row)
         row.readiness = final.readiness
         row.summary = final.summary if final.adjusted else None
@@ -613,9 +643,9 @@ async def get_or_build(
             await session.commit()
         except IntegrityError:  # another process saved today's plan first: use theirs
             await session.rollback()
-            row = await _stored(session, user.id, inputs.today)
+            row = await _stored(session, user_id, inputs.today)
             assert row is not None
-        return Built(plan_out(row), inputs.items)
+        return Built(plan_out(row, inputs), inputs.items)
 
 
 # ---- chat text ----

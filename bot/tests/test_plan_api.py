@@ -34,7 +34,7 @@ DAY = [
 ]
 NAMES = [d[0] for d in DAY]
 ITEM_KEYS = {"name", "sets", "repsMin", "repsMax", "weightFactor", "skip", "replaceWith", "reason"}
-PLAN_KEYS = {"date", "adjusted", "readiness", "summary", "exercises"}
+PLAN_KEYS = {"date", "week", "weekday", "adjusted", "readiness", "summary", "exercises"}
 GARBAGE = ['{"foo": 1}', "not json"]
 
 
@@ -150,7 +150,8 @@ async def test_401_without_init_data(api):
 async def test_nothing_to_adjust_skips_the_model(api, fake, auth):
     r = await api.get("/api/plan/today", headers=auth)
     assert r.status_code == 200
-    assert r.json() == {"date": "2026-10-05", "adjusted": False, "readiness": "normal", "summary": None, "exercises": []}
+    assert r.json() == {"date": "2026-10-05", "week": 1, "weekday": 1, "adjusted": False, "readiness": "normal",
+                        "summary": None, "exercises": []}
     assert set(r.json()) == PLAN_KEYS
     assert fake.calls == 0
 
@@ -158,7 +159,8 @@ async def test_nothing_to_adjust_skips_the_model(api, fake, auth):
 async def test_regenerate_without_signals_skips_the_model(api, fake, auth):
     r = await api.post("/api/plan/today/regenerate", headers=auth)
     assert r.status_code == 200
-    assert r.json() == {"date": "2026-10-05", "adjusted": False, "readiness": "normal", "summary": None, "exercises": []}
+    assert r.json() == {"date": "2026-10-05", "week": 1, "weekday": 1, "adjusted": False, "readiness": "normal",
+                        "summary": None, "exercises": []}
     assert fake.calls == 0
 
 
@@ -181,7 +183,7 @@ async def test_short_sleep_gives_light_rule_draft(api, db, fake, auth, garbage):
     assert r.status_code == 200
     data = r.json()
     assert set(data) == PLAN_KEYS
-    assert data["date"] == "2026-10-05"
+    assert (data["date"], data["week"], data["weekday"]) == ("2026-10-05", 1, 1)
     assert data["readiness"] == "light"
     assert data["adjusted"] is True
     assert len(data["exercises"]) == 6
@@ -237,10 +239,11 @@ async def test_model_numbers_are_clamped(api, db, fake, auth):
     await start_with_wellbeing(api, db, fake, auth, sleep=5)
 
     data = (await api.get("/api/plan/today", headers=auth)).json()
-    assert data["exercises"][0]["weightFactor"] == 1.5
-    assert data["exercises"][0]["sets"] == 10
-    assert data["exercises"][1]["weightFactor"] == 1.0
-    assert data["exercises"][1]["sets"] == 3
+    # A light day: the model may not go above the rule draft (5 sets ×0.9, 2 sets ×0.9).
+    assert data["exercises"][0]["weightFactor"] == 0.9
+    assert data["exercises"][0]["sets"] == 5
+    assert data["exercises"][1]["weightFactor"] == 0.9
+    assert data["exercises"][1]["sets"] == 2
 
 
 async def test_model_count_mismatch_falls_back_to_rule_draft(api, db, fake, auth):
