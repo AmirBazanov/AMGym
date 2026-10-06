@@ -6,10 +6,13 @@
 
 ```
 Telegram чат ──> bot (aiogram 3) ──> llm/openrouter ──> ParseResult (pydantic)
+Telegram voice ──> handlers/voice ──> stt (Groq) ──> тот же разбор
                      │                                       │ подтверждение пользователя
 Mini App (React) ──> API (FastAPI, этап 2, тот же процесс) ──> SQLAlchemy ──> SQLite (потом Postgres)
                                                               ^
 data/programs/*.json <── importers/xlsx_program <── xlsx-программы
+
+reminder loop (asyncio) ──> services/reminders ──> Telegram (ежедневные или по дням недели)
 ```
 
 | Путь | Что там |
@@ -17,10 +20,13 @@ data/programs/*.json <── importers/xlsx_program <── xlsx-програм�
 | `bot/src/gymbot/handlers/` | хендлеры бота; `log_text.py` ловит любой текст, подключается последним |
 | `bot/src/gymbot/llm/` | клиент OpenRouter, промпт, схема ответа |
 | `bot/src/gymbot/db/models.py` | все таблицы |
+| `bot/src/gymbot/services/` | логика: nutrition, reminders, advice, facts, wellbeing, plan, progression (miniapp/src/{progression,plan}.ts) |
+| `bot/src/gymbot/stt.py` | распознавание речи (Groq Whisper) |
 | `bot/src/gymbot/importers/` | импорт программ из xlsx |
 | `miniapp/` | React 19 + Vite + TS |
 | `data/programs/` | готовые программы (JSON) и исходники (`source/*.xlsx`) |
 | `docs/program-format.md` | формат таблички программ |
+| `deploy/` | развёртывание на VPS (setup-ec2.sh, systemd-сервис) |
 
 ## Соглашения
 - Секреты только в `.env` (шаблон `.env.example`), читаются через `gymbot.config.Settings`. В коде, логах, коммитах и промптах к LLM их нет.
