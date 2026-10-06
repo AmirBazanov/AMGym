@@ -16,6 +16,15 @@ class Settings(BaseSettings):
 
     database_url: str = f"sqlite+aiosqlite:///{ROOT / 'data' / 'gym.db'}"
 
+    # Chat LLM: Groq first (free tier, fast, separate limits per model), OpenRouter free models as the
+    # last fallback. Routes are tried in this order: GROQ_MODELS, then OPENROUTER_MODEL and its fallbacks.
+    # Empty GROQ_API_KEY = the STT key when STT goes to Groq (same account); no key at all = no Groq routes.
+    groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    # Checked 2026-10-07: 1000 requests/day and 8000 tokens/min per model. qwen first: gpt-oss-120b
+    # misread the first message as a correction of a few-shot example.
+    groq_models: list[str] = ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"]
+
     openrouter_api_key: str = ""
     # Free models rotate on OpenRouter; pick a current one at https://openrouter.ai/models?max_price=0
     # Checked 2026-10-06: the free tier is small and changes often. If parsing starts failing with
@@ -45,6 +54,14 @@ class Settings(BaseSettings):
     dev_user_id: int | None = None
     # false = only the HTTP server (Mini App + API), handy for UI work without Telegram access.
     run_bot: bool = True
+
+
+    @property
+    def groq_key(self) -> str:
+        """GROQ_API_KEY, else STT_API_KEY if speech-to-text goes to Groq too (never another provider's key)."""
+        if self.groq_api_key:
+            return self.groq_api_key
+        return self.stt_api_key if "groq.com" in self.stt_base_url else ""
 
 
 def get_settings() -> Settings:

@@ -121,6 +121,7 @@ async def run() -> None:
     bot = Bot(settings.bot_token)
     # One LLM client per process: it remembers which models reject response_format.
     llm = OpenRouterClient(settings)
+    log.info("LLM routes: %s", ", ".join(r.name for r in llm.routes) or "none (no API key)")
     dp = Dispatcher(settings=settings, sessionmaker=sessionmaker, llm=llm)
     dp.update.outer_middleware(AllowedUsers())
     # voice before log_text: the filters do not overlap, but the order is kept explicit.

@@ -1,9 +1,9 @@
-"""Try the configured OpenRouter models on sample messages.
+"""Try the configured LLM routes (Groq, then OpenRouter) on sample messages.
 
 `python -m gymbot.llm.check ["текст" ...]` parses each text on its own;
 `python -m gymbot.llm.check --dialog "три куриные самсы" "три штуки"` sends each next text with the
-previous exchange as history, like the bot does. Every request prints its model and whether it asked
-for json mode (headers are never printed: they carry the API key).
+previous exchange as history, like the bot does. Every request prints its provider/model, whether it
+asked for json mode and the HTTP status (headers are never printed: they carry the API key).
 """
 
 import asyncio
@@ -14,7 +14,7 @@ import time
 import httpx
 
 from gymbot.config import get_settings
-from gymbot.llm.openrouter import LLMError, OpenRouterClient
+from gymbot.llm.openrouter import LLMClient, LLMError
 
 SAMPLES = [
     "жим лёжа 4 по 8 на 70",
@@ -25,17 +25,26 @@ SAMPLES = [
 ]
 
 
+def provider(url: httpx.URL) -> str:
+    return "groq" if url.host.endswith("groq.com") else "openrouter" if "openrouter" in url.host else url.host
+
+
 async def show_request(request: httpx.Request) -> None:
     body = json.loads(request.content)
-    print(f"  request: {body['model']} json_mode={'response_format' in body}")
+    print(f"  request: {provider(request.url)}/{body['model']} json_mode={'response_format' in body}")
+
+
+async def show_response(response: httpx.Response) -> None:
+    print(f"  response: {response.status_code}")
 
 
 async def main(args: list[str]) -> None:
     dialog = "--dialog" in args
     texts = [a for a in args if a != "--dialog"] or SAMPLES
     settings = get_settings()
-    client = OpenRouterClient(settings, httpx.AsyncClient(timeout=60, event_hooks={"request": [show_request]}))
-    print("models:", [settings.openrouter_model, *settings.openrouter_fallback_models])
+    hooks = {"request": [show_request], "response": [show_response]}
+    client = LLMClient(settings, httpx.AsyncClient(timeout=60, event_hooks=hooks))
+    print("routes:", [r.name for r in client.routes])
     history: list[tuple[str, str]] = []
     chain: list[str] = []  # like the bot: the history turn is all texts of the current record
     for text in texts:

@@ -4,7 +4,15 @@ import httpx
 import pytest
 
 from gymbot.config import Settings
-from gymbot.llm.openrouter import LLMError, OpenRouterClient, extract_json
+from gymbot.llm.openrouter import (
+    RATE_LIMIT_COOLDOWN,
+    LLMClient,
+    LLMError,
+    OpenRouterClient,
+    Route,
+    extract_json,
+    routes_from,
+)
 
 GOOD = {"kind": "unknown", "clarification": "что?"}
 NOVITA_400 = {
@@ -260,3 +268,145 @@ async def test_complete_text_no_api_key_makes_no_request():
     with pytest.raises(LLMError, match="OPENROUTER_API_KEY"):
         await client_with(lambda req: calls.append(req) or reply("ok"), openrouter_api_key="").complete_text(MSGS)
     assert calls == []
+
+
+# ---- routes: Groq first, OpenRouter as the last fallback ----
+
+
+def groq_settings(**kw) -> Settings:
+    base = {"stt_api_key": "stt-key", "groq_models": ["g1", "g2"], "openrouter_api_key": "or-key"}
+    return Settings(_env_file=None, bot_token="123:abc", openrouter_model="m1", openrouter_fallback_models=["m2"],
+                    **{**base, **kw})
+
+
+def test_routes_groq_key_defaults_to_stt_key_and_comes_first():
+    routes = routes_from(groq_settings())
+    assert [r.name for r in routes] == ["groq/g1", "groq/g2", "openrouter/m1", "openrouter/m2"]
+    assert routes[0] == Route("groq", "https://api.groq.com/openai/v1", "stt-key", "g1")
+    assert routes[2].api_key == "or-key" and routes[2].base_url == "https://openrouter.ai/api/v1"
+    assert "stt-key" not in repr(routes[0])  # keys never end up in logs via repr
+
+
+def test_routes_explicit_groq_key_wins():
+    assert routes_from(groq_settings(groq_api_key="groq-key"))[0].api_key == "groq-key"
+
+
+def test_routes_stt_key_of_another_provider_is_not_sent_to_groq():
+    routes = routes_from(groq_settings(stt_base_url="https://api.openai.com/v1"))
+    assert [r.provider for r in routes] == ["openrouter", "openrouter"]
+
+
+def test_routes_without_groq_models_or_keys():
+    assert [r.name for r in routes_from(groq_settings(groq_models=[]))] == ["openrouter/m1", "openrouter/m2"]
+    assert [r.name for r in routes_from(groq_settings(openrouter_api_key=""))] == ["groq/g1", "groq/g2"]
+    assert routes_from(groq_settings(stt_api_key="", openrouter_api_key="")) == []
+
+
+async def test_no_keys_at_all_raises_without_requests():
+    calls = []
+    c = LLMClient(groq_settings(stt_api_key="", openrouter_api_key=""),
+                  httpx.AsyncClient(transport=httpx.MockTransport(lambda r: calls.append(r) or reply("ok"))))
+    with pytest.raises(LLMError, match="GROQ_API_KEY"):
+        await c.parse_message("hi", [])
+    with pytest.raises(LLMError, match="OPENROUTER_API_KEY"):
+        await c.complete_text(MSGS)
+    assert calls == []
+
+
+class Recorder:
+    """MockTransport handler: answers per route name ("groq/g1"), records (route name, auth, json_mode)."""
+
+    def __init__(self, answers: dict[str, object]):
+        self.answers = answers
+        self.calls: list[tuple[str, str, bool]] = []
+
+    def __call__(self, req: httpx.Request) -> httpx.Response:
+        body = json.loads(req.content)
+        provider = "groq" if req.url.host == "api.groq.com" else "openrouter"
+        name = f"{provider}/{body['model']}"
+        self.calls.append((name, req.headers["Authorization"], "response_format" in body))
+        answer = self.answers.get(name, json.dumps(GOOD))
+        return answer if isinstance(answer, httpx.Response) else reply(answer)
+
+    @property
+    def names(self) -> list[str]:
+        return [n for n, _, _ in self.calls]
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def groq_client(rec: Recorder, clock: Clock | None = None, **kw) -> LLMClient:
+    return LLMClient(groq_settings(**kw), httpx.AsyncClient(transport=httpx.MockTransport(rec)), clock or Clock())
+
+
+async def test_groq_is_used_first_with_its_key_and_json_mode():
+    rec = Recorder({})
+    assert (await groq_client(rec).parse_message("hi", [])).kind == "unknown"
+    assert rec.calls == [("groq/g1", "Bearer stt-key", True)]
+
+
+async def test_groq_429_moves_to_next_groq_model():
+    rec = Recorder({"groq/g1": httpx.Response(429, json={"error": {"message": "Please try again in 7.5s"}})})
+    assert (await groq_client(rec).parse_message("hi", [])).kind == "unknown"
+    assert rec.names == ["groq/g1", "groq/g2"]  # no waiting for retry-after, no second try of g1
+
+
+async def test_openrouter_is_the_fallback_after_groq():
+    rec = Recorder({"groq/g1": httpx.Response(429), "groq/g2": httpx.Response(503)})
+    assert await groq_client(rec).complete_text(MSGS) == json.dumps(GOOD)
+    assert rec.names == ["groq/g1", "groq/g2", "groq/g2", "openrouter/m1"]  # 5xx gets one retry
+    assert rec.calls[-1][1] == "Bearer or-key"
+
+
+async def test_429_cooldown_skips_route_for_60_seconds():
+    clock = Clock()
+    rec = Recorder({"groq/g1": httpx.Response(429)})
+    c = groq_client(rec, clock)
+    await c.parse_message("hi", [])
+    assert rec.names == ["groq/g1", "groq/g2"]
+    clock.t += RATE_LIMIT_COOLDOWN - 1
+    await c.parse_message("hi", [])
+    assert rec.names[2:] == ["groq/g2"]  # g1 is cooling down: not even asked
+    clock.t += 2
+    rec.answers = {}
+    await c.parse_message("hi", [])
+    assert rec.names[3:] == ["groq/g1"]  # the window is over
+
+
+async def test_all_routes_cooling_down_fails_fast():
+    clock = Clock()
+    rec = Recorder({name: httpx.Response(429) for name in ("groq/g1", "groq/g2", "openrouter/m1", "openrouter/m2")})
+    c = groq_client(rec, clock)
+    with pytest.raises(LLMError, match="all models failed"):
+        await c.parse_message("hi", [])
+    assert len(rec.calls) == 4
+    with pytest.raises(LLMError, match="all models failed"):
+        await c.complete_text(MSGS)
+    assert len(rec.calls) == 4  # no requests while every route is cooling down
+
+
+async def test_json_mode_memory_is_per_route():
+    rec = Recorder({})
+
+    def handler(req):
+        body = json.loads(req.content)
+        if req.url.host == "api.groq.com" and "response_format" in body:
+            return httpx.Response(400, json=NOVITA_400)
+        return rec(req)
+
+    c = LLMClient(groq_settings(groq_models=["m1"]), httpx.AsyncClient(transport=httpx.MockTransport(handler)), Clock())
+    await c.parse_message("hi", [])
+    assert rec.calls == [("groq/m1", "Bearer stt-key", False)]
+    assert c._no_json_mode == {"groq/m1"}  # openrouter/m1 (same model id) still gets json mode
+
+
+async def test_think_block_is_ignored_when_parsing():
+    think = '<think>maybe {"kind": "workout"}</think>' + json.dumps(GOOD)
+    rec = Recorder({"groq/g1": think})
+    assert (await groq_client(rec).parse_message("hi", [])).kind == "unknown"
