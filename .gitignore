@@ -12,3 +12,10 @@ miniapp/dist/
 *Zone.Identifier
 .claude/settings.local.json
 *.tsbuildinfo
+
+# design-sync (claude.ai/design) machine state
+.ds-sync/
+ds-bundle/
+.design-sync/.cache/
+.design-sync/learnings/
+.design-sync/node_modules

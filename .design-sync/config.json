@@ -1,0 +1,75 @@
+{
+  "projectId": "fd9192c7-5d95-4c86-8d2f-f91018fd9053",
+  "shape": "package",
+  "pkg": "gymapp-miniapp",
+  "globalName": "AMGym",
+  "tsconfig": "tsconfig.json",
+  "cssEntry": "src/styles.css",
+  "docsDir": "../.design-sync/docs",
+  "componentSrcMap": {
+    "Sheet": "src/components/Sheet.tsx",
+    "NumField": "src/components/NumField.tsx",
+    "IntensityBadge": "src/components/Badges.tsx",
+    "DropBadge": "src/components/Badges.tsx",
+    "ConfirmHost": "src/components/ConfirmHost.tsx",
+    "ExerciseSheet": "src/components/ExerciseSheet.tsx",
+    "LineSeries": "src/components/ProgressChart.tsx",
+    "BarSeries": "src/components/ProgressChart.tsx",
+    "IconToday": "src/components/icons.tsx",
+    "IconProgram": "src/components/icons.tsx",
+    "IconHistory": "src/components/icons.tsx",
+    "IconProgress": "src/components/icons.tsx",
+    "IconNutrition": "src/components/icons.tsx",
+    "IconChevronLeft": "src/components/icons.tsx",
+    "IconChevronRight": "src/components/icons.tsx",
+    "IconClose": "src/components/icons.tsx",
+    "IconCheck": "src/components/icons.tsx",
+    "IconChevron": "src/components/icons.tsx",
+    "IconPlus": "src/components/icons.tsx"
+  },
+  "runtimeFontPrefixes": [
+    "SF Pro"
+  ],
+  "dtsPropsFor": {
+    "Sheet": "onClose: () => void; children: React.ReactNode;",
+    "ExerciseSheet": "name: string; onClose: () => void;",
+    "NumField": "value: number | null; onChange: (v: number | null) => void; placeholder?: string; decimal?: boolean; invalid?: boolean;",
+    "IntensityBadge": "value: 'heavy' | 'medium' | 'light' | null;",
+    "DropBadge": "children?: never;",
+    "ConfirmHost": "children?: never;",
+    "LineSeries": "data: object[]; x: string; y: string; unit: string;",
+    "BarSeries": "data: object[]; x: string; y: string; unit: string; target?: number | null;",
+    "IconToday": "children?: never;",
+    "IconProgram": "children?: never;",
+    "IconHistory": "children?: never;",
+    "IconProgress": "children?: never;",
+    "IconNutrition": "children?: never;",
+    "IconChevronLeft": "children?: never;",
+    "IconChevronRight": "children?: never;",
+    "IconClose": "children?: never;",
+    "IconCheck": "children?: never;",
+    "IconChevron": "children?: never;",
+    "IconPlus": "children?: never;"
+  },
+  "overrides": {
+    "Sheet": {
+      "cardMode": "single",
+      "viewport": "390x560"
+    },
+    "ExerciseSheet": {
+      "cardMode": "single",
+      "viewport": "390x640"
+    },
+    "ConfirmHost": {
+      "cardMode": "single",
+      "viewport": "390x420"
+    },
+    "LineSeries": {
+      "cardMode": "column"
+    },
+    "BarSeries": {
+      "cardMode": "column"
+    }
+  },
+  "readmeHeader": ".design-sync/conventions.md"
+}
