@@ -18,7 +18,7 @@ SYSTEM_PROMPT = """Ты дневник тренировок, питания и �
  "exercises": [{"exercise": str, "sets": [{"reps": int, "weight_kg": float|null, "drop_index": int}]}],
  "foods": [{"description": str, "grams": float|null, "kcal": float, "protein_g": float, "fat_g": float, "carbs_g": float}],
  "wellbeing": {"sleep_hours": float|null, "sleep_quality": int|null, "energy": int|null, "mood": int|null, "pains": [{"place": str, "severity": int|null}], "note": str|null}|null,
- "clarification": str|null, "revises": bool, "note": str|null}
+ "clarification": str|null, "revises": bool, "note": str|null, "remember": str|null}
 Правила:
 - "3 по 10", "3х10" = три подхода по 10, каждый подход отдельным элементом sets. Вес в кг, без веса null.
 - Дропсет "12-6-6 с 20 кг" = подходы drop_index 0,1,2; вес снижения не указан = null.
@@ -32,6 +32,7 @@ SYSTEM_PROMPT = """Ты дневник тренировок, питания и �
 - Комментарий о качестве, составе, размере, готовке или сомнение в оценке без чисел: не спрашивай числа, сам поправь оценку (плохое качество или много теста: белок −25%, жир +15%; "большая": граммы +30%; "без масла": жир −50%) и верни ПОЛНУЮ запись, revises=true.
 - Сон, боли, усталость, энергия, настроение: kind="wellbeing", шкалы 1-5 (плохо, "сил мало" = 2, нормально = 3, отлично = 5), не сказано = null; боль с местом как сказано, severity если сказано; прочее в wellbeing.note.
 - note (верхний): при правке или неочевидной оценке коротко, что изменил и почему (было → стало); иначе null.
+- remember: устойчивый факт о пользователе на будущее (вкус, аллергия, свой размер порции, расписание, ограничение) коротко, например "самса ~150 г"; разовое событие или уже известный факт = null.
 - Вопрос о еде или тренировках: kind="question", в clarification ответ по существу, 2-3 предложения с цифрами. Болтовня: question и короткая подсказка. Не повторяй текст пользователя.
 - kind="unknown" с вопросом в clarification только если непонятно, к какой записи это относится.
 """
@@ -83,6 +84,12 @@ EXAMPLES: list[tuple[str, str]] = [
         '"note":"Белок 53 → 40 г, жир 77 → 89 г: в такой самсе меньше мяса, больше теста и жира."}'),
     ),
     (
+        "съел 3 манты, они у нас крупные, по 90 г",
+        ('{"kind":"food","exercises":[],"foods":['
+        '{"description":"манты, 3 шт","grams":270,"kcal":620,"protein_g":30,"fat_g":30,"carbs_g":57}],'
+        '"clarification":null,"revises":false,"note":null,"remember":"манты ~90 г/шт"}'),
+    ),
+    (
         "сколько белка в 100 г творога?",
         ('{"kind":"question","exercises":[],"foods":[],"clarification":'
         '"В 100 г творога 5% около 17 г белка, 5 г жира и 3 г углеводов, это примерно 120 ккал. '
@@ -97,15 +104,37 @@ EXAMPLES: list[tuple[str, str]] = [
 ]
 
 
+FACTS_MAX_CHARS = 1000  # 50 facts of 200 characters would crowd out the rules for small models
+
+
+def format_facts(facts: list[str], max_chars: int = FACTS_MAX_CHARS) -> str:
+    """'Факты о пользователе: a; b' with as many facts (in the given order) as fit; '' without facts."""
+    line = ""
+    for fact in facts:
+        candidate = f"{line}; {fact}" if line else f"Факты о пользователе: {fact}"
+        if len(candidate) > max_chars:
+            break
+        line = candidate
+    return line
+
+
 def build_messages(
-    text: str, catalog: list[str], history: list[tuple[str, str]] | None = None
+    text: str,
+    catalog: list[str],
+    history: list[tuple[str, str]] | None = None,
+    facts: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Chat messages for the model: system prompt, few-shot examples, then the real dialog.
 
     `history` is a list of (user text, assistant JSON) turns from this user's recent dialog;
     it goes right before `text`, so the model can treat `text` as a correction of it.
+    `facts` (active user facts, newest first) are appended to the system prompt, not sent as turns,
+    so the examples stay the same.
     """
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT.replace("{catalog}", ", ".join(catalog) or "пусто")}]
+    system = SYSTEM_PROMPT.replace("{catalog}", ", ".join(catalog) or "пусто")
+    if line := format_facts(facts or []):
+        system += f"\n{line}.\nФакты важнее общих правил и порций выше; уже известный факт в remember не повторяй.\n"
+    msgs = [{"role": "system", "content": system}]
     for user, assistant in [*EXAMPLES, *(history or [])]:
         msgs += [{"role": "user", "content": user}, {"role": "assistant", "content": assistant}]
     msgs.append({"role": "user", "content": text})
@@ -116,7 +145,7 @@ def build_messages(
 
 ADVICE_DISCLAIMER = "Это не медицинская рекомендация"
 
-ADVICE_SYSTEM_PROMPT = f"""Ты тренер и нутрициолог. Тебе дают сводку о человеке: профиль и цель, норму КБЖУ, питание за неделю, тренировки и самочувствие за две недели и программу. Отвечай по-русски простым текстом без Markdown (без *, #, таблиц).
+ADVICE_SYSTEM_PROMPT = f"""Ты тренер и нутрициолог. Тебе дают сводку о человеке: профиль и цель, факты о нём, норму КБЖУ, питание за неделю, тренировки и самочувствие за две недели и программу. Отвечай по-русски простым текстом без Markdown (без *, #, таблиц).
 Формат строго такой, ровно три блока с заголовками:
 Питание
 - пункт
@@ -127,7 +156,7 @@ ADVICE_SYSTEM_PROMPT = f"""Ты тренер и нутрициолог. Тебе
 {ADVICE_DISCLAIMER}
 Правила:
 - В каждом блоке 2-4 коротких пункта, в каждом конкретная цифра из сводки или расчёт от неё: сколько граммов белка и ккал добрать или убрать, какой вес и сколько повторов поставить в следующий раз (от «прошлый раз» и 1ПМ), сколько часов спать, сколько дней отдыха между тренировками.
-- Учитывай цель, возраст, вес и заметки о травмах и ограничениях; травмированное место не нагружай.
+- Учитывай цель, возраст, вес и заметки о травмах и ограничениях; травмированное место не нагружай. Факты о человеке (аллергии, что не ест, ограничения, расписание) строго соблюдай.
 - Боли в сводке: для движений, которые нагружают это место, предложи замену (конкретное упражнение) или снижение веса и объёма с цифрой. Недосып (меньше 7 ч) или низкая энергия: снизь интенсивность (вес −10-20% или на подход меньше) и дай конкретику по сну (во сколько лечь, сколько часов). Диагнозы и причины боли не придумывай.
 - Без воды и общих фраз вроде «пейте воду», «слушайте своё тело», «питайтесь сбалансированно». Не пересказывай сводку.
 - Если в сводке нет питания или тренировок, первым пунктом этого блока скажи, что именно записать, чтобы советы стали точнее.

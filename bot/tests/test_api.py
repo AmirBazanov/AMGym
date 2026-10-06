@@ -761,3 +761,433 @@ async def test_wellbeing_delete_unknown_id_404(client, auth, db):
     eid = await _wb(db, uid, datetime.now(UTC) - timedelta(hours=1))
     assert (await client.delete("/api/wellbeing/9999", headers=auth)).status_code == 404
     assert await _wb_exists(db, eid)
+
+
+# ---- facts: GET/POST /api/facts, PATCH/DELETE /api/facts/{id} ----
+
+FACT_KEYS = {"id", "text", "category", "createdAt", "active"}
+FACT_LIMIT = 50
+
+
+async def _fact(db, user_id: int, text: str = "не ем творог", category: str = "other", active: bool = True, created_at=None) -> int:
+    from gymbot.db.models import UserFact
+
+    async with db() as s:
+        f = UserFact(
+            user_id=user_id, text=text, category=category, active=active,
+            created_at=created_at or datetime.now(UTC),
+        )
+        s.add(f)
+        await s.commit()
+        return f.id
+
+
+async def _fill_facts(db, user_id: int, n: int = FACT_LIMIT, active: bool = True) -> list[int]:
+    from gymbot.db.models import UserFact
+
+    async with db() as s:
+        rows = [UserFact(user_id=user_id, text=f"факт {i}", category="other", active=active, created_at=datetime.now(UTC)) for i in range(n)]
+        s.add_all(rows)
+        await s.commit()
+        return [r.id for r in rows]
+
+
+async def _fact_rows(db, user_id: int | None = None) -> list:
+    from gymbot.db.models import UserFact
+
+    async with db() as s:
+        q = select(UserFact).order_by(UserFact.id)
+        if user_id is not None:
+            q = q.where(UserFact.user_id == user_id)
+        return list((await s.scalars(q)).all())
+
+
+async def _fact_exists(db, fact_id: int) -> bool:
+    from gymbot.db.models import UserFact
+
+    async with db() as s:
+        return await s.scalar(select(UserFact.id).where(UserFact.id == fact_id)) is not None
+
+
+async def test_facts_require_auth(client):
+    assert (await client.get("/api/facts")).status_code == 401
+    assert (await client.post("/api/facts", json={"text": "x"})).status_code == 401
+    assert (await client.patch("/api/facts/1", json={"text": "x"})).status_code == 401
+    assert (await client.delete("/api/facts/1")).status_code == 401
+    bad = {"X-Telegram-Init-Data": init_data(token="999:other")}
+    assert (await client.get("/api/facts", headers=bad)).status_code == 401
+
+
+async def test_facts_empty_for_new_user(client, auth):
+    r = await client.get("/api/facts", headers=auth)
+    assert r.status_code == 200 and r.json() == []
+
+
+async def test_fact_create_defaults_and_shape(client, auth):
+    r = await client.post("/api/facts", json={"text": "не ем творог"}, headers=auth)
+    assert r.status_code == 201
+    f = r.json()
+    assert set(f) == FACT_KEYS
+    assert f["text"] == "не ем творог" and f["category"] == "other" and f["active"] is True
+    assert isinstance(f["id"], int)
+    created = datetime.fromisoformat(f["createdAt"])
+    assert created.utcoffset() == timedelta(0)
+    assert abs(datetime.now(UTC) - created) < timedelta(minutes=5)
+    assert (await client.get("/api/facts", headers=auth)).json() == [f]
+
+
+@pytest.mark.parametrize("category", ["food", "training", "health", "schedule", "other"])
+async def test_fact_create_every_category(client, auth, category):
+    r = await client.post("/api/facts", json={"text": "факт", "category": category}, headers=auth)
+    assert r.status_code == 201 and r.json()["category"] == category
+
+
+async def test_fact_create_unknown_category_422(client, auth):
+    r = await client.post("/api/facts", json={"text": "факт", "category": "sport"}, headers=auth)
+    assert r.status_code == 422
+    assert (await client.get("/api/facts", headers=auth)).json() == []
+
+
+@pytest.mark.parametrize("payload", [{}, {"text": None}, {"text": 5}, {"text": "x", "category": None}])
+async def test_fact_create_invalid_body_422(client, auth, payload):
+    assert (await client.post("/api/facts", json=payload, headers=auth)).status_code == 422
+    assert (await client.get("/api/facts", headers=auth)).json() == []
+
+
+async def test_fact_create_cleans_text(client, auth):
+    r = await client.post("/api/facts", json={"text": "  не ем   творог "}, headers=auth)
+    assert r.status_code == 201 and r.json()["text"] == "не ем творог"
+    r = await client.post("/api/facts", json={"text": "\tнет\n\nлактозы  "}, headers=auth)
+    assert r.status_code == 201 and r.json()["text"] == "нет лактозы"
+
+
+@pytest.mark.parametrize("text", ["", "   ", "\n\t "])
+async def test_fact_create_empty_text_422(client, auth, text):
+    assert (await client.post("/api/facts", json={"text": text}, headers=auth)).status_code == 422
+    assert (await client.get("/api/facts", headers=auth)).json() == []
+
+
+async def test_fact_create_text_length_edges(client, auth):
+    assert (await client.post("/api/facts", json={"text": "я" * 201}, headers=auth)).status_code == 422
+    assert (await client.get("/api/facts", headers=auth)).json() == []
+    assert (await client.post("/api/facts", json={"text": "я" * 200}, headers=auth)).status_code == 201
+    # The limit applies after cleaning: padding does not count.
+    assert (await client.post("/api/facts", json={"text": "  " + "ю" * 200 + "  "}, headers=auth)).status_code == 201
+    # 201 chars even if some of them are collapsible whitespace that remains one space.
+    assert (await client.post("/api/facts", json={"text": "а " + "б" * 199}, headers=auth)).status_code == 422
+    # Collapsing whitespace brings this one down from 202 to exactly 200.
+    assert (await client.post("/api/facts", json={"text": "а  " + "в" * 198}, headers=auth)).status_code == 201
+
+
+async def test_fact_list_includes_inactive_sorted_newest_first_ties_by_id_desc(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    now = datetime.now(UTC).replace(microsecond=0)
+    old = await _fact(db, uid, "старый", created_at=now - timedelta(days=2))
+    tie_a = await _fact(db, uid, "а", created_at=now - timedelta(days=1))
+    tie_b = await _fact(db, uid, "б", active=False, created_at=now - timedelta(days=1))
+    newest = await _fact(db, uid, "новый", created_at=now - timedelta(hours=1))
+    # Inserted last, but older than the tied pair: the order follows createdAt, not id.
+    mid = await _fact(db, uid, "средний", active=False, created_at=now - timedelta(hours=30))
+    data = (await client.get("/api/facts", headers=auth)).json()
+    assert [f["id"] for f in data] == [newest, tie_b, tie_a, mid, old]
+    assert all(set(f) == FACT_KEYS for f in data)
+    assert {f["id"]: f["active"] for f in data} == {newest: True, tie_b: False, tie_a: True, mid: False, old: True}
+    assert datetime.fromisoformat(data[0]["createdAt"]).utcoffset() == timedelta(0)
+
+
+async def test_facts_only_current_users_facts(tmp_path, make_client, db):
+    one = {"X-Telegram-Init-Data": init_data(42)}
+    two = {"X-Telegram-Init-Data": init_data(77)}
+    async with make_client(make_settings(tmp_path, allowed_user_ids=[42, 77])) as c:
+        u1 = await _wb_user(c, one, db, 42)
+        u2 = await _wb_user(c, two, db, 77)
+        mine = await _fact(db, u1, "моё")
+        theirs = await _fact(db, u2, "чужое", active=False)
+        assert [f["id"] for f in (await c.get("/api/facts", headers=one)).json()] == [mine]
+        assert [f["id"] for f in (await c.get("/api/facts", headers=two)).json()] == [theirs]
+
+
+async def test_fact_create_duplicate_active_returns_existing_200(client, auth, db):
+    first = (await client.post("/api/facts", json={"text": "Не ем творог", "category": "food"}, headers=auth)).json()
+    r = await client.post("/api/facts", json={"text": "не ем творог", "category": "health"}, headers=auth)
+    assert r.status_code == 200
+    assert r.json() == first
+    assert len(await _fact_rows(db)) == 1
+    assert len((await client.get("/api/facts", headers=auth)).json()) == 1
+
+
+@pytest.mark.parametrize(
+    "dup",
+    [
+        "НЕ ЕМ ТВОРОГ",  # case
+        "не ем творог.",  # trailing period
+        "не ем творог!!",  # trailing exclamation
+        "«не ем творог»",  # guillemets
+        '"не ем творог"',  # straight quotes
+        "  не   ем творог  ",  # whitespace
+        "«Не ем творог».",  # quotes plus period
+    ],
+)
+async def test_fact_create_duplicate_normalisation(client, auth, db, dup):
+    first = (await client.post("/api/facts", json={"text": "не ем творог"}, headers=auth)).json()
+    r = await client.post("/api/facts", json={"text": dup}, headers=auth)
+    assert r.status_code == 200 and r.json()["id"] == first["id"]
+    assert len(await _fact_rows(db)) == 1
+
+
+async def test_fact_create_duplicate_yo_equals_ye(client, auth, db):
+    first = (await client.post("/api/facts", json={"text": "Всё без глютена"}, headers=auth)).json()
+    r = await client.post("/api/facts", json={"text": "все без глютена"}, headers=auth)
+    assert r.status_code == 200 and r.json()["id"] == first["id"]
+    assert len(await _fact_rows(db)) == 1
+
+
+async def test_fact_create_not_a_duplicate_if_text_differs(client, auth, db):
+    await client.post("/api/facts", json={"text": "не ем творог"}, headers=auth)
+    r = await client.post("/api/facts", json={"text": "не ем сыр"}, headers=auth)
+    assert r.status_code == 201
+    assert len(await _fact_rows(db)) == 2
+
+
+async def test_fact_create_duplicate_of_inactive_is_new(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    old = await _fact(db, uid, "не ем творог", active=False)
+    r = await client.post("/api/facts", json={"text": "Не ем творог."}, headers=auth)
+    assert r.status_code == 201 and r.json()["id"] != old and r.json()["active"] is True
+    assert len(await _fact_rows(db)) == 2
+
+
+async def test_fact_create_duplicate_of_other_users_fact_is_new(tmp_path, make_client, db):
+    one = {"X-Telegram-Init-Data": init_data(42)}
+    two = {"X-Telegram-Init-Data": init_data(77)}
+    async with make_client(make_settings(tmp_path, allowed_user_ids=[42, 77])) as c:
+        u1 = await _wb_user(c, one, db, 42)
+        await _wb_user(c, two, db, 77)
+        theirs = await _fact(db, u1, "не ем творог")
+        r = await c.post("/api/facts", json={"text": "не ем творог"}, headers=two)
+        assert r.status_code == 201 and r.json()["id"] != theirs
+        assert len(await _fact_rows(db)) == 2
+
+
+async def test_fact_limit_50_then_409(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    await _fill_facts(db, uid, FACT_LIMIT)
+    r = await client.post("/api/facts", json={"text": "пятьдесят первый"}, headers=auth)
+    assert r.status_code == 409
+    assert len(await _fact_rows(db)) == FACT_LIMIT
+
+
+async def test_fact_limit_49_still_allows_one(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    await _fill_facts(db, uid, FACT_LIMIT - 1)
+    assert (await client.post("/api/facts", json={"text": "последний"}, headers=auth)).status_code == 201
+    assert (await client.post("/api/facts", json={"text": "лишний"}, headers=auth)).status_code == 409
+
+
+async def test_fact_limit_ignores_inactive(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    await _fill_facts(db, uid, FACT_LIMIT, active=False)
+    r = await client.post("/api/facts", json={"text": "новый активный"}, headers=auth)
+    assert r.status_code == 201
+
+
+async def test_fact_limit_is_per_user(tmp_path, make_client, db):
+    one = {"X-Telegram-Init-Data": init_data(42)}
+    two = {"X-Telegram-Init-Data": init_data(77)}
+    async with make_client(make_settings(tmp_path, allowed_user_ids=[42, 77])) as c:
+        u1 = await _wb_user(c, one, db, 42)
+        await _wb_user(c, two, db, 77)
+        await _fill_facts(db, u1, FACT_LIMIT)
+        assert (await c.post("/api/facts", json={"text": "ещё"}, headers=one)).status_code == 409
+        assert (await c.post("/api/facts", json={"text": "ещё"}, headers=two)).status_code == 201
+
+
+async def test_fact_limit_frees_after_delete_and_deactivate(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    ids = await _fill_facts(db, uid, FACT_LIMIT)
+    assert (await client.post("/api/facts", json={"text": "новый"}, headers=auth)).status_code == 409
+    assert (await client.delete(f"/api/facts/{ids[0]}", headers=auth)).status_code == 204
+    assert (await client.post("/api/facts", json={"text": "новый"}, headers=auth)).status_code == 201
+    assert (await client.post("/api/facts", json={"text": "ещё один"}, headers=auth)).status_code == 409
+    assert (await client.patch(f"/api/facts/{ids[1]}", json={"active": False}, headers=auth)).status_code == 200
+    assert (await client.post("/api/facts", json={"text": "ещё один"}, headers=auth)).status_code == 201
+
+
+async def test_fact_duplicate_at_limit_returns_existing_not_409(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    ids = await _fill_facts(db, uid, FACT_LIMIT)
+    r = await client.post("/api/facts", json={"text": "Факт 7"}, headers=auth)
+    assert r.status_code == 200 and r.json()["id"] == ids[7]
+
+
+async def test_fact_patch_changes_only_given_fields(client, auth):
+    f = (await client.post("/api/facts", json={"text": "не ем творог", "category": "food"}, headers=auth)).json()
+    r = await client.patch(f"/api/facts/{f['id']}", json={"category": "health"}, headers=auth)
+    assert r.status_code == 200
+    assert r.json() == {**f, "category": "health"}
+    r = await client.patch(f"/api/facts/{f['id']}", json={"text": "  не ем   сыр "}, headers=auth)
+    assert r.status_code == 200 and r.json() == {**f, "category": "health", "text": "не ем сыр"}
+    r = await client.patch(f"/api/facts/{f['id']}", json={"active": False}, headers=auth)
+    assert r.status_code == 200 and r.json() == {**f, "category": "health", "text": "не ем сыр", "active": False}
+    # An empty body keeps everything.
+    r = await client.patch(f"/api/facts/{f['id']}", json={}, headers=auth)
+    assert r.status_code == 200 and r.json() == {**f, "category": "health", "text": "не ем сыр", "active": False}
+    assert (await client.get("/api/facts", headers=auth)).json() == [r.json()]
+
+
+async def test_fact_patch_invalid_values_422_and_nothing_changed(client, auth):
+    f = (await client.post("/api/facts", json={"text": "не ем творог", "category": "food"}, headers=auth)).json()
+    for body in (
+        {"text": ""},
+        {"text": "   "},
+        {"text": "я" * 201},
+        {"category": "sport"},
+        {"active": "maybe"},
+        {"text": "x", "category": "sport"},  # one bad field: no partial update
+    ):
+        assert (await client.patch(f"/api/facts/{f['id']}", json=body, headers=auth)).status_code == 422, body
+    assert (await client.get("/api/facts", headers=auth)).json() == [f]
+
+
+async def test_fact_patch_text_length_200_ok(client, auth):
+    f = (await client.post("/api/facts", json={"text": "факт"}, headers=auth)).json()
+    r = await client.patch(f"/api/facts/{f['id']}", json={"text": "  " + "я" * 200 + " "}, headers=auth)
+    assert r.status_code == 200 and r.json()["text"] == "я" * 200
+
+
+async def test_fact_patch_text_to_duplicate_of_other_active_422(client, auth):
+    a = (await client.post("/api/facts", json={"text": "не ем творог"}, headers=auth)).json()
+    b = (await client.post("/api/facts", json={"text": "не ем сыр"}, headers=auth)).json()
+    r = await client.patch(f"/api/facts/{b['id']}", json={"text": "НЕ ЕМ ТВОРОГ."}, headers=auth)
+    assert r.status_code == 422
+    assert {f["id"]: f["text"] for f in (await client.get("/api/facts", headers=auth)).json()} == {
+        a["id"]: "не ем творог",
+        b["id"]: "не ем сыр",
+    }
+
+
+async def test_fact_patch_text_to_duplicate_of_inactive_ok(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    await _fact(db, uid, "не ем творог", active=False)
+    b = (await client.post("/api/facts", json={"text": "не ем сыр"}, headers=auth)).json()
+    r = await client.patch(f"/api/facts/{b['id']}", json={"text": "не ем творог"}, headers=auth)
+    assert r.status_code == 200 and r.json()["text"] == "не ем творог"
+
+
+async def test_fact_patch_text_to_own_text_with_other_case_ok(client, auth):
+    # A fact is not a duplicate of itself.
+    f = (await client.post("/api/facts", json={"text": "не ем творог"}, headers=auth)).json()
+    r = await client.patch(f"/api/facts/{f['id']}", json={"text": "Не ем творог."}, headers=auth)
+    assert r.status_code == 200 and r.json()["text"] == "Не ем творог."
+
+
+async def test_fact_patch_text_to_duplicate_of_other_users_fact_ok(tmp_path, make_client, db):
+    one = {"X-Telegram-Init-Data": init_data(42)}
+    two = {"X-Telegram-Init-Data": init_data(77)}
+    async with make_client(make_settings(tmp_path, allowed_user_ids=[42, 77])) as c:
+        u1 = await _wb_user(c, one, db, 42)
+        await _wb_user(c, two, db, 77)
+        await _fact(db, u1, "не ем творог")
+        mine = (await c.post("/api/facts", json={"text": "не ем сыр"}, headers=two)).json()
+        r = await c.patch(f"/api/facts/{mine['id']}", json={"text": "не ем творог"}, headers=two)
+        assert r.status_code == 200
+
+
+async def test_fact_patch_reactivate_at_limit_409(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    await _fill_facts(db, uid, FACT_LIMIT)
+    off = await _fact(db, uid, "выключенный", active=False)
+    r = await client.patch(f"/api/facts/{off}", json={"active": True}, headers=auth)
+    assert r.status_code == 409
+    rows = {f.id: f for f in await _fact_rows(db, uid)}
+    assert rows[off].active is False
+
+
+async def test_fact_patch_reactivate_below_limit_ok(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    await _fill_facts(db, uid, FACT_LIMIT - 1)
+    off = await _fact(db, uid, "выключенный", active=False)
+    r = await client.patch(f"/api/facts/{off}", json={"active": True}, headers=auth)
+    assert r.status_code == 200 and r.json()["active"] is True
+
+
+async def test_fact_patch_edit_active_fact_at_limit_ok(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    ids = await _fill_facts(db, uid, FACT_LIMIT)
+    r = await client.patch(f"/api/facts/{ids[3]}", json={"text": "изменённый", "category": "food"}, headers=auth)
+    assert r.status_code == 200 and r.json()["text"] == "изменённый" and r.json()["category"] == "food"
+    # active: true on an already active fact is not a re-activation.
+    r = await client.patch(f"/api/facts/{ids[4]}", json={"active": True}, headers=auth)
+    assert r.status_code == 200 and r.json()["active"] is True
+
+
+async def test_fact_patch_edit_inactive_fact_at_limit_ok(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    await _fill_facts(db, uid, FACT_LIMIT)
+    off = await _fact(db, uid, "выключенный", active=False)
+    r = await client.patch(f"/api/facts/{off}", json={"text": "всё ещё выключенный", "category": "health"}, headers=auth)
+    assert r.status_code == 200 and r.json()["active"] is False and r.json()["category"] == "health"
+
+
+async def test_fact_patch_deactivate_at_limit_ok(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    ids = await _fill_facts(db, uid, FACT_LIMIT)
+    r = await client.patch(f"/api/facts/{ids[0]}", json={"active": False}, headers=auth)
+    assert r.status_code == 200 and r.json()["active"] is False
+
+
+async def test_fact_patch_reactivate_duplicate_of_active_422(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    await _fact(db, uid, "не ем творог")
+    off = await _fact(db, uid, "Не ем творог.", active=False)
+    r = await client.patch(f"/api/facts/{off}", json={"active": True}, headers=auth)
+    assert r.status_code == 422
+    rows = {f.id: f for f in await _fact_rows(db, uid)}
+    assert rows[off].active is False
+
+
+async def test_fact_patch_other_user_404(tmp_path, make_client, db):
+    one = {"X-Telegram-Init-Data": init_data(42)}
+    two = {"X-Telegram-Init-Data": init_data(77)}
+    async with make_client(make_settings(tmp_path, allowed_user_ids=[42, 77])) as c:
+        mine = (await c.post("/api/facts", json={"text": "моё", "category": "food"}, headers=one)).json()
+        assert (await c.get("/api/state", headers=two)).status_code == 200
+        r = await c.patch(f"/api/facts/{mine['id']}", json={"text": "взлом", "active": False}, headers=two)
+        assert r.status_code == 404
+        assert (await c.get("/api/facts", headers=one)).json() == [mine]
+        assert (await c.get("/api/facts", headers=two)).json() == []
+
+
+async def test_fact_patch_unknown_id_404(client, auth):
+    assert (await client.patch("/api/facts/9999", json={"text": "x"}, headers=auth)).status_code == 404
+
+
+async def test_fact_delete_own(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    keep = await _fact(db, uid, "оставить")
+    gone = await _fact(db, uid, "удалить", active=False)
+    r = await client.delete(f"/api/facts/{gone}", headers=auth)
+    assert r.status_code == 204 and r.content == b""
+    assert not await _fact_exists(db, gone) and await _fact_exists(db, keep)
+    assert [f["id"] for f in (await client.get("/api/facts", headers=auth)).json()] == [keep]
+    assert (await client.delete(f"/api/facts/{gone}", headers=auth)).status_code == 404
+
+
+async def test_fact_delete_other_user_404(tmp_path, make_client, db):
+    one = {"X-Telegram-Init-Data": init_data(42)}
+    two = {"X-Telegram-Init-Data": init_data(77)}
+    async with make_client(make_settings(tmp_path, allowed_user_ids=[42, 77])) as c:
+        u1 = await _wb_user(c, one, db, 42)
+        await _wb_user(c, two, db, 77)
+        fid = await _fact(db, u1, "моё")
+        assert (await c.delete(f"/api/facts/{fid}", headers=two)).status_code == 404
+        assert await _fact_exists(db, fid)
+        assert [f["id"] for f in (await c.get("/api/facts", headers=one)).json()] == [fid]
+        assert (await c.delete(f"/api/facts/{fid}", headers=one)).status_code == 204
+
+
+async def test_fact_delete_unknown_id_404(client, auth, db):
+    uid = await _wb_user(client, auth, db)
+    fid = await _fact(db, uid)
+    assert (await client.delete("/api/facts/9999", headers=auth)).status_code == 404
+    assert await _fact_exists(db, fid)

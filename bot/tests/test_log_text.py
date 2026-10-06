@@ -10,7 +10,7 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from gymbot.db.models import FoodEntry, WellbeingEntry
+from gymbot.db.models import FoodEntry, User, UserFact, WellbeingEntry
 from gymbot.handlers import log_text
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.llm.prompts import EXAMPLES
@@ -78,7 +78,7 @@ def callback(data: str, user_id: int = USER):
     return SimpleNamespace(
         data=data,
         from_user=SimpleNamespace(id=user_id, full_name="Amir"),
-        message=SimpleNamespace(edit_text=AsyncMock()),
+        message=SimpleNamespace(edit_text=AsyncMock(), edit_reply_markup=AsyncMock()),
         answer=AsyncMock(),
     )
 
@@ -90,11 +90,11 @@ def token_of(msg) -> str:
 
 @pytest.fixture(autouse=True)
 def clean_state():
-    log_text.PENDING.clear()
-    log_text.CONTEXT.clear()
+    for store in (log_text.PENDING, log_text.CONTEXT, log_text.FACTS):
+        store.clear()
     yield
-    log_text.PENDING.clear()
-    log_text.CONTEXT.clear()
+    for store in (log_text.PENDING, log_text.CONTEXT, log_text.FACTS):
+        store.clear()
 
 
 @pytest.fixture
@@ -508,3 +508,199 @@ async def test_empty_wellbeing_is_not_savable(llm, settings, db):
     msg = await send("ну такое", llm, settings, db)
     assert msg.answer.await_args.args[0] == "Как спалось?"
     assert "reply_markup" not in msg.answer.await_args.kwargs and not log_text.PENDING
+
+
+# ---- facts: "запомни: ..." and the model's `remember` ----
+
+
+def buttons(msg) -> list[list[str]]:
+    kb = msg.answer.await_args.kwargs.get("reply_markup")
+    return [[b.callback_data.split(":", 1)[0] for b in row] for row in kb.inline_keyboard] if kb else []
+
+
+async def facts_in_db(db) -> list[UserFact]:
+    async with db() as s:
+        return list((await s.scalars(select(UserFact).order_by(UserFact.id))).all())
+
+
+async def add_fact(db, text: str, active: bool = True) -> None:
+    async with db() as s:
+        user = await s.scalar(select(User).where(User.telegram_id == USER))
+        if user is None:
+            user = User(telegram_id=USER, rest_seconds=90)
+            s.add(user)
+            await s.flush()
+        s.add(UserFact(user_id=user.id, text=text, category="other", active=active))
+        await s.commit()
+
+
+async def test_remember_command_saves_after_button_without_llm(llm, settings, db):
+    msg = await send("Запомни: не ем творог.", llm, settings, db)
+    assert llm.bodies == []  # no model call
+    assert msg.answer.await_args.args[0] == "Запомнить? «не ем творог»"
+    assert buttons(msg) == [["remember", "drop"]]
+    assert await facts_in_db(db) == []  # nothing before the button
+    cb = callback(f"remember:{token_of(msg)}")
+    await log_text.remember(cb, db)
+    [fact] = await facts_in_db(db)
+    assert (fact.text, fact.category, fact.active, fact.source_text) == (
+        "не ем творог", "food", True, "Запомни: не ем творог."
+    )
+    assert cb.message.edit_text.await_args.args[0].startswith("Запомнил: «не ем творог»")
+    again = callback(f"remember:{token_of(msg)}")
+    await log_text.remember(again, db)  # double tap
+    assert again.answer.await_args.kwargs.get("show_alert") is True
+    assert len(await facts_in_db(db)) == 1
+
+
+@pytest.mark.parametrize(
+    ("text", "fact"),
+    [
+        ("запомни, что я не ем творог", "я не ем творог"),
+        ("запомни что тренируюсь по утрам", "тренируюсь по утрам"),
+        ("Запомните — самса у нас 150 г", "самса у нас 150 г"),
+        ("запомни, пожалуйста, что я не ем творог", "я не ем творог"),
+    ],
+)
+async def test_remember_command_forms(llm, settings, db, text, fact):
+    msg = await send(text, llm, settings, db)
+    assert msg.answer.await_args.args[0] == f"Запомнить? «{fact}»" and llm.bodies == []
+
+
+async def test_remember_command_empty_or_too_long(llm, settings, db):
+    empty = await send("запомни", llm, settings, db)
+    assert "запомни:" in empty.answer.await_args.args[0] and not log_text.FACTS
+    long = await send("запомни: " + "x" * 201, llm, settings, db)
+    assert "200" in long.answer.await_args.args[0] and not log_text.FACTS
+    assert llm.bodies == []
+
+
+async def test_word_starting_with_remember_goes_to_the_model(llm, settings, db):
+    llm.answers = [{"kind": "question", "clarification": "Понял."}]
+    await send("запомнилось плохо", llm, settings, db)
+    assert len(llm.bodies) == 1
+
+
+async def test_remember_command_by_voice_keeps_marker_in_source(llm, settings, db):
+    msg = await say("Запомни, что я не ем творог", llm, settings, db)
+    assert msg.answer.await_args.args[0] == "Распознал: «Запомни, что я не ем творог»\n\nЗапомнить? «я не ем творог»"
+    await log_text.remember(callback(f"remember:{token_of(msg)}"), db)
+    [fact] = await facts_in_db(db)
+    assert fact.source_text == "[voice] Запомни, что я не ем творог"
+
+
+async def test_remember_duplicate_is_not_saved_twice(llm, settings, db):
+    await add_fact(db, "Не ем творог!")
+    msg = await send("запомни: не ем ТВОРОГ", llm, settings, db)
+    cb = callback(f"remember:{token_of(msg)}")
+    await log_text.remember(cb, db)
+    assert len(await facts_in_db(db)) == 1
+    assert "уже помню" in cb.message.edit_text.await_args.args[0].lower()
+
+
+async def test_remember_limit_keeps_the_offer(llm, settings, db):
+    for i in range(50):
+        await add_fact(db, f"факт {i}")
+    msg = await send("запомни: не ем творог", llm, settings, db)
+    cb = callback(f"remember:{token_of(msg)}")
+    await log_text.remember(cb, db)
+    assert cb.answer.await_args.kwargs.get("show_alert") is True and "/facts" in cb.answer.await_args.args[0]
+    assert token_of(msg) in log_text.FACTS and len(await facts_in_db(db)) == 50
+
+
+def with_fact(answer: dict, fact: str) -> dict:
+    return {**answer, "remember": fact}
+
+
+async def test_record_with_fact_offers_separate_button(llm, settings, db):
+    llm.answers = [with_fact(food(2), "самса ~150 г")]
+    msg = await send("съел 2 самсы, они у нас большие, грамм по 150", llm, settings, db)
+    reply = msg.answer.await_args.args[0]
+    assert reply.startswith("Записать еду?") and reply.endswith("\n\nЗапомнить: «самса ~150 г»")
+    assert buttons(msg) == [["save", "drop"], ["remember"]]
+    token = token_of(msg)
+
+    cb = callback(f"remember:{token}")
+    await log_text.remember(cb, db)
+    [fact] = await facts_in_db(db)
+    assert fact.text == "самса ~150 г" and fact.category == "food"
+    assert fact.source_text == "съел 2 самсы, они у нас большие, грамм по 150"
+    kb = cb.message.edit_reply_markup.await_args.kwargs["reply_markup"]
+    assert [[b.callback_data for b in row] for row in kb.inline_keyboard] == [[f"save:{token}", f"drop:{token}"]]
+    assert token in log_text.PENDING  # the record can still be saved
+
+    save = callback(f"save:{token}")
+    await log_text.save(save, settings, db)
+    assert save.message.edit_text.await_args.kwargs.get("reply_markup") is None
+    async with db() as s:
+        assert len((await s.scalars(select(FoodEntry))).all()) == 1
+
+
+async def test_save_first_keeps_the_remember_button(llm, settings, db):
+    llm.answers = [with_fact(food(2), "самса ~150 г")]
+    msg = await send("съел 2 самсы, они у нас большие, грамм по 150", llm, settings, db)
+    token = token_of(msg)
+    save = callback(f"save:{token}")
+    await log_text.save(save, settings, db)
+    shown = save.message.edit_text.await_args
+    assert "Запомнить: «самса ~150 г»" in shown.args[0]
+    kb = shown.kwargs["reply_markup"]
+    assert [[b.callback_data for b in row] for row in kb.inline_keyboard] == [[f"remember:{token}"]]
+    cb = callback(f"remember:{token}")
+    await log_text.remember(cb, db)
+    assert [f.text for f in await facts_in_db(db)] == ["самса ~150 г"]
+    assert cb.message.edit_reply_markup.await_args.kwargs["reply_markup"] is None
+
+
+async def test_drop_forgets_the_offered_fact(llm, settings, db):
+    llm.answers = [with_fact(food(2), "самса ~150 г")]
+    msg = await send("съел 2 самсы, они у нас большие", llm, settings, db)
+    await log_text.drop(callback(f"drop:{token_of(msg)}"))
+    assert not log_text.FACTS and not log_text.PENDING
+
+
+async def test_drop_of_fact_only_offer_checks_owner(llm, settings, db):
+    msg = await send("запомни: не ем творог", llm, settings, db)
+    await log_text.drop(callback(f"drop:{token_of(msg)}", user_id=777))
+    assert token_of(msg) in log_text.FACTS
+    await log_text.drop(callback(f"drop:{token_of(msg)}"))
+    assert not log_text.FACTS
+
+
+async def test_known_fact_is_not_offered_again(llm, settings, db):
+    await add_fact(db, "Самса ~150 г.")
+    llm.answers = [with_fact(food(2), "самса ~150 г")]
+    msg = await send("две самсы", llm, settings, db)
+    assert "Запомнить" not in msg.answer.await_args.args[0]
+    assert buttons(msg) == [["save", "drop"]] and not log_text.FACTS
+    assert "самса ~150 г" in llm.bodies[-1]["messages"][0]["content"]  # active facts reach the model
+
+
+async def test_inactive_facts_are_not_sent_to_the_model(llm, settings, db):
+    await add_fact(db, "старый факт", active=False)
+    llm.answers = [food(1)]
+    await send("самса", llm, settings, db)
+    assert "старый факт" not in llm.bodies[-1]["messages"][0]["content"]
+
+
+async def test_fact_in_a_question_is_offered_and_context_kept(llm, settings, db):
+    llm.answers = [food(1), with_fact({"kind": "question", "clarification": "Учту."}, "аллергия на орехи")]
+    await send("самса", llm, settings, db)
+    before = log_text.CONTEXT[USER]
+    msg = await send("у меня аллергия на орехи", llm, settings, db, T0 + timedelta(minutes=1))
+    assert msg.answer.await_args.args[0] == "Учту.\n\nЗапомнить: «аллергия на орехи»"
+    assert buttons(msg) == [["remember", "drop"]]
+    assert log_text.CONTEXT[USER] is before
+    await log_text.remember(callback(f"remember:{token_of(msg)}"), db)
+    [fact] = await facts_in_db(db)
+    assert fact.category == "health"
+
+
+async def test_revision_carries_the_offered_fact(llm, settings, db):
+    llm.answers = [with_fact(food(2), "самса ~150 г"), food(3, revises=True)]
+    first = await send("съел 2 самсы, они у нас большие", llm, settings, db)
+    second = await send("нет, три", llm, settings, db, T0 + timedelta(minutes=1))
+    assert token_of(first) not in log_text.FACTS
+    assert buttons(second) == [["save", "drop"], ["remember"]]
+    assert "Запомнить: «самса ~150 г»" in second.answer.await_args.args[0]
+    assert log_text.FACTS[token_of(second)].text == "самса ~150 г"

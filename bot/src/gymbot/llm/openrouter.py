@@ -201,10 +201,15 @@ class OpenRouterClient:
         return await self._over_routes(call, json_mode=False)
 
     async def parse_message(
-        self, text: str, catalog: list[str], history: list[tuple[str, str]] | None = None
+        self,
+        text: str,
+        catalog: list[str],
+        history: list[tuple[str, str]] | None = None,
+        facts: list[str] | None = None,
     ) -> ParseResult:
-        """Parse one chat message; `history` is (user text, assistant JSON) turns of the recent dialog."""
-        messages = build_messages(text, catalog, history)
+        """Parse one chat message; `history` is (user text, assistant JSON) turns of the recent dialog,
+        `facts` the user's active facts (see gymbot.services.facts)."""
+        messages = build_messages(text, catalog, history, facts)
 
         async def call(route: Route, json_mode: bool) -> ParseResult:
             content = _THINK.sub("", await self._complete(route, messages, json_mode))  # qwen may think aloud

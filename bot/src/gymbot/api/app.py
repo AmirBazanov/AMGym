@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -14,8 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gymbot.api.auth import InitDataError, TelegramUser, validate_init_data
 from gymbot.config import Settings
-from gymbot.db.models import FoodEntry, Reminder, User, UserProgram, WellbeingEntry
+from gymbot.db.models import FoodEntry, Reminder, User, UserFact, UserProgram, WellbeingEntry
 from gymbot.db.session import Sessionmaker
+from gymbot.services import facts as fx
 from gymbot.services import nutrition as nut
 from gymbot.services import profile as prof
 from gymbot.services import reminders as rem
@@ -85,6 +86,26 @@ class ReminderPatch(BaseModel):
     text: str | None = Field(default=None, max_length=200)
     enabled: bool | None = None
     weekday: Weekday | None = None  # null = every day
+
+
+class FactIn(BaseModel):
+    text: str = Field(max_length=2000)  # checked after cleaning: 1..fx.TEXT_MAX
+    category: fx.Category = "other"
+
+
+class FactPatch(BaseModel):
+    """Partial update: omitted keys stay."""
+
+    text: str | None = Field(default=None, max_length=2000)
+    category: fx.Category | None = None
+    active: bool | None = None
+
+
+def fact_text(text: str) -> str:
+    try:
+        return fx.checked_text(text)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
 
 
 def reminder_out(r: Reminder) -> ReminderOut:
@@ -250,6 +271,56 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
         if entry is None or entry.user_id != user.id:
             raise HTTPException(404, "not found")
         await session.delete(entry)
+        await session.commit()
+
+    # 409 only for the active-facts limit: the Mini App shows its limit message on any 409.
+    @app.get("/api/facts")
+    async def list_facts(session: Session, tg: TgUser) -> list[fx.FactOut]:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        rows = await session.scalars(
+            select(UserFact).where(UserFact.user_id == user.id).order_by(UserFact.created_at.desc(), UserFact.id.desc())
+        )
+        return [fx.fact_out(f) for f in rows]
+
+    @app.post("/api/facts", status_code=201)
+    async def create_fact(body: FactIn, response: Response, session: Session, tg: TgUser) -> fx.FactOut:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        added = await fx.add_fact(session, user.id, fact_text(body.text), body.category)
+        if added.status == "limit":
+            raise HTTPException(409, f"at most {fx.MAX_ACTIVE} active facts")
+        await session.commit()
+        assert added.fact is not None
+        if added.status == "duplicate":
+            response.status_code = 200  # the same active fact exists: return it, create nothing
+        return fx.fact_out(added.fact)
+
+    async def own_fact(session: AsyncSession, tg: TelegramUser, fact_id: int) -> UserFact:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        f = await session.get(UserFact, fact_id)
+        if f is None or f.user_id != user.id:
+            raise HTTPException(404, "not found")
+        return f
+
+    @app.patch("/api/facts/{fact_id}")
+    async def patch_fact(fact_id: int, body: FactPatch, session: Session, tg: TgUser) -> fx.FactOut:
+        f = await own_fact(session, tg, fact_id)
+        changes = body.model_dump(exclude_unset=True)
+        text = fact_text(changes["text"]) if changes.get("text") is not None else f.text
+        active = changes["active"] if changes.get("active") is not None else f.active
+        if active and await fx.find_duplicate(session, f.user_id, text, exclude_id=f.id) is not None:
+            raise HTTPException(422, "the same fact is already active")
+        if active and not f.active and await fx.count_active(session, f.user_id) >= fx.MAX_ACTIVE:
+            raise HTTPException(409, f"at most {fx.MAX_ACTIVE} active facts")
+        f.text, f.active = text, active
+        if changes.get("category") is not None:
+            f.category = changes["category"]
+        await session.commit()
+        return fx.fact_out(f)
+
+    @app.delete("/api/facts/{fact_id}", status_code=204)
+    async def delete_fact(fact_id: int, session: Session, tg: TgUser) -> None:
+        f = await own_fact(session, tg, fact_id)
+        await session.delete(f)
         await session.commit()
 
     @app.get("/api/reminders")

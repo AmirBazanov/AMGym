@@ -10,7 +10,16 @@ from zoneinfo import ZoneInfo
 import pytest
 from sqlalchemy import func, select
 
-from gymbot.db.models import FoodEntry, Program, User, UserProgram, WellbeingEntry, Workout, WorkoutSet
+from gymbot.db.models import (
+    FoodEntry,
+    Program,
+    User,
+    UserFact,
+    UserProgram,
+    WellbeingEntry,
+    Workout,
+    WorkoutSet,
+)
 from gymbot.handlers import advice as advice_handler
 from gymbot.llm.openrouter import LLMError
 from gymbot.llm.prompts import ADVICE_DISCLAIMER, ADVICE_SYSTEM_PROMPT
@@ -212,9 +221,32 @@ async def test_context_full_user_with_wellbeing_keeps_program_and_fits(db, full_
     assert "Самочувствие за 14 дней: записей 7" in ctx and "Программа «" in ctx
 
 
+async def test_context_has_active_facts_after_profile(db, full_user):
+    async with db() as s:
+        s.add_all([
+            UserFact(user_id=full_user, text="не ест творог", category="food", active=True),
+            UserFact(user_id=full_user, text="старое", category="other", active=False),
+            UserFact(user_id=full_user, text="тренируется по утрам", category="training", active=True),
+        ])
+        await s.commit()
+    ctx = await _context(db, full_user)
+    line = next(ln for ln in ctx.splitlines() if ln.startswith("Факты о пользователе:"))
+    assert "не ест творог" in line and "тренируется по утрам" in line and "старое" not in line
+    assert ctx.index("Профиль:") < ctx.index("Факты о пользователе") < ctx.index("Норма в день")
+
+
+async def test_context_with_50_long_facts_fits_and_keeps_program(db, full_user):
+    async with db() as s:
+        for i in range(50):
+            s.add(UserFact(user_id=full_user, text=f"{i} " + "x" * 197, category="other", active=True))
+        await s.commit()
+    ctx = await _context(db, full_user)
+    assert len(ctx) <= advice.CONTEXT_MAX and "Программа «" in ctx and "Факты о пользователе" in ctx
+
+
 def test_advice_prompt_wellbeing_rules():
     p = ADVICE_SYSTEM_PROMPT.lower()
-    assert "самочувстви" in p and "боли" in p and "замен" in p and "недосып" in p and "диагноз" in p
+    assert "факт" in p and "самочувстви" in p and "боли" in p and "замен" in p and "недосып" in p and "диагноз" in p
 
 
 def test_epley():

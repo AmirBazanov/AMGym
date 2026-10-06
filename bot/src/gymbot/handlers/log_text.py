@@ -25,6 +25,14 @@ CONTEXT_TTL and sent to the model as history with the next message, so "три �
   so the next record is parsed fresh. Pressing an older preview does not touch a newer context.
 - Off-topic questions (kind="question") do not take part: the context stays as it was.
 
+Facts (gymbot.services.facts). "запомни: <факт>" is caught by a regexp before the model and offered
+as "Запомнить? «…»" with its own button. The model may also return `remember` (a lasting fact in an
+ordinary message): the preview gets a "Запомнить: «…»" line and a separate "🧠 Запомнить" row under
+"Сохранить / Отмена" (the same token, kept in FACTS). A fact is saved only by that button, independently
+of the record: saving the record first keeps the button, a revision carries the offer to the new preview,
+"Отмена" drops both. A fact that is already active is not offered again. Active facts go to the model
+with every message.
+
 Voice messages (handlers/voice.py) go through the same process_text with the transcript as the text.
 Each message of a chain has two forms: the clean text (Exchange.texts), which the model sees, and
 the raw form (Exchange.raws), which is stored: the same text for typed messages, "[voice] <transcript>"
@@ -48,7 +56,8 @@ from gymbot.config import Settings
 from gymbot.db.models import FoodEntry
 from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
-from gymbot.llm.schemas import ParsedWellbeing, ParseResult
+from gymbot.llm.schemas import REMEMBER_MAX, ParsedWellbeing, ParseResult
+from gymbot.services import facts
 from gymbot.services.programs import exercise_catalog
 from gymbot.services.users import get_or_create_user
 from gymbot.services.wellbeing import wellbeing_entry
@@ -104,6 +113,17 @@ class Exchange:
         return [("\n".join(texts[-MAX_CHAIN:]), result.model_dump_json()) for texts, result in turns]
 
 
+@dataclass
+class PendingFact:
+    """A fact offered for "🧠 Запомнить" (see the module docstring)."""
+
+    user_id: int
+    text: str
+    source_text: str  # the message it came from, "[voice] ..." for voice
+    standalone: bool  # True: the preview offers only the fact; False: it sits under a record preview
+    answer: str = ""  # the model's reply shown above a standalone offer, kept when the fact is saved
+
+
 # Parsed messages waiting for "Сохранить". In memory: a restart just means pressing again after resending.
 PENDING: dict[str, Pending] = {}
 MAX_PENDING = 200
@@ -113,7 +133,18 @@ CONTEXT: dict[int, Exchange] = {}
 CONTEXT_TTL = timedelta(minutes=15)
 MAX_CHAIN = 3  # messages of a chain sent to the model as one turn; raw_text keeps them all
 
+# Offered facts by preview token; a record preview shares its token with PENDING.
+FACTS: dict[str, PendingFact] = {}
+
 HINT = "Не понял. Напиши, например: «присед 4х8 по 80»."
+
+# "запомни: ...", "запомни, что ...", "Запомните — ..."; not "запомнилось".
+REMEMBER_CMD = re.compile(
+    r"^\s*запомни(?:те)?(?=$|[\s,:;.!—–-])[\s,:;.!—–-]*(?:пожалуйста(?=$|[\s,:])[\s,:]*)?(?:что(?=$|[\s,:])[\s,:]*)?(?P<fact>.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+REMEMBER_HINT = "Напиши, что запомнить, например «запомни: не ем творог»."
+REMEMBER_TOO_LONG = f"Слишком длинно: факт до {REMEMBER_MAX} символов. Сократи и пришли ещё раз."
 
 
 def _norm(text: str) -> str:
@@ -230,15 +261,51 @@ def _forget(user_id: int, token: str) -> None:
         del CONTEXT[user_id]
 
 
+def keyboard(token: str, *, record: bool, fact: bool, cancel: bool = True) -> InlineKeyboardMarkup | None:
+    """Buttons of a preview: "Сохранить / Отмена" for a record, "🧠 Запомнить" for an offered fact.
+
+    With a record the fact button is a separate second row, so the first row never changes. A fact-only
+    preview gets "Отмена" next to it unless `cancel` is False (under a saved record it would say "Отменено").
+    """
+    save = InlineKeyboardButton(text="✅ Сохранить", callback_data=f"save:{token}")
+    drop = InlineKeyboardButton(text="✖ Отмена", callback_data=f"drop:{token}")
+    remember = InlineKeyboardButton(text="🧠 Запомнить", callback_data=f"remember:{token}")
+    rows = []
+    if record:
+        rows.append([save, drop])
+    if fact:
+        rows.append([remember] if record or not cancel else [remember, drop])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
 def confirm_kb(token: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Сохранить", callback_data=f"save:{token}"),
-                InlineKeyboardButton(text="✖ Отмена", callback_data=f"drop:{token}"),
-            ]
-        ]
-    )
+    kb = keyboard(token, record=True, fact=False)
+    assert kb is not None
+    return kb
+
+
+def _offer_line(fact: str) -> str:
+    return f"\n\nЗапомнить: «{fact}»"
+
+
+def _new_token(store: dict) -> str:
+    if len(store) >= MAX_PENDING:
+        store.pop(next(iter(store)))
+    return secrets.token_hex(6)
+
+
+async def _offer_command(message: Message, fact_text: str, raw: str, prefix: str) -> None:
+    """Reply to "запомни: ...": the fact with a "🧠 Запомнить" button, or a hint."""
+    fact = facts.clean(fact_text).rstrip(" .!")
+    if not fact:
+        await message.answer(prefix + REMEMBER_HINT)
+        return
+    if len(fact) > REMEMBER_MAX:
+        await message.answer(prefix + REMEMBER_TOO_LONG)
+        return
+    token = _new_token(FACTS)
+    FACTS[token] = PendingFact(message.from_user.id, fact, raw, standalone=True)  # type: ignore[union-attr]
+    await message.answer(f"{prefix}Запомнить? «{fact}»", reply_markup=keyboard(token, record=False, fact=True))
 
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -269,17 +336,33 @@ async def process_text(
     """
     raw = text if raw_text is None else raw_text
     user_id = message.from_user.id  # type: ignore[union-attr]
+    if m := REMEMBER_CMD.match(text):
+        await _offer_command(message, m["fact"], raw, prefix)
+        return
     async with sessionmaker() as session:
         catalog = await exercise_catalog(session)
+        known = await facts.prompt_facts(session, user_id)
     prev = recent_exchange(user_id, message.date)
     await message.bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
     try:
-        result = await llm.parse_message(text, catalog, prev.history() if prev else None)
+        result = await llm.parse_message(text, catalog, prev.history() if prev else None, known)
     except LLMError:
         await message.answer(prefix + "Нейросеть сейчас недоступна, попробуй ещё раз чуть позже.")
         return
+    # The model tends to repeat facts it was given: offer only new ones.
+    offer = result.remember
+    if offer and facts.normalize(offer) in {facts.normalize(k) for k in known}:
+        offer = None
     preview = prefix + render_preview(result, source_text=text)
-    if result.kind == "question":
+    if not result.is_record() and offer:  # a fact in a question or an unclear message: offer it alone
+        answer = preview if preview != prefix + HINT else ""
+        token = _new_token(FACTS)
+        FACTS[token] = PendingFact(user_id, offer, raw, standalone=True, answer=answer)
+        shown = answer + _offer_line(offer) if answer else f"{prefix}Запомнить? «{offer}»"
+        await message.answer(shown, reply_markup=keyboard(token, record=False, fact=True))
+        if result.kind == "question":
+            return
+    elif result.kind == "question":
         await message.answer(preview)
         return
     # Updates are handled concurrently: while the model was thinking, the previous preview may have
@@ -296,22 +379,29 @@ async def process_text(
         else:  # no record yet: keep collecting the answers
             exchange = Exchange([*prev.texts, text], [*prev.raws, raw], result, message.date)
         _remember(user_id, exchange)
-        await message.answer(preview)
+        if not offer:  # with an offer the reply has been sent above
+            await message.answer(preview)
         return
     texts, raws = [text], [raw]
+    fact = PendingFact(user_id, offer, raw, standalone=False) if offer else None
     if prev is not None:
         if prev.token is None:  # answers to the model's questions before any record
             texts, raws = [*prev.texts, text], [*prev.raws, raw]
         elif is_revision(prev.result, result):
             PENDING.pop(prev.token, None)  # replaced by this preview, see the module docstring
+            carried = FACTS.pop(prev.token, None)  # the offer moves to the new preview
+            fact = fact or carried
             texts, raws = [*prev.all_texts(), text], [*prev.all_raws(), raw]
-    if len(PENDING) >= MAX_PENDING:
-        PENDING.pop(next(iter(PENDING)))
-    token = secrets.token_hex(6)
+    token = _new_token(PENDING)
     exchange = Exchange(texts, raws, result, message.date, token)
     PENDING[token] = Pending(user_id, result, exchange.raw_text, message.date)
     _remember(user_id, exchange)
-    await message.answer(preview, reply_markup=confirm_kb(token))
+    if fact is not None:
+        if len(FACTS) >= MAX_PENDING:
+            FACTS.pop(next(iter(FACTS)))
+        FACTS[token] = fact
+        preview += _offer_line(fact.text)
+    await message.answer(preview, reply_markup=keyboard(token, record=True, fact=fact is not None))
 
 
 @router.callback_query(F.data.startswith("drop:"))
@@ -321,6 +411,9 @@ async def drop(cb: CallbackQuery) -> None:
     if pending is not None and pending.user_id == cb.from_user.id:
         PENDING.pop(token, None)
         _forget(cb.from_user.id, token)
+    offered = FACTS.get(token)
+    if offered is not None and offered.user_id == cb.from_user.id:
+        FACTS.pop(token, None)
     if cb.message:
         await cb.message.edit_text("Отменено.")  # type: ignore[union-attr]
     await cb.answer()
@@ -344,8 +437,54 @@ async def save(cb: CallbackQuery, settings: Settings, sessionmaker: Sessionmaker
     if cb.message:
         saved = pending.result.model_copy(update={"clarification": None})  # the question is moot now
         shown = re.sub(r"^Записать( еду| самочувствие)?\?\s*", "", render_preview(saved))
-        await cb.message.edit_text(f"{shown}\n\n{note}".strip())  # type: ignore[union-attr]
+        offered = FACTS.get(token)  # not remembered yet: keep its button
+        text = f"{shown}\n\n{note}".strip() + (_offer_line(offered.text) if offered else "")
+        await cb.message.edit_text(  # type: ignore[union-attr]
+            text, reply_markup=keyboard(token, record=False, fact=offered is not None, cancel=False)
+        )
     await cb.answer()
+
+
+@router.callback_query(F.data.startswith("remember:"))
+async def remember(cb: CallbackQuery, sessionmaker: Sessionmaker) -> None:
+    token = (cb.data or "").split(":", 1)[1]
+    # pop, not get: a double tap must not add the fact twice.
+    offered = FACTS.pop(token, None)
+    if offered is None or offered.user_id != cb.from_user.id:
+        if offered is not None:
+            FACTS[token] = offered  # someone else's preview: leave it
+        await cb.answer("Этот факт уже сохранён или предложение устарело.", show_alert=True)
+        return
+    try:
+        async with sessionmaker() as session:
+            user = await get_or_create_user(session, cb.from_user.id, cb.from_user.full_name)
+            added = await facts.add_fact(session, user.id, offered.text, source_text=offered.source_text)
+            await session.commit()
+    except Exception:
+        FACTS[token] = offered  # let the user press again
+        raise
+    if added.status == "limit":
+        FACTS[token] = offered
+        await cb.answer(
+            f"Фактов уже {facts.MAX_ACTIVE}: удали лишние в /facts или в дневнике.", show_alert=True
+        )
+        return
+    done = (
+        f"Запомнил: «{offered.text}» ✅ Все факты: /facts"
+        if added.status == "created"
+        else f"Это я уже помню: «{offered.text}»"
+    )
+    if offered.standalone:
+        if cb.message:
+            text = f"{offered.answer}\n\n{done}" if offered.answer else done
+            await cb.message.edit_text(text)  # type: ignore[union-attr]
+        await cb.answer()
+        return
+    if cb.message:  # the record's buttons stay while it is not saved
+        await cb.message.edit_reply_markup(  # type: ignore[union-attr]
+            reply_markup=keyboard(token, record=token in PENDING, fact=False)
+        )
+    await cb.answer(done)
 
 
 async def _save(pending: Pending, cb: CallbackQuery, today: date, sessionmaker: Sessionmaker) -> str:

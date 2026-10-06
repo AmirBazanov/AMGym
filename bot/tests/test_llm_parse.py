@@ -68,6 +68,7 @@ def test_only_corrections_revise():
         "три куриные самсы": False,
         "нет, четыре": True,
         "самса была так себе, белка поменьше": True,
+        "съел 3 манты, они у нас крупные, по 90 г": False,
         "спал 6 часов, болит левое плечо, сил мало": False,
         "сколько белка в 100 г творога?": False,
         "привет": False,
@@ -133,7 +134,7 @@ def test_wellbeing_example_and_rule():
     assert w.sleep_hours == 6 and w.energy == 2
     assert [p.place for p in w.pains] == ["левое плечо"]
     assert '"wellbeing"' in SYSTEM_PROMPT and "сил мало" in SYSTEM_PROMPT
-    assert len(SYSTEM_PROMPT) < 2700  # keep the prompt compact for small free models
+    assert len(SYSTEM_PROMPT) < 2900  # keep the prompt compact for small free models
 
 
 def test_wellbeing_out_of_range_values_are_clamped_not_rejected():
@@ -149,3 +150,36 @@ def test_wellbeing_out_of_range_values_are_clamped_not_rejected():
     for shape in ("плечо", ["плечо"], {"place": "плечо"}):
         assert [p.place for p in ParsedWellbeing.model_validate({"pains": shape}).pains] == ["плечо"]
     assert ParsedWellbeing.model_validate({"pains": [3, None, {"severity": 2}]}).pains == []
+
+
+def test_remember_example_and_rule():
+    r = example("съел 3 манты, они у нас крупные, по 90 г")
+    assert r.kind == "food" and r.foods[0].grams == 270 and r.remember and "90" in r.remember
+    others = [u for u, a in EXAMPLES if ParseResult.model_validate_json(a).remember]
+    assert others == ["съел 3 манты, они у нас крупные, по 90 г"]  # one example only
+    assert EXAMPLES[0][0] != others[0] and EXAMPLES[-1][0] != others[0]
+    assert '"remember"' in SYSTEM_PROMPT
+
+
+def test_remember_is_tolerant():
+    assert ParseResult.model_validate({"kind": "food", "remember": "  самса   ~150 г "}).remember == "самса ~150 г"
+    for bad in ("", "   ", 5, ["x"], {"a": 1}, None):
+        assert ParseResult.model_validate({"kind": "food", "remember": bad}).remember is None
+    assert ParseResult.model_validate({"kind": "food", "remember": "x" * 300}).remember is None
+
+
+def test_facts_go_into_system_prompt_only():
+    plain = build_messages("две самсы", ["жим лёжа"])
+    msgs = build_messages("две самсы", ["жим лёжа"], facts=["самса ~150 г", "не ест творог"])
+    assert "Факты о пользователе" in msgs[0]["content"] and "самса ~150 г; не ест творог" in msgs[0]["content"]
+    assert "Факты о пользователе" not in plain[0]["content"]
+    assert msgs[1:] == plain[1:]  # examples and the text are untouched
+    assert build_messages("x", [], facts=[])[0] == build_messages("x", [])[0]
+
+
+def test_facts_line_is_capped():
+    from gymbot.llm.prompts import FACTS_MAX_CHARS, format_facts
+
+    line = format_facts([f"факт номер {i} " + "x" * 180 for i in range(50)])
+    assert line.startswith("Факты о пользователе: факт номер 0 ") and len(line) <= FACTS_MAX_CHARS
+    assert format_facts([]) == ""

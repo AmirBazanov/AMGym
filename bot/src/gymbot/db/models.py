@@ -190,6 +190,24 @@ class WellbeingEntry(Base):
     raw_text: Mapped[str] = mapped_column(Text)  # original message(s), "[voice] ..." for voice
 
 
+# --- Facts about the user (preferences, allergies, portion sizes...), used by the parser and advice ---
+
+class UserFact(Base):
+    """A lasting fact from the chat ("запомни: ..." or the model's `remember`) or the Mini App.
+
+    Only active facts are sent to the LLM; at most gymbot.services.facts.MAX_ACTIVE of them.
+    """
+
+    __tablename__ = "user_facts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    text: Mapped[str] = mapped_column(Text)  # 1..200 characters, whitespace collapsed
+    category: Mapped[str] = mapped_column(String(16), default="other")  # food | training | health | schedule | other
+    active: Mapped[bool] = mapped_column(default=True)
+    source_text: Mapped[str | None] = mapped_column(Text)  # the chat message it came from
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 # --- Reminders (daily, local time in TIMEZONE) ---
 
 class Reminder(Base):

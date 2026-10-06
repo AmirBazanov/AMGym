@@ -2,7 +2,8 @@
 
 `python -m gymbot.llm.check ["текст" ...]` parses each text on its own;
 `python -m gymbot.llm.check --dialog "три куриные самсы" "три штуки"` sends each next text with the
-previous exchange as history, like the bot does. Every request prints its provider/model, whether it
+previous exchange as history, like the bot does; `--fact "самса ~150 г"` (repeatable) adds a user fact
+to the system prompt, like active facts in the bot. Every request prints its provider/model, whether it
 asked for json mode and the HTTP status (headers are never printed: they carry the API key).
 """
 
@@ -40,7 +41,15 @@ async def show_response(response: httpx.Response) -> None:
 
 async def main(args: list[str]) -> None:
     dialog = "--dialog" in args
-    texts = [a for a in args if a != "--dialog"] or SAMPLES
+    facts: list[str] = []
+    rest: list[str] = []
+    it = iter(args)
+    for a in it:
+        if a == "--fact":
+            facts.append(next(it, ""))
+        elif a != "--dialog":
+            rest.append(a)
+    texts = rest or SAMPLES
     settings = get_settings()
     hooks = {"request": [show_request], "response": [show_response]}
     client = LLMClient(settings, httpx.AsyncClient(timeout=60, event_hooks=hooks))
@@ -51,7 +60,7 @@ async def main(args: list[str]) -> None:
         print(f"\n> {text}")
         t = time.monotonic()
         try:
-            result = await client.parse_message(text, ["жим лёжа", "французский жим лёжа"], history or None)
+            result = await client.parse_message(text, ["жим лёжа", "французский жим лёжа"], history or None, facts or None)
         except LLMError as e:
             print(f"FAILED: {e}")
             continue

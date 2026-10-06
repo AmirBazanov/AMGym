@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+REMEMBER_MAX = 200  # also the fact length limit (gymbot.services.facts.TEXT_MAX)
+
 
 class ParsedSet(BaseModel):
     reps: int = Field(ge=1, le=100)
@@ -108,6 +110,16 @@ class ParseResult(BaseModel):
     clarification: str | None = Field(default=None, description="ask the user if something is ambiguous")
     revises: bool = Field(default=False, description="the message corrects the previous record of the dialog")
     note: str | None = Field(default=None, description="what was changed and why, or why the estimate is such")
+    remember: str | None = Field(default=None, description="a lasting fact about the user to offer remembering")
+
+    @field_validator("remember", mode="before")
+    @classmethod
+    def _remember(cls, v: Any) -> str | None:
+        """Short text or None; anything else is dropped, never rejected (that would fail the whole answer)."""
+        if not isinstance(v, str):
+            return None
+        text = " ".join(v.split())
+        return text if 0 < len(text) <= REMEMBER_MAX else None
 
     def is_record(self) -> bool:
         """Whether this is something to save (the rest is an answer or a clarifying question)."""
