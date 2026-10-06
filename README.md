@@ -23,6 +23,7 @@ uv run --project bot python -m gymbot.dev
 Данные лежат в `data/gym.db` (SQLite). Бэкап — просто копия файла.
 
 ## Полезное
+- Голосовые сообщения: получи ключ на https://console.groq.com/keys (бесплатный), впиши в `STT_API_KEY`. Голос идёт в Groq для распознавания. Макс. 2 минуты. Без ключа бот ответит «Голос не настроен: нужен ключ распознавания в .env.»
 - Проверить нейросеть на примерах: `uv run --project bot python -m gymbot.llm.check` (или со своим текстом в кавычках). Если бесплатные модели перестали отвечать, выбери другую на https://openrouter.ai/models?max_price=0 и впиши в `OPENROUTER_MODEL`.
 - Только мини-апп в браузере, без Telegram: в `.env` поставь `RUN_BOT=false` и `DEV_USER_ID=1`, запусти `uv run --project bot python -m gymbot.main` и открой http://localhost:8000. Не включай `DEV_USER_ID` вместе с туннелем.
 - Закрыть бота от чужих: впиши свой Telegram id (бот покажет его на /start) в `ALLOWED_USER_IDS=[...]`.
