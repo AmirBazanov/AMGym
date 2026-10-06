@@ -16,8 +16,10 @@ from gymbot.api.auth import InitDataError, TelegramUser, validate_init_data
 from gymbot.config import Settings
 from gymbot.db.models import FoodEntry, Reminder, User, UserFact, UserProgram, WellbeingEntry
 from gymbot.db.session import Sessionmaker
+from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services import facts as fx
 from gymbot.services import nutrition as nut
+from gymbot.services import plan as day_plan
 from gymbot.services import profile as prof
 from gymbot.services import reminders as rem
 from gymbot.services import wellbeing as wb
@@ -129,9 +131,16 @@ def normalize_reminder_text(kind: str, text: str | None) -> str | None:
     return text
 
 
-def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
+def create_app(settings: Settings, sessionmaker: Sessionmaker, llm: OpenRouterClient | None = None) -> FastAPI:
+    """`llm` is the process-wide client (main.py shares it with the bot); without it one is made on first use."""
     app = FastAPI(title="GymAPP API", docs_url="/api/docs", openapi_url="/api/openapi.json")
     tz = ZoneInfo(settings.timezone)
+    clients: list[OpenRouterClient] = [llm] if llm is not None else []
+
+    def get_llm() -> OpenRouterClient:
+        if not clients:
+            clients.append(OpenRouterClient(settings))
+        return clients[0]
 
     async def get_session() -> AsyncIterator[AsyncSession]:
         async with sessionmaker() as session:
@@ -322,6 +331,24 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker) -> FastAPI:
         f = await own_fact(session, tg, fact_id)
         await session.delete(f)
         await session.commit()
+
+    async def today_plan(session: AsyncSession, tg: TelegramUser, force: bool) -> day_plan.DayPlanOut:
+        now = day_plan.utcnow()
+        user = await get_or_create_user(session, tg.id, tg.name)
+        await active_program(session, user, now.astimezone(tz).date())  # first visit starts a program
+        await session.commit()  # no write lock while the model thinks
+        built = await day_plan.get_or_build(session, user, settings, get_llm(), tz, now, force=force)
+        if built is None:
+            raise HTTPException(404, "not a training day")
+        return built.out
+
+    @app.get("/api/plan/today")
+    async def get_today_plan(session: Session, tg: TgUser) -> day_plan.DayPlanOut:
+        return await today_plan(session, tg, force=False)
+
+    @app.post("/api/plan/today/regenerate")
+    async def regenerate_today_plan(session: Session, tg: TgUser) -> day_plan.DayPlanOut:
+        return await today_plan(session, tg, force=True)
 
     @app.get("/api/reminders")
     async def list_reminders(session: Session, tg: TgUser) -> list[ReminderOut]:

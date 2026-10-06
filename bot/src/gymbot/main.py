@@ -18,7 +18,7 @@ from gymbot.api.app import create_app
 from gymbot.config import Settings, get_settings
 from gymbot.db.migrate import upgrade_head
 from gymbot.db.session import make_engine
-from gymbot.handlers import advice, common, facts, log_text, voice
+from gymbot.handlers import advice, common, facts, log_text, plan, voice
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services.access import is_allowed
 from gymbot.services.programs import sync_programs
@@ -54,6 +54,7 @@ async def setup_bot_ui(bot: Bot, settings: Settings) -> None:
     await bot.set_my_commands(
         [
             BotCommand(command="today", description="План на сегодня"),
+            BotCommand(command="plan", description="План с поправками под самочувствие"),
             BotCommand(command="undo", description="Удалить последнюю запись"),
             BotCommand(command="advice", description="Советы по питанию, тренировкам и восстановлению"),
             BotCommand(command="facts", description="Что я помню о тебе"),
@@ -101,9 +102,12 @@ async def run() -> None:
 
     if not settings.miniapp_dist.is_dir():
         log.warning("%s not found: run `npm run build` in miniapp/ to serve the Mini App", settings.miniapp_dist)
+    # One LLM client per process (bot and API): it remembers which models reject response_format.
+    llm = OpenRouterClient(settings)
+    log.info("LLM routes: %s", ", ".join(r.name for r in llm.routes) or "none (no API key)")
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(settings, sessionmaker),
+            create_app(settings, sessionmaker, llm),
             host=settings.api_host,
             port=settings.api_port,
             log_level="info",
@@ -116,17 +120,15 @@ async def run() -> None:
         try:
             await server.serve()
         finally:
+            await llm.aclose()
             await engine.dispose()
         return
 
     bot = Bot(settings.bot_token)
-    # One LLM client per process: it remembers which models reject response_format.
-    llm = OpenRouterClient(settings)
-    log.info("LLM routes: %s", ", ".join(r.name for r in llm.routes) or "none (no API key)")
     dp = Dispatcher(settings=settings, sessionmaker=sessionmaker, llm=llm)
     dp.update.outer_middleware(AllowedUsers())
     # voice before log_text: the filters do not overlap, but the order is kept explicit.
-    dp.include_routers(common.router, advice.router, facts.router, voice.router, log_text.router)  # log_text last: it catches all text
+    dp.include_routers(common.router, advice.router, facts.router, plan.router, voice.router, log_text.router)  # log_text last: it catches all text
     await setup_bot_ui(bot, settings)
     polling = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
     # If polling dies (e.g. the token was revoked), stop the HTTP server too instead of running half-alive.

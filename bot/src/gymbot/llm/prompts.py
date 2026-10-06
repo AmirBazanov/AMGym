@@ -169,3 +169,23 @@ def build_advice_messages(context: str) -> list[dict[str, str]]:
         {"role": "system", "content": ADVICE_SYSTEM_PROMPT},
         {"role": "user", "content": "Сводка:\n" + context},
     ]
+
+
+# ---- Adaptive day plan (gymbot.services.plan): JSON, refines the rule draft ----
+
+PLAN_SYSTEM_PROMPT = """Ты тренер. Тебе дают день программы, сводку о самочувствии, питании, недавних тренировках и фактах о человеке, и черновик плана на сегодня, собранный правилами. Уточни черновик и верни ТОЛЬКО JSON того же вида: {"summary": str, "exercises": [...]} с теми же упражнениями в том же порядке и с теми же name.
+Поля упражнения: sets (1-10), repsMin, repsMax (null у дропсетов), weightFactor (0.3-1.5, 0.9 = вес −10 %), skip, replaceWith (null или замена), reason (коротко, по-русски, или null).
+Правила:
+- Не делай план тяжелее черновика без причины; при болях и недосыпе облегчай, а не отменяй всё подряд.
+- replaceWith только на упражнение той же мышечной группы и с тем же снарядом (гантели на гантели, блок на блок), и только если исходное нагружает больное место.
+- Учитывай факты о человеке (ограничения, травмы, что он не делает).
+- summary: одно короткое предложение по-русски, почему план такой, с цифрой (сон, энергия, боль). Не начинай со слов «Сегодня лучше отдохнуть» или «План скорректирован».
+- Без диагнозов и выдуманных причин боли.
+"""
+
+
+def build_plan_messages(context: str, draft_json: str) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": PLAN_SYSTEM_PROMPT},
+        {"role": "user", "content": f"Сводка:\n{context}\n\nЧерновик:\n{draft_json}"},
+    ]

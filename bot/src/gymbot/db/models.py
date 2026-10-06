@@ -9,7 +9,19 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
-from sqlalchemy import JSON, BigInteger, Date, DateTime, ForeignKey, Integer, MetaData, Numeric, String, Text
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    MetaData,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -205,6 +217,23 @@ class UserFact(Base):
     category: Mapped[str] = mapped_column(String(16), default="other")  # food | training | health | schedule | other
     active: Mapped[bool] = mapped_column(default=True)
     source_text: Mapped[str | None] = mapped_column(Text)  # the chat message it came from
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+# --- Adaptive day plan (gymbot.services.plan): today's program day adjusted to wellbeing, food, recovery ---
+
+class DayPlan(Base):
+    """One plan per user and local day; rebuilt when `inputs_hash` (what it was built from) changes."""
+
+    __tablename__ = "day_plans"
+    __table_args__ = (UniqueConstraint("user_id", "plan_date"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    plan_date: Mapped[date] = mapped_column(Date)  # local date in TIMEZONE
+    readiness: Mapped[str] = mapped_column(String(8))  # normal | light | rest
+    summary: Mapped[str | None] = mapped_column(Text)
+    exercises_json: Mapped[str] = mapped_column(Text)  # JSON list in the API format; [] = not adjusted
+    inputs_hash: Mapped[str] = mapped_column(String(64))  # sha256 hex
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -55,6 +55,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from gymbot.config import Settings
 from gymbot.db.models import FoodEntry
 from gymbot.db.session import Sessionmaker
+from gymbot.handlers.plan import send_after_wellbeing
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.schemas import REMEMBER_MAX, ParsedWellbeing, ParseResult
 from gymbot.services import facts
@@ -420,7 +421,9 @@ async def drop(cb: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("save:"))
-async def save(cb: CallbackQuery, settings: Settings, sessionmaker: Sessionmaker) -> None:
+async def save(
+    cb: CallbackQuery, settings: Settings, sessionmaker: Sessionmaker, llm: OpenRouterClient | None = None
+) -> None:
     token = (cb.data or "").split(":", 1)[1]
     # pop, not get: updates run concurrently, a double tap must not save the sets twice.
     pending = PENDING.pop(token, None)
@@ -443,6 +446,9 @@ async def save(cb: CallbackQuery, settings: Settings, sessionmaker: Sessionmaker
             text, reply_markup=keyboard(token, record=False, fact=offered is not None, cancel=False)
         )
     await cb.answer()
+    if pending.result.kind == "wellbeing" and cb.message:
+        # On a training day the plan may change: send it right after "Самочувствие сохранено ✅".
+        await send_after_wellbeing(cb.message, cb.from_user.id, settings, sessionmaker, llm)  # type: ignore[arg-type]
 
 
 @router.callback_query(F.data.startswith("remember:"))

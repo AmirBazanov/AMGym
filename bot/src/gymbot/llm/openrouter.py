@@ -218,4 +218,17 @@ class OpenRouterClient:
         return await self._over_routes(call, json_mode=True)
 
 
+    async def complete_json(self, messages: list[dict[str, str]]) -> dict:
+        """A JSON object from the model (json mode where supported), with the same route fallback.
+
+        Only "is it a JSON object" is checked here; the caller validates the content itself, so a wrong
+        but well-formed answer costs one request, not a retry on every route.
+        """
+
+        async def call(route: Route, json_mode: bool) -> dict:
+            return extract_json(_THINK.sub("", await self._complete(route, messages, json_mode)))
+
+        return await self._over_routes(call, json_mode=True)
+
+
 LLMClient = OpenRouterClient  # the provider-neutral name
