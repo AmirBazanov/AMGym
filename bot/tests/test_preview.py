@@ -52,3 +52,14 @@ def test_unknown_without_clarification_has_hint():
 
 def test_empty_workout_falls_back():
     assert "Не понял" in render_preview(ParseResult(kind="workout"))
+
+
+def test_echoed_clarification_is_replaced_with_hint():
+    r = ParseResult(kind="question", clarification="три штуки")
+    out = render_preview(r, source_text="  Три Штуки ")
+    assert "три штуки" not in out.lower() and "Не понял" in out
+
+
+def test_question_answer_shown_when_not_echo():
+    r = ParseResult(kind="question", clarification="Напиши, что съел или сделал.")
+    assert render_preview(r, source_text="привет") == "Напиши, что съел или сделал."

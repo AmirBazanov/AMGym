@@ -2,13 +2,35 @@
 
 Saving is behind a confirm button on purpose: free models make mistakes, and a wrong
 set silently written to the log ruins progress charts.
+
+Dialog context. Each user's last parsed exchange (texts, result, time) is kept in memory for
+CONTEXT_TTL and sent to the model as history with the next message, so "три штуки" after
+"три куриные самсы" corrects that record instead of being parsed on its own. Rules:
+- The next record either revises the previous one or is new (see is_revision: the model's
+  `revises` flag, or for food a common name, because free models set the flag unreliably).
+- A revision replaces the previous preview: the old "Сохранить" button stops working, otherwise
+  the user could save both the wrong and the corrected record. Its raw_text is the chain of texts
+  ("три куриные самсы\nтри штуки").
+- A new record leaves the previous preview alone (both can be saved), its raw_text is its own text,
+  and it becomes the only history for the next message.
+- A clarifying question from the model (kind="unknown") about a pending record keeps that record:
+  the model then sees both turns (the record and its question), and the next message still has to
+  pass is_revision to replace the preview. Without a record (the first message was unclear),
+  the answers just continue the chain.
+- raw_text keeps the whole chain; only the history sent to the model is cut to MAX_CHAIN messages.
+- Updates run concurrently: if the context changed or its preview was saved / cancelled while the
+  model was thinking, the parsed message is treated as a new record.
+- Save or cancel of the preview the context belongs to ends the dialog: the context is deleted,
+  so the next record is parsed fresh. Pressing an older preview does not touch a newer context.
+- Off-topic questions (kind="question") do not take part: the context stays as it was.
 """
 
 from __future__ import annotations
 
+import re
 import secrets
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -35,12 +57,48 @@ class Pending:
     sent_at: datetime  # when the message was sent: a set written at 23:59 belongs to that day
 
 
+@dataclass
+class Exchange:
+    """One user's dialog about one record (see the module docstring)."""
+
+    texts: list[str]  # every message behind `result`, oldest first; the whole chain goes to raw_text
+    result: ParseResult  # the record, or the model's clarifying question while there is no record yet
+    at: datetime  # send time of the last message (Telegram, UTC)
+    token: str | None = None  # preview of the record in PENDING
+    # Messages after the record that the model answered with a clarifying question, and that answer.
+    question: tuple[list[str], ParseResult] | None = None
+
+    @property
+    def raw_text(self) -> str:
+        return "\n".join(self.texts)
+
+    def all_texts(self) -> list[str]:
+        return [*self.texts, *(self.question[0] if self.question else [])]
+
+    def history(self) -> list[tuple[str, str]]:
+        """(user text, assistant JSON) turns for the model; only the last MAX_CHAIN messages of each."""
+        turns = [(self.texts, self.result), *([self.question] if self.question else [])]
+        return [("\n".join(texts[-MAX_CHAIN:]), result.model_dump_json()) for texts, result in turns]
+
+
 # Parsed messages waiting for "Сохранить". In memory: a restart just means pressing again after resending.
 PENDING: dict[str, Pending] = {}
 MAX_PENDING = 200
 
+# Last exchange per Telegram user id, see the module docstring.
+CONTEXT: dict[int, Exchange] = {}
+CONTEXT_TTL = timedelta(minutes=15)
+MAX_CHAIN = 3  # messages of a chain sent to the model as one turn; raw_text keeps them all
 
-def render_preview(result: ParseResult) -> str:
+HINT = "Не понял. Напиши, например: «присед 4х8 по 80»."
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.casefold().split()).strip(" .,!?…")
+
+
+def render_preview(result: ParseResult, source_text: str = "") -> str:
+    """Preview of a parsed message. `source_text` is the user's text: it is never echoed back."""
     if result.kind == "workout" and result.exercises:
         lines = []
         for ex in result.exercises:
@@ -59,7 +117,55 @@ def render_preview(result: ParseResult) -> str:
         ]
         total = sum(f.kcal for f in result.foods)
         return f"Записать еду? Всего {total:.0f} ккал\n" + "\n".join(lines)
-    return result.clarification or "Не понял. Напиши, например: «присед 4х8 по 80»."
+    answer = (result.clarification or "").strip()
+    if not answer or _norm(answer) == _norm(source_text):
+        return HINT
+    return answer
+
+
+_PIECES = re.compile(r",?\s*\d+\s*шт\.?$")
+
+
+def _names(result: ParseResult) -> set[str]:
+    if result.kind == "workout":
+        raw = [e.exercise for e in result.exercises]
+    elif result.kind == "food":
+        raw = [f.description for f in result.foods]
+    else:
+        return set()
+    return {_PIECES.sub("", " ".join(n.casefold().split())).strip() for n in raw} - {""}
+
+
+def is_revision(prev: ParseResult, new: ParseResult) -> bool:
+    """Whether `new` corrects `prev` rather than being a separate record.
+
+    The model's `revises` flag decides. For food a common name ("самса, 1 шт" -> "самса, 3 шт")
+    counts too. Not for workouts: the same exercise sent twice is usually the next set, not a fix.
+    """
+    if new.revises:
+        return True
+    return prev.kind == new.kind == "food" and bool(_names(prev) & _names(new))
+
+
+def recent_exchange(user_id: int, now: datetime) -> Exchange | None:
+    ex = CONTEXT.get(user_id)
+    if ex is not None and now - ex.at > CONTEXT_TTL:
+        del CONTEXT[user_id]
+        return None
+    return ex
+
+
+def _remember(user_id: int, ex: Exchange) -> None:
+    CONTEXT.pop(user_id, None)  # re-insert: dict order = eviction order
+    if len(CONTEXT) >= MAX_PENDING:
+        CONTEXT.pop(next(iter(CONTEXT)))
+    CONTEXT[user_id] = ex
+
+
+def _forget(user_id: int, token: str) -> None:
+    ex = CONTEXT.get(user_id)
+    if ex is not None and ex.token == token:
+        del CONTEXT[user_id]
 
 
 def confirm_kb(token: str) -> InlineKeyboardMarkup:
@@ -74,31 +180,63 @@ def confirm_kb(token: str) -> InlineKeyboardMarkup:
 
 
 @router.message(F.text & ~F.text.startswith("/"))
-async def log_free_text(message: Message, settings: Settings, sessionmaker: Sessionmaker) -> None:
+async def log_free_text(
+    message: Message, settings: Settings, sessionmaker: Sessionmaker, llm: OpenRouterClient
+) -> None:
     text = message.text or ""
+    user_id = message.from_user.id  # type: ignore[union-attr]
     async with sessionmaker() as session:
         catalog = await exercise_catalog(session)
+    prev = recent_exchange(user_id, message.date)
     await message.bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
     try:
-        result = await OpenRouterClient(settings).parse_message(text, catalog)
+        result = await llm.parse_message(text, catalog, prev.history() if prev else None)
     except LLMError:
         await message.answer("Нейросеть сейчас недоступна, попробуй ещё раз чуть позже.")
         return
-    preview = render_preview(result)
-    savable = (result.kind == "workout" and result.exercises) or (result.kind == "food" and result.foods)
-    if not savable:
+    preview = render_preview(result, source_text=text)
+    if result.kind == "question":
         await message.answer(preview)
         return
+    # Updates are handled concurrently: while the model was thinking, the previous preview may have
+    # been saved, cancelled or replaced by another message. Then this is not its continuation.
+    if prev is not None and (CONTEXT.get(user_id) is not prev or (prev.token and prev.token not in PENDING)):
+        prev = None
+    savable = (result.kind == "workout" and result.exercises) or (result.kind == "food" and result.foods)
+    if not savable:  # the model asks a clarifying question
+        if prev is None:
+            exchange = Exchange([text], result, message.date)
+        elif prev.token:  # keep the record the question is about
+            asked = [*(prev.question[0] if prev.question else []), text]
+            exchange = Exchange(prev.texts, prev.result, message.date, prev.token, (asked, result))
+        else:  # no record yet: keep collecting the answers
+            exchange = Exchange([*prev.texts, text], result, message.date)
+        _remember(user_id, exchange)
+        await message.answer(preview)
+        return
+    texts = [text]
+    if prev is not None:
+        if prev.token is None:  # answers to the model's questions before any record
+            texts = [*prev.texts, text]
+        elif is_revision(prev.result, result):
+            PENDING.pop(prev.token, None)  # replaced by this preview, see the module docstring
+            texts = [*prev.all_texts(), text]
     if len(PENDING) >= MAX_PENDING:
         PENDING.pop(next(iter(PENDING)))
     token = secrets.token_hex(6)
-    PENDING[token] = Pending(message.from_user.id, result, text, message.date)  # type: ignore[union-attr]
+    exchange = Exchange(texts, result, message.date, token)
+    PENDING[token] = Pending(user_id, result, exchange.raw_text, message.date)
+    _remember(user_id, exchange)
     await message.answer(preview, reply_markup=confirm_kb(token))
 
 
 @router.callback_query(F.data.startswith("drop:"))
 async def drop(cb: CallbackQuery) -> None:
-    PENDING.pop((cb.data or "").split(":", 1)[1], None)
+    token = (cb.data or "").split(":", 1)[1]
+    pending = PENDING.get(token)
+    if pending is not None and pending.user_id == cb.from_user.id:
+        PENDING.pop(token, None)
+        _forget(cb.from_user.id, token)
     if cb.message:
         await cb.message.edit_text("Отменено.")  # type: ignore[union-attr]
     await cb.answer()
@@ -118,8 +256,10 @@ async def save(cb: CallbackQuery, settings: Settings, sessionmaker: Sessionmaker
     except Exception:
         PENDING[token] = pending  # let the user press again
         raise
+    _forget(cb.from_user.id, token)
     if cb.message:
-        await cb.message.edit_text(f"{render_preview(pending.result).removeprefix('Записать?')}\n\n{note}".strip())  # type: ignore[union-attr]
+        shown = re.sub(r"^Записать( еду)?\?\s*", "", render_preview(pending.result))
+        await cb.message.edit_text(f"{shown}\n\n{note}".strip())  # type: ignore[union-attr]
     await cb.answer()
 
 
@@ -141,6 +281,7 @@ async def _save(pending: Pending, cb: CallbackQuery, today: date, sessionmaker: 
                         fat_g=Decimal(str(f.fat_g)),
                         carbs_g=Decimal(str(f.carbs_g)),
                         raw_text=pending.raw_text,
+                        eaten_at=pending.sent_at,  # the message time, not the time of the tap
                     )
                 )
             note = "Еда сохранена ✅"

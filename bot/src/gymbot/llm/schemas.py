@@ -30,3 +30,4 @@ class ParseResult(BaseModel):
     exercises: list[ParsedExercise] = []
     foods: list[ParsedFood] = []
     clarification: str | None = Field(default=None, description="ask the user if something is ambiguous")
+    revises: bool = Field(default=False, description="the message corrects the previous record of the dialog")

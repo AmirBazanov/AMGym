@@ -19,6 +19,7 @@ from gymbot.config import Settings, get_settings
 from gymbot.db.migrate import upgrade_head
 from gymbot.db.session import make_engine
 from gymbot.handlers import common, log_text
+from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services.access import is_allowed
 from gymbot.services.programs import sync_programs
 from gymbot.services.users import get_or_create_user
@@ -65,12 +66,15 @@ async def setup_bot_ui(bot: Bot, settings: Settings) -> None:
         log.warning("MINIAPP_URL is empty: the Mini App button is not set")
 
 
-async def shutdown(dp: Dispatcher, polling: asyncio.Task[None], bot: Bot, engine: Any) -> None:
+async def shutdown(
+    dp: Dispatcher, polling: asyncio.Task[None], bot: Bot, engine: Any, llm: OpenRouterClient
+) -> None:
     with contextlib.suppress(RuntimeError):  # polling may already be stopped
         await dp.stop_polling()
     with contextlib.suppress(Exception, asyncio.CancelledError):
         await polling
     await bot.session.close()
+    await llm.aclose()
     await engine.dispose()
 
 
@@ -105,7 +109,9 @@ async def run() -> None:
         return
 
     bot = Bot(settings.bot_token)
-    dp = Dispatcher(settings=settings, sessionmaker=sessionmaker)
+    # One LLM client per process: it remembers which models reject response_format.
+    llm = OpenRouterClient(settings)
+    dp = Dispatcher(settings=settings, sessionmaker=sessionmaker, llm=llm)
     dp.update.outer_middleware(AllowedUsers())
     dp.include_routers(common.router, log_text.router)  # log_text last: it catches all text
     await setup_bot_ui(bot, settings)
@@ -115,7 +121,7 @@ async def run() -> None:
     try:
         await server.serve()  # returns on Ctrl+C (uvicorn handles the signals)
     finally:
-        await asyncio.shield(shutdown(dp, polling, bot, engine))
+        await asyncio.shield(shutdown(dp, polling, bot, engine, llm))
 
 
 if __name__ == "__main__":

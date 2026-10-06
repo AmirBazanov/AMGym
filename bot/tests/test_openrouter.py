@@ -7,6 +7,14 @@ from gymbot.config import Settings
 from gymbot.llm.openrouter import LLMError, OpenRouterClient, extract_json
 
 GOOD = {"kind": "unknown", "clarification": "что?"}
+NOVITA_400 = {
+    "error": {
+        "message": "Provider returned error",
+        "code": 400,
+        "metadata": {"raw": "Model x does not support feature: structured-outputs"},
+    }
+}
+CONTEXT_400 = {"error": {"message": "This endpoint's maximum context length is 8192 tokens", "code": 400}}
 
 
 def settings(**kw) -> Settings:
@@ -104,3 +112,77 @@ async def test_reasoning_field_used_when_content_empty():
         )
 
     assert (await client_with(handler).parse_message("hi", [])).kind == "unknown"
+
+
+async def test_400_retries_same_model_without_response_format():
+    bodies = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        bodies.append(body)
+        return httpx.Response(400, json=NOVITA_400) if "response_format" in body else reply(json.dumps(GOOD))
+
+    c = client_with(handler)
+    assert (await c.parse_message("hi", [])).kind == "unknown"
+    assert [b["model"] for b in bodies] == ["m1", "m1"]
+    assert "response_format" in bodies[0] and "response_format" not in bodies[1]
+
+    # The client remembers that m1 rejects json mode and skips it next time.
+    assert (await c.parse_message("hi", [])).kind == "unknown"
+    assert len(bodies) == 3 and bodies[2]["model"] == "m1" and "response_format" not in bodies[2]
+
+
+async def test_400_without_response_format_moves_to_next_model():
+    models = []
+
+    def handler(req):
+        m = json.loads(req.content)["model"]
+        models.append(m)
+        return httpx.Response(400) if m == "m1" else reply(json.dumps(GOOD))
+
+    assert (await client_with(handler).parse_message("hi", [])).kind == "unknown"
+    assert models == ["m1", "m2"]  # a 400 without a word about json mode: straight to the next model
+
+
+async def test_400_on_json_mode_then_400_without_moves_on():
+    models = []
+
+    def handler(req):
+        m = json.loads(req.content)["model"]
+        models.append(m)
+        return httpx.Response(400, json=NOVITA_400) if m == "m1" else reply(json.dumps(GOOD))
+
+    assert (await client_with(handler).parse_message("hi", [])).kind == "unknown"
+    assert models == ["m1", "m1", "m2"]  # with json mode, without, then next model
+
+
+async def test_other_400_keeps_json_mode():
+    bodies = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        bodies.append(body)
+        return httpx.Response(400, json=CONTEXT_400) if body["model"] == "m1" else reply(json.dumps(GOOD))
+
+    c = client_with(handler)
+    await c.parse_message("hi", [])
+    await c.parse_message("hi", [])
+    m1 = [b for b in bodies if b["model"] == "m1"]
+    assert len(m1) == 2 and all("response_format" in b for b in m1)
+
+
+async def test_history_is_sent_before_new_text():
+    bodies = []
+
+    def handler(req):
+        bodies.append(json.loads(req.content))
+        return reply(json.dumps(GOOD))
+
+    await client_with(handler).parse_message("три штуки", [], history=[("три самсы", '{"kind":"food"}')])
+    assert [m["content"] for m in bodies[0]["messages"][-3:]] == ["три самсы", '{"kind":"food"}', "три штуки"]
+
+
+async def test_aclose_closes_http():
+    c = client_with(lambda req: reply(json.dumps(GOOD)))
+    await c.aclose()
+    assert c.http.is_closed
