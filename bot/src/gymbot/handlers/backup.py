@@ -22,6 +22,7 @@ router = Router(name="backup")
 OWNER_ONLY = "Копию базы получает только владелец."
 NOT_SQLITE = "Копии делаются только для базы SQLite, а здесь другая."
 FAILED = "Не получилось сделать копию базы, подробности в логе сервера."
+SENT_PRIVATELY = "Копию базы прислал в личные сообщения."
 
 
 @router.message(Command("backup"))
@@ -35,7 +36,11 @@ async def backup_now(message: Message, settings: Settings, sessionmaker: Session
     now = datetime.now(UTC)
     try:
         path = await backup.create(settings, now)
-        await backup.send(message.bot, message.chat.id, path, now, ZoneInfo(settings.timezone))  # type: ignore[arg-type]
+        # Always the owner's private chat (its id is the user id), never the chat the command came from:
+        # /backup typed in a group must not hand the whole database to the group.
+        await backup.send(message.bot, owner, path, now, ZoneInfo(settings.timezone))  # type: ignore[arg-type]
+        if message.chat.type != "private":
+            await message.answer(SENT_PRIVATELY)
     except backup.BackupUnavailable:
         await message.answer(NOT_SQLITE)
     except Exception:

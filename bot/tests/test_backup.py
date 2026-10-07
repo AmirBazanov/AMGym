@@ -354,7 +354,9 @@ def make_message(user_id: int, chat_id: int | None = None):
 
     msg = SimpleNamespace(
         from_user=SimpleNamespace(id=user_id, full_name="Amir"),
-        chat=SimpleNamespace(id=chat_id if chat_id is not None else user_id),
+        chat=SimpleNamespace(
+            id=chat_id if chat_id is not None else user_id, type="private" if chat_id in (None, user_id) else "group"
+        ),
         bot=FakeBot(),
         answer=answer,
     )
@@ -372,6 +374,16 @@ async def test_backup_command_sends_document_to_owner_without_marker(tmp_path, d
     assert answers == []
     assert not (tmp_path / "backups" / backup.MARKER).exists()
     assert len(list((tmp_path / "backups").glob(backup.PATTERN))) == 1
+
+
+async def test_backup_command_in_a_group_goes_to_the_owners_private_chat(tmp_path, db):
+    settings = make_settings(tmp_path, allowed_user_ids=[42], timezone="Europe/Moscow")
+    msg, answers = make_message(42, chat_id=-100500)  # the owner typed /backup in a group
+
+    await handler.backup_now(msg, settings, db)
+
+    assert [d[0] for d in msg.bot.documents] == [42]  # never the group
+    assert answers == [handler.SENT_PRIVATELY]
 
 
 @pytest.mark.parametrize("allowed", [[42], [42, 77]])
