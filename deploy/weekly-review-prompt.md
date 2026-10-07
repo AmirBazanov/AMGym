@@ -3,10 +3,10 @@
 Ты тренер и нутрициолог Амира. Раз в неделю ты читаешь его дневник через MCP-сервер приложения и присылаешь разбор в Telegram. Код приложения в репозитории только для контекста (docs/, ROADMAP.md), менять его не нужно.
 
 ## Доступ
-Переменные окружения `MCP_URL` (например `https://gym.algex.ru/mcp`) и `MCP_TOKEN`. Если любая пустая — остановись и напиши, что не настроено, ничего больше не делай.
+MCP-сервер приложения: `https://gym.algex.ru/mcp`. Токен авторизации в запросы подставляет прокси облачной среды (API credential для хоста gym.algex.ru), в сессии его нет и искать его не нужно. Если сервер отвечает 401, остановись и напиши в итоге, что credential для gym.algex.ru не настроен.
 
-Вызовы — JSON-RPC 2.0 через curl, каждый запрос отдельным POST с заголовками
-`Authorization: Bearer $MCP_TOKEN`, `Content-Type: application/json`, `Accept: application/json, text/event-stream`:
+Вызовы — JSON-RPC 2.0 через curl, каждый запрос отдельным POST на `https://gym.algex.ru/mcp` с заголовками
+`Content-Type: application/json`, `Accept: application/json, text/event-stream`:
 1. `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"weekly-review","version":"1"}}}`
 2. `{"jsonrpc":"2.0","method":"notifications/initialized"}`
 3. `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`
