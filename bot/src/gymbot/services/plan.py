@@ -260,8 +260,8 @@ def loads(place: str, exercise: str) -> bool:
 # (gymbot.services.advice.muscle_load). Checked in order: abs first ("подъём ног в висе"), then legs
 # ("сгибания ног" is not biceps, "становая тяга" is not back), triceps before chest ("французский жим лёжа").
 _GROUPS = [
-    ("abs", re.compile(r"пресс|скручивани|планк|подъем[а-я ]* ног[а-я ]* в вис")),
-    ("legs", re.compile(r"(?<![а-я])ног|квадр|бедр|ягодиц|присед|выпад|румынск|станов|гак|икр")),  # not "горизонтальНОГо"
+    ("abs", re.compile(r"(?<!лег )(?<!лег-)(?<!лег)пресс|скручивани|планк|подъем[а-я ]* ног[а-я ]* в вис")),
+    ("legs", re.compile(r"(?<![а-я])ног|квадр|бедр|ягодиц|присед|выпад|румынск|станов|гак|икр|лег[ -]?пресс")),  # not "горизонтальНОГо"
     ("triceps", re.compile(r"трицепс|французск|разгибани|жим узким")),
     ("biceps", re.compile(r"бицепс|сгибани|молотк|предплеч")),
     ("shoulders", re.compile(

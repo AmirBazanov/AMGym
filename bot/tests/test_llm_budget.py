@@ -36,9 +36,8 @@ def test_workout_like_text_gets_the_catalog(text):
 
 @pytest.mark.parametrize(
     "text",
-    ["съел 2 самсы", "плов, касушку и пол лепёшки", "яблоко 200 г", "запеканка", "спал 6 часов, сил мало",
-     "привет", "пожалуйста, запомни", "что сегодня?", "нет, четыре", "что подтянуть на следующей тренировке?",
-     "я на два дня уеду"],
+    ["плов, касушку и пол лепёшки", "запеканка", "привет", "пожалуйста, запомни", "что сегодня?",
+     "что подтянуть на следующей тренировке?", "сил мало, спал плохо"],
 )
 def test_other_text_goes_without_the_catalog(text):
     assert not needs_catalog(text, CATALOG)
@@ -49,7 +48,10 @@ def test_other_text_goes_without_the_catalog(text):
 
 def test_a_correction_of_a_workout_keeps_the_catalog():
     assert needs_catalog("нет, 65", CATALOG, [("жим 60", WORKOUT_JSON)])
-    assert not needs_catalog("нет, четыре", CATALOG, [("три самсы", '{"kind":"food","foods":[]}')])
+    # Any number keeps the catalog, food dialog or not: a few tokens are cheaper than a split history.
+    assert needs_catalog("нет, четыре", CATALOG, [("три самсы", '{"kind":"food","foods":[]}')])
+    for text in ["съел 2 самсы", "яблоко 200 г", "спал 6 часов, сил мало", "я на два дня уеду"]:
+        assert needs_catalog(text, CATALOG)
 
 
 def test_catalog_word_without_gym_words_gets_the_catalog():
@@ -133,3 +135,24 @@ async def test_workout_in_progress_is_always_fresh(db, settings, counted, monkey
 
 def test_one_cache_per_database(db):
     assert answer.cache_for(db) is answer.cache_for(db)
+
+
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize(
+    "text",
+    [
+        "икры 20 20 20",
+        "трапеция 40 кг 12 раз",
+        "хаммеры 14 кг 12 раз",
+        "бабочка 50 12 12 10",
+        "брусья 12 10 8",
+        "турник 10 8 6",
+        "Сделал хаммер двенадцать двенадцать десять",
+    ],
+)
+def test_any_numbers_keep_the_catalog(text):
+    from gymbot.llm.prompts import needs_catalog
+
+    assert needs_catalog(text, ["молотки", "сгибания с гантелями на бицепс"], None)

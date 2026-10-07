@@ -149,6 +149,11 @@ def needs_catalog(text: str, catalog: list[str], history: list[tuple[str, str]] 
     """Whether the parser needs the exercise catalog for `text`: it looks like sets, names a catalog word,
     or the dialog holds a workout record ("не 60, а 65" corrects it)."""
     key = " ".join(text.casefold().replace("ё", "е").split())
+    # Any number (digits or words) may be sets of an exercise the regex below doesn't know («брусья 12 10 8»,
+    # «хаммеры 14 кг 12 раз»): without the catalog the model would invent a name and the history would split.
+    # Only number-free messages (questions, small talk, food without amounts) save the catalog's tokens.
+    if re.search(r"\d", key) or re.search(rf"(?<![а-я]){_NUMBER}(?![а-я])", key):
+        return True
     if _WORKOUTISH.search(key):
         return True
     if any('"exercises":[{' in a.replace(" ", "") for _, a in history or []):

@@ -244,3 +244,11 @@ def test_muscle_group_mapping(name, group):
 def test_prompts_keep_recovering_groups_out_of_the_next_session(prompt):
     assert "«Восстанавливаются»" in prompt and "48 ч" in prompt and "не нагружай" in prompt.replace("не советуй нагружать", "не нагружай")
     assert "«Следующая тренировка по программе»" in prompt and "недогруженн" in prompt
+
+
+def test_leg_press_is_legs_not_abs():
+    from gymbot.services.plan import muscle_group
+
+    assert muscle_group("лег пресс") == "legs"
+    assert muscle_group("легпресс") == "legs"
+    assert muscle_group("скручивания на пресс") == "abs"

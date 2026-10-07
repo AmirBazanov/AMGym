@@ -398,16 +398,25 @@ async def build_context(
         exercises = []
     load = await muscle_load(session, user.id, today, now_utc, tz)
     program = await _program_line(session, user, today, today_plan=not for_answer)
-    tail = [load, *await wellbeing_lines(session, user, today, tz), *([program] if program else [])]
+    wellbeing = await wellbeing_lines(session, user, today, tz)
+    keep = [load, *([program] if program else [])]  # the prompts' rules rest on these: dropped last
     # Drop exercise lines (least recent first) until the summary fits.
     for n in range(min(len(exercises), MAX_EXERCISES), -1, -1):
         shown = exercises[:n]
         if len(exercises) > n:
             shown.append(f"- и ещё упражнений: {len(exercises) - n}")
-        text = "\n".join([*head, training, *shown, *tail])
+        text = "\n".join([*head, training, *shown, load, *wellbeing, *keep[1:]])
         if len(text) <= CONTEXT_MAX:
             return text
-    return text[: CONTEXT_MAX - 1] + "…"
+    # Still too long: whole lines go, facts first, then working weights and wellbeing; the muscle load and
+    # the program line (next training day) stay, and the rest is cut at a line end, never mid-line.
+    optional = [x for x in (facts + "." if facts else None, weights) if x]
+    head = [x for x in head if x not in optional]
+    lines = [*head, training, *wellbeing]
+    while lines and len("\n".join([*lines, *keep])) > CONTEXT_MAX:
+        lines.pop()
+    text = "\n".join([*lines, *keep])
+    return text if len(text) <= CONTEXT_MAX else text[: CONTEXT_MAX - 1] + "…"
 
 
 async def generate(
