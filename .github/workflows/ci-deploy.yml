@@ -16,7 +16,7 @@ jobs:
         env:
           BOT_TOKEN: "0:ci"
         run: |
-          uv sync -q
+          uv sync -q --extra dev
           uv run ruff check src tests
           uv run pytest -q
       - uses: actions/setup-node@v4
