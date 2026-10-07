@@ -447,10 +447,21 @@ async def _typing(message: Message) -> AsyncIterator[None]:
             await asyncio.sleep(TYPING_EVERY)
 
     task = asyncio.create_task(loop())
+    await asyncio.sleep(0)  # the first "typing" goes out before the work starts, even if the work never yields
     try:
         yield
     finally:
         task.cancel()
+
+
+def with_typing(message: Message, reparse: plausibility.Reparse) -> plausibility.Reparse:
+    """The plausibility repair round with "typing" on: it is a second model call the user waits for."""
+
+    async def run(correction: str) -> ParseResult:
+        async with _typing(message):
+            return await reparse(correction)
+
+    return run
 
 
 async def _diary_answer(
@@ -729,7 +740,7 @@ async def process_text(
     # "2 самсы = 2116 ккал": one repair round on an implausible estimate, then the reference (services/plausibility)
     result = await plausibility.review(
         result,
-        plausibility.parser_reparse(llm, text, result, history or None, known_all),
+        with_typing(message, plausibility.parser_reparse(llm, text, result, history or None, known_all)),
         exact=lambda f: product_cards.is_exact(f, products),
     )
     if staged is not None:

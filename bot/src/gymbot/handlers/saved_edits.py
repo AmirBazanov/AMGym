@@ -211,7 +211,8 @@ async def handle(
 
 
 async def _reestimate(
-    unit: se.Unit, text: str, tg_id: int, sessionmaker: Sessionmaker, llm: OpenRouterClient
+    unit: se.Unit, text: str, tg_id: int, sessionmaker: Sessionmaker, llm: OpenRouterClient,
+    typing: Callable[[], Awaitable[None]] | None = None,
 ) -> ParseResult | None:
     """The parser's revision of the saved record: it sees the record as the previous turn, like a preview."""
     async with sessionmaker() as session:
@@ -221,11 +222,14 @@ async def _reestimate(
     result = await llm.parse_message(text, catalog, history, known)
     if result.kind == "food" and unit.kind == "food":  # an implausible estimate: a repair round, then the reference
         products = await product_cards.parser_products(sessionmaker, tg_id, text)
-        result = await plausibility.review(
-            result,
-            plausibility.parser_reparse(llm, text, result, history, known),
-            exact=lambda f: product_cards.is_exact(f, products),
-        )
+        reparse = plausibility.parser_reparse(llm, text, result, history, known)
+
+        async def repair(correction: str) -> ParseResult:
+            if typing is not None:  # a second model call the user waits for
+                await typing()
+            return await reparse(correction)
+
+        result = await plausibility.review(result, repair, exact=lambda f: product_cards.is_exact(f, products))
     return se.edited(unit, result)
 
 
@@ -244,7 +248,7 @@ async def _offer(
                 return
             await typing()
             try:
-                after = await _reestimate(unit, text, tg_id, sessionmaker, llm)
+                after = await _reestimate(unit, text, tg_id, sessionmaker, llm, typing)
             except LLMError:
                 await send(UNAVAILABLE, None)
                 return

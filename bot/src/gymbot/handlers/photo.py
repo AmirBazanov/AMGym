@@ -29,7 +29,7 @@ from aiogram.types import Message, PhotoSize
 from gymbot.config import Settings
 from gymbot.db.session import Sessionmaker
 from gymbot.handlers import products as product_cards
-from gymbot.handlers.log_text import reply_with_result
+from gymbot.handlers.log_text import reply_with_result, with_typing
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.schemas import ParseResult, PhotoParse
 from gymbot.services import barcode, facts, plausibility
@@ -119,7 +119,7 @@ async def log_photo(
         # A plate with a packaged product beside it (a yogurt): the plate estimate stays, the product is offered
         # as a separate card; the caption's amount is the plate's, so the card asks.
         assert seen is not None
-        plate_result = await _plausible(seen.result, caption, llm, known)
+        plate_result = await _plausible(message, seen.result, caption, llm, known)
         await reply_with_result(
             message, history_text(caption), plate_result, settings, sessionmaker, llm,
             raw_text=raw_text, prefix=PREFIX, known=known,
@@ -145,7 +145,7 @@ async def log_photo(
     if not result.foods and not result.unknown_terms:
         await message.answer(pr.NOT_FOUND.format(code=code) if code else NO_FOOD)
         return
-    result = await _plausible(result, caption, llm, known)
+    result = await _plausible(message, result, caption, llm, known)
     await reply_with_result(
         message,
         history_text(caption),
@@ -159,11 +159,13 @@ async def log_photo(
     )
 
 
-async def _plausible(result: ParseResult, caption: str, llm: OpenRouterClient, known: list[str]) -> ParseResult:
+async def _plausible(
+    message: Message, result: ParseResult, caption: str, llm: OpenRouterClient, known: list[str]
+) -> ParseResult:
     """A plate estimate after the plausibility check (services/plausibility). The repair round goes over the text
     parser with the photo as the previous turn: resending the image would cost ~2K tokens of the shared quota."""
     reparse = plausibility.parser_reparse(llm, history_text(caption), result, None, known)
-    return await plausibility.review(result, reparse)
+    return await plausibility.review(result, with_typing(message, reparse))
 
 
 async def _vision(llm: OpenRouterClient, image_b64: str, caption: str, known: list[str]) -> PhotoParse | None:

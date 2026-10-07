@@ -95,8 +95,23 @@ def test_glossary_weights_match_the_prompt():
         ("хлебцы", None),
         ("хлеб с маслом", None),  # fat stem: density only
         ("банан в шоколаде", None),
-        ("яйцо и хлеб", None),  # two references
+        ("яйцо и хлеб", "яйцо"),  # the head word only
         ("куриная грудка", None),
+        # an ingredient is not the dish
+        ("борщ с хлебом", None),
+        ("суп с яйцом", None),
+        ("суп-лапша с яйцом", None),
+        ("пирог с яблоками", None),
+        ("шарлотка с яблоками", None),
+        ("оладьи с бананом", None),
+        ("чёрный хлеб", None),  # the head is not the first word: density only
+        # a qualifier that makes the head another food
+        ("сушёные яблоки", None),
+        ("яблоки сушёные", None),
+        ("перепелиные яйца, 10 шт", None),
+        ("яйца перепелиные, 10 шт", None),
+        ("шашлык из овощей", None),
+        ("яйцо, только белок", None),
     ],
 )
 def test_reference_matching(name, key):
@@ -392,6 +407,7 @@ async def test_incident_in_chat_repair_then_reference(settings, db):
     assert pending.raw_text == INCIDENT_TEXT  # the correction is not the user's text
     assert pending.result.foods[0].kcal == 600 and pending.result.revises is False
     assert log_text.CONTEXT[42].texts == [INCIDENT_TEXT]
+    assert msg.bot.send_chat_action.await_count >= 2  # "typing" is on again during the repair call
 
 
 async def test_incident_in_chat_repaired_by_the_model(settings, db):
@@ -412,6 +428,7 @@ async def test_plausible_chat_answer_costs_one_request(settings, db):
     llm.answers = [{"kind": "food", "foods": [NORMAL[2].model_dump(), NORMAL[4].model_dump()]}]
     msg = await send("плов каса и пол лепёшки", llm, settings, db)
     assert len(llm.bodies) == 1 and "Всего 865 ккал" in msg.answer.await_args.args[0]
+    assert msg.bot.send_chat_action.await_count == 1  # the one before the parser
 
 
 @pytest.mark.parametrize("saved", [True, False])
@@ -464,3 +481,94 @@ async def test_saved_edit_estimate_is_checked_too(settings, db):
     assert len(llm.bodies) == 3  # the record, the edit, one repair round
     text = edit.answer.await_args.args[0]
     assert text.startswith("Исправить?") and "600 ккал" in text and "Скорректировал по справочнику" in text
+
+
+# ---- review fixes: head word, reordered repairs, pieces words, drinks ----
+
+DISHES_WITH_INGREDIENTS = [
+    f("борщ с хлебом", 450, 300, p=12, fat=12, c=36),
+    f("суп с яйцом", 400, 200, p=10, fat=8, c=22),
+    f("суп-лапша с яйцом", 250, 150, p=7, fat=5, c=19),
+    f("пирог с яблоками", 150, 390, p=6, fat=15, c=57),
+    f("шарлотка с яблоками", 150, 330, p=6, fat=8, c=58),
+    f("сушёные яблоки", 50, 125, p=1, fat=0.2, c=30),
+    f("оладьи с бананом", 200, 460, p=12, fat=16, c=67),
+    f("перепелиные яйца, 10 шт", 100, 160, p=13, fat=11, c=0.6),
+    f("перепелиные яйца, 10 шт", None, 160, p=13, fat=11, c=0.6),
+    f("шашлык из овощей", 300, 100, p=4, fat=2, c=16),
+]
+
+
+@pytest.mark.parametrize("food", DISHES_WITH_INGREDIENTS, ids=lambda x: x.description)
+async def test_ingredient_or_qualifier_never_brings_a_reference(food):
+    assert pl.flags(food) == []
+
+    async def reparse(correction):
+        raise AssertionError("nothing to repair")
+
+    result = foods_result(food)
+    assert await pl.review(result, reparse) is result
+
+
+def test_density_is_still_checked_without_a_reference():
+    assert ("density", True) in kinds(f("суп с яйцом", 400, 3000, p=10, fat=320, c=20))
+
+
+async def test_reordered_repair_is_matched_by_name_not_position():
+    tea = f("чай", 200, 2, c=0.5)
+
+    async def reparse(correction):
+        good = {**INCIDENT, "kcal": 620, "protein_g": 22, "fat_g": 32, "carbs_g": 61}
+        return foods_result(f("чай", 200, 0), good)
+
+    out = await pl.review(foods_result(INCIDENT, tea), reparse)
+    assert [(x.description, x.kcal) for x in out.foods] == [("самса, 2 шт", pytest.approx(620, abs=10)), ("чай", 2)]
+    assert out.note is None
+
+
+async def test_repair_without_the_flagged_item_is_unusable():
+    tea = f("чай", 200, 2, c=0.5)
+
+    async def reparse(correction):  # the samsa is gone: a cutlet in its place must not lend its numbers
+        return foods_result(tea, f("котлета", 240, 600, p=40, fat=40, c=20))
+
+    out = await pl.review(foods_result(INCIDENT, tea), reparse)
+    assert [x.kcal for x in out.foods] == [600, 2]
+    assert "Скорректировал по справочнику" in out.note
+
+
+@pytest.mark.parametrize(
+    ("food", "grams", "kcal"),
+    [
+        (f("шашлык, 3 палочки", None, 2000, p=80, fat=180, c=20), 300, 750),
+        (f("хлеб, 3 куска", None, 1000, p=30, fat=30, c=180), 90, 225),
+        (f("самса, 2 штуки", None, 2000, p=60, fat=150, c=180), 240, 600),
+        (f("плов, 2 порции", None, 3000, p=100, fat=140, c=400), 600, 1080),
+    ],
+)
+async def test_pieces_words_scale_the_reference(food, grams, kcal):
+    assert pl.stated(food)
+    out = await pl.review(foods_result(food), None)
+    assert (out.foods[0].grams, out.foods[0].kcal) == (grams, kcal)
+
+
+def test_pieces_words_do_not_flag_normal_answers():
+    assert pl.flags(f("шашлык, 3 палочки", None, 780, p=60, fat=56, c=4)) == []
+    assert pl.flags(f("хлеб, 2 куска", None, 150, p=5, fat=2, c=28)) == []
+    assert pl.flags(f("плов, 2 порции", None, 1100, p=36, fat=42, c=138)) == []
+
+
+@pytest.mark.parametrize("name", ["лимонад без сахара", "морс", "компот", "квас", "айран"])
+def test_more_drinks_may_be_about_zero(name):
+    assert pl.flags(f(name, 500, 5, c=1.25)) == []
+
+
+def test_kefir_and_katyk_are_not_zero_calorie_drinks():
+    assert ("density", False) in kinds(f("кефир", 500, 5, c=1.25))
+    assert ("reference", False) in kinds(f("катык", 500, 5, c=1.25))
+
+
+def test_fermented_milk_drinks_normal_values():
+    assert pl.flags(f("кефир 1%", 250, 100, p=7.5, fat=2.5, c=10)) == []
+    assert pl.flags(f("катык", 200, 120, p=6, fat=6.4, c=8)) == []
+    assert pl.flags(f("айран", 300, 75, p=4, fat=3, c=6)) == []

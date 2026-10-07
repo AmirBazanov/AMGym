@@ -8,16 +8,18 @@ and foods that copy a saved product's exact numbers (`exact`) are never touched.
    - Density (needs grams): kcal per gram above DENSITY_MAX (FAT_DENSITY_MAX for fats, nuts, seeds, chocolate,
      sweets by name stems) or below DENSITY_MIN (drinks, water, broth may be ~0); P+F+C over MACROS_MAX g per g.
      Tiny items are never flagged: the excess has to be more than SLACK_KCAL (SLACK_G for macros).
-   - Reference (`REFERENCES`, the parser prompt's portions glossary plus a few common foods): when the name
-     matches exactly one reference, kcal above REF_HIGH x or below 1/REF_LOW of the reference for the amount.
+   - Reference (`REFERENCES`, the parser prompt's portions glossary plus a few common foods): when the head word
+     (the first one: the parser writes "самса с курицей, 2 шт") matches a reference, kcal above REF_HIGH x or
+     below 1/REF_LOW of the reference for the amount. An ingredient never counts ("борщ с хлебом", "суп с
+     яйцом"), nor does a head with a qualifier that makes it another food ("яйца перепелиные", "шашлык из
+     овощей": MODIFIER_STEMS) or a fat or sweet stem ("хлеб с маслом"): those get the density check only.
      The amount is the food's grams (users state their own piece sizes, "манты по 90 г", "17 штук, 250 г"),
-     else N pieces from ", N шт" in the description times the reference piece, else one portion. A name that
-     also holds a fat or sweet stem ("хлеб с маслом", "банан в шоколаде") or two references is checked for
-     density only.
+     else N pieces from ", N шт" / "палочки" / "куска" / "порции" times the reference piece, else one portion.
 2. `review(result, reparse)`: on any flag, one repair round: `reparse(correction)` asks the parser again with
    the flagged answer as the previous turn and a short correction («Оценка «самса, 2 шт — 2116 ккал»
    неправдоподобна: обычно самса ≈ 300 ккал за шт (120 г). Пересчитай КБЖУ.»). A flagged item that the repair
-   fixed takes the repaired numbers; one still flagged (or a failed repair) takes the reference scaled to its
+   fixed takes the repaired numbers (repaired items are matched by head word, never by position: a reordered
+   answer must not give the samsa the tea's numbers); one still flagged (or a failed repair) takes the reference scaled to its
    amount (grams or pieces, never an assumed portion: `stated`) with "Скорректировал по справочнику: …" in the
    note, else keeps the numbers with "Проверь калории —
    оценка выглядит завышенной / заниженной (…)". Saving is never blocked. Everything else of the original
@@ -58,9 +60,16 @@ FAT_STEMS = (
 DRINK_STEMS = (
     "вод", "чай", "чая", "чаю", "кофе", "американо", "эспрессо", "минерал", "газиров", "кола", "пепси", "зеро",
     "zero", "лайт", "light", "диет", "бульон", "лед", "льда", "энергетик", "стеви", "подсласт", "сукралоз",
+    "лимонад", "морс", "компот", "квас", "айран", "дюшес",  # not кефир, катык: never ~0
+)
+# Words after the head that make it another food than its reference ("яйца перепелиные", "яблоки сушёные",
+# "шашлык из овощей", "яйцо, только белок").
+MODIFIER_STEMS = (
+    "перепел", "сушен", "сушк", "вялен", "овощ", "гриб", "белок", "белк", "желт", "сок", "пюре", "джем",
+    "варень", "повидл", "цукат", "мини",
 )
 _WORD = re.compile(r"[a-zа-я]+")
-_PIECES = re.compile(r"(\d+(?:[.,]\d+)?)\s*шт\b")
+_PIECES = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:шт|штук|палоч|куск|кусоч|порци)")
 
 
 @dataclass(frozen=True)
@@ -132,17 +141,33 @@ def _has_stem(ws: list[str], stems: tuple[str, ...]) -> bool:
     return any(w.startswith(s) for w in ws for s in stems)
 
 
-def reference_for(description: str) -> Reference | None:
-    """The one reference the name matches; None for none, several, or a name with a fat or sweet stem."""
+def head(description: str) -> str:
+    """The head word of a description: the first one ("самса с курицей, 2 шт" -> "самса")."""
     ws = words(description)
-    found = {ref for ref, rx in _REF_PATTERNS if any(rx.fullmatch(w) for w in ws)}
-    if len(found) != 1 or _has_stem(ws, FAT_STEMS):
+    return ws[0] if ws else ""
+
+
+def same_head(a: str, b: str) -> bool:
+    """Two descriptions name the same food: their head words share a stem ("самса" / "самсы", "яйцо" / "яйца")."""
+    x, y = head(a), head(b)
+    if not x or not y:
+        return False
+    n = max(3, min(5, min(len(x), len(y)) - 1))
+    return x[:n] == y[:n]
+
+
+def reference_for(description: str) -> Reference | None:
+    """The reference of the head word; None for none, or when another word makes it another food (a fat or
+    sweet stem, MODIFIER_STEMS). Other words never match: "суп с яйцом" is not an egg."""
+    ws = words(description)
+    if not ws or _has_stem(ws, FAT_STEMS) or _has_stem(ws[1:], MODIFIER_STEMS):
         return None
-    return found.pop()
+    found = [ref for ref, rx in _REF_PATTERNS if rx.fullmatch(ws[0])]
+    return found[0] if len(found) == 1 else None
 
 
 def pieces(description: str) -> float | None:
-    """N of ", N шт" in the description (the parser's convention for counted foods)."""
+    """N of ", N шт" (the parser's convention for counted foods), "3 палочки", "2 куска", "2 порции"."""
     m = _PIECES.search(description.casefold())
     return float(m.group(1).replace(",", ".")) if m else None
 
@@ -236,6 +261,12 @@ def _log(fs: list[Flag], stage: str) -> None:
 Reparse = Callable[[str], Awaitable[ParseResult]]
 
 
+def _match(food: ParsedFood, repaired: list[ParsedFood], used: set[int]) -> int | None:
+    """The repaired item for `food`: the first unused one with the same head word, else None (never by position:
+    "[самса, чай]" may come back as "[чай, самса]")."""
+    return next((j for j, r in enumerate(repaired) if j not in used and same_head(r.description, food.description)), None)
+
+
 async def review(
     result: ParseResult, reparse: Reparse | None, exact: Callable[[ParsedFood], bool] | None = None
 ) -> ParseResult:
@@ -258,7 +289,7 @@ async def review(
         except LLMError as e:
             log.warning("food plausibility: repair failed: %s", type(e).__name__)
         else:
-            if again.kind == "food" and len(again.foods) == len(result.foods):
+            if again.kind == "food" and again.foods:
                 repaired = again.foods
             else:
                 log.info("food plausibility: repair answer unusable (%s, %s foods)", again.kind, len(again.foods))
@@ -266,16 +297,21 @@ async def review(
     notes: list[str] = []
     high: list[str] = []
     low: list[str] = []
-    for i, (food, fs) in enumerate(zip(result.foods, checked, strict=True)):
+    used: set[int] = set()
+    for food, fs in zip(result.foods, checked, strict=True):
         if not fs:
             foods.append(food)
             continue
-        if repaired and not (still := flags(repaired[i])):
-            log.info("food plausibility: repaired")
-            foods.append(repaired[i].model_copy(update={"description": food.description}))
-            continue
-        if repaired:
+        j = _match(food, repaired, used)
+        if j is not None:
+            used.add(j)
+            if not (still := flags(repaired[j])):
+                log.info("food plausibility: repaired")
+                foods.append(repaired[j].model_copy(update={"description": food.description}))
+                continue
             _log(still, "after repair")
+        elif repaired:
+            log.info("food plausibility: repair has no matching item")
         ref = next((f.ref for f in fs if f.ref is not None), None) or reference_for(food.description)
         if ref is not None and stated(food):
             fixed = from_reference(food, ref)
