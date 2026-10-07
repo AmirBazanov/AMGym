@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[3]  # repo root: bot/src/gymbot/config.p
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=(ROOT / ".env", ".env"), extra="ignore")
+    # .env.local (gitignored) overrides .env: a test bot token for local runs while the real one lives on the server.
+    model_config = SettingsConfigDict(env_file=(ROOT / ".env", ".env", ROOT / ".env.local"), extra="ignore")
 
     bot_token: str
     # Telegram user ids allowed to use the bot (personal app). Empty = allow everyone.
