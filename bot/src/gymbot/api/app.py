@@ -1,22 +1,26 @@
 """HTTP API for the Mini App, plus the built Mini App itself (miniapp/dist) on the same port."""
 
 
+import logging
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
+from aiogram import Bot
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.routing import BaseRoute
 
 from gymbot.api.auth import InitDataError, TelegramUser, validate_init_data
 from gymbot.config import Settings
 from gymbot.db.models import FoodEntry, Reminder, User, UserFact, UserProgram, WellbeingEntry
 from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import OpenRouterClient
+from gymbot.mcp_server import MCP_PATH, BearerGuard, mcp_http
 from gymbot.services import facts as fx
 from gymbot.services import nutrition as nut
 from gymbot.services import plan as day_plan
@@ -27,6 +31,8 @@ from gymbot.services import workouts as ws
 from gymbot.services.access import is_allowed
 from gymbot.services.programs import load_program
 from gymbot.services.users import active_program, get_or_create_user, set_program
+
+log = logging.getLogger(__name__)
 
 NUTRITION_MIN_DATE = date(2000, 1, 1)
 
@@ -57,8 +63,7 @@ class SettingsIn(BaseModel):
     profile: prof.ProfileIn | None = None
 
 
-# [0-9], not \d: pydantic's regex engine treats \d as any Unicode digit.
-TIME_PATTERN = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"
+TIME_PATTERN = rem.TIME_PATTERN
 ReminderKind = Literal["text", "nutrition", "advice", "checkin"]  # = rem.KINDS
 Weekday = Annotated[int, Field(ge=0, le=6)]  # 0=Mon..6=Sun in TIMEZONE
 
@@ -123,12 +128,10 @@ def reminder_out(r: Reminder) -> ReminderOut:
 
 def normalize_reminder_text(kind: str, text: str | None) -> str | None:
     """kind=text needs 1..200 characters of text; the other kinds build their text at send time."""
-    if kind != "text":
-        return None
-    text = (text or "").strip()
-    if not text:
-        raise HTTPException(422, "text is required for kind=text")
-    return text
+    try:
+        return rem.reminder_text(kind, text)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
 
 
 def create_app(
@@ -136,13 +139,14 @@ def create_app(
     sessionmaker: Sessionmaker,
     llm: OpenRouterClient | None = None,
     routers: Sequence[APIRouter] = (),
+    bot: Bot | None = None,
 ) -> FastAPI:
     """`llm` is the process-wide client (main.py shares it with the bot); without it one is made on first use.
+    `bot` is the running bot (None with RUN_BOT=false); the MCP tool send_message uses it.
 
     `routers` are extra routes (the Telegram webhook); they go before the Mini App mount at "/",
     which would otherwise swallow them.
     """
-    app = FastAPI(title="GymAPP API", docs_url="/api/docs", openapi_url="/api/openapi.json")
     tz = ZoneInfo(settings.timezone)
     clients: list[OpenRouterClient] = [llm] if llm is not None else []
 
@@ -150,6 +154,17 @@ def create_app(
         if not clients:
             clients.append(OpenRouterClient(settings))
         return clients[0]
+
+    mcp_routes: list[BaseRoute] = []
+    mcp_lifespan = None
+    if settings.mcp_token:
+        mcp_routes, mcp_lifespan = mcp_http(settings, sessionmaker, get_llm, bot)
+        log.info("MCP server on %s (Bearer token from MCP_TOKEN)", MCP_PATH)
+    else:
+        log.info("MCP_TOKEN is empty: %s is not mounted", MCP_PATH)
+    app = FastAPI(
+        title="GymAPP API", docs_url="/api/docs", openapi_url="/api/openapi.json", lifespan=mcp_lifespan
+    )
 
     async def get_session() -> AsyncIterator[AsyncSession]:
         async with sessionmaker() as session:
@@ -436,6 +451,10 @@ def create_app(
 
     for router in routers:
         app.include_router(router)
+
+    app.router.routes.extend(mcp_routes)  # before the Mini App mount at "/", which swallows every path
+    if settings.mcp_token:
+        app.add_middleware(BearerGuard, token=settings.mcp_token)
 
     if settings.miniapp_dist.is_dir():  # last: the mount at "/" catches every path
         app.mount("/", StaticFiles(directory=settings.miniapp_dist, html=True), name="miniapp")

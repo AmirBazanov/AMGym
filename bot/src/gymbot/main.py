@@ -162,7 +162,7 @@ async def run() -> None:
 
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(settings, sessionmaker, llm, routers),
+            create_app(settings, sessionmaker, llm, routers, bot=bot),
             host=settings.api_host,
             port=settings.api_port,
             log_level="info",

@@ -54,6 +54,28 @@ journalctl -u gymbot -n 30 --no-pager           # "webhook -> https://gym.algex.
 
 Вебхук при остановке сервиса не снимается: пока сервис перезапускается, Telegram копит апдейты и дошлёт их. Локальный запуск в режиме polling с тем же токеном снимает вебхук сервера (в логе будет предупреждение), поэтому локально используй отдельного тестового бота; если всё же запускал с боевым токеном, перезапусти сервис на сервере: `sudo systemctl restart gymbot`.
 
+## MCP
+
+Приложение отдаёт MCP-сервер на `https://gym.algex.ru/mcp` (Streamable HTTP, без сессий, ответы JSON) — через него Claude читает дневник и делает узкий набор записей от имени владельца: норма КБЖУ, факты, напоминания, план дня, заметки, сообщение в Telegram. Шелла и произвольной записи в базу нет; `query` — только SELECT на read-only подключении. Код: `bot/src/gymbot/mcp_server.py`, подробности SDK: `docs/reference/mcp-python-sdk.md`.
+
+1. Включить: в `~/amgym/.env` на сервере `MCP_TOKEN=<вывод openssl rand -hex 32>` и `sudo systemctl restart gymbot`. Пустой `MCP_TOKEN` — маршрута `/mcp` нет (в логе строка `MCP_TOKEN is empty: /mcp is not mounted`). Токен даёт полный доступ к дневнику: только в `.env` и в настройках клиента, не в git и не в URL.
+2. Проверка (ждём 401 без токена и список инструментов с ним; `MCP_TOKEN` — переменная оболочки с токеном):
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://gym.algex.ru/mcp        # 401
+   curl -s -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+     -H "Authorization: Bearer $MCP_TOKEN" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://gym.algex.ru/mcp
+   ```
+3. Claude Code (на своём компьютере):
+   ```bash
+   claude mcp add --transport http amgym https://gym.algex.ru/mcp --header "Authorization: Bearer <token>"
+   claude mcp list    # или /mcp внутри Claude Code
+   ```
+   По умолчанию область `local` (только у тебя, `~/.claude.json`). В `.mcp.json` репозитория токен не писать, только через переменную: `"headers": {"Authorization": "Bearer ${GYM_MCP_TOKEN}"}`.
+4. Claude.ai (custom connectors): запросы идут из облака Anthropic, URL — ровно `https://gym.algex.ru/mcp`, без слэша в конце. Статический заголовок задаётся в разделе «Request headers» (бета, доступен не всем организациям): поле `Authorization`, значение `Bearer <token>` целиком. Если такого раздела нет, этот сервер к Claude.ai не подключить: вариант «No sign-in» открыл бы дневник любому, кто знает URL, а OAuth сервер не поддерживает. Токен в query-строке (`?token=`) сервер не принимает.
+
+Caddy и туннель Cloudflare менять не нужно: ответы — обычный JSON на POST, без долгих SSE-потоков; оба пробрасывают `Host` как есть (у туннеля — пока в Public Hostname не задан свой HTTP Host Header), и приложение пускает на `/mcp` только `Host` из `PUBLIC_URL` и локальные адреса (иначе 421). После смены домена в `PUBLIC_URL` нужен рестарт сервиса.
+
 ## CI/CD (GitHub Actions)
 
 `.github/workflows/ci-deploy.yml`: на каждый pull request и пуш в `main` гоняются проверки бота и мини-аппа; после зелёных проверок пуш в `main` деплоит на сервер по SSH (`bash ~/amgym/deploy/setup-ec2.sh main` и рестарт сервиса).

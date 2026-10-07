@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     # so a single HTTPS tunnel is enough for Telegram.
     api_host: str = "127.0.0.1"  # the tunnel connects locally; no need to listen on the LAN
     api_port: int = 8000
+    # Static Bearer token for the MCP endpoint /mcp (Claude Code etc.); empty = MCP is not mounted.
+    mcp_token: str = ""
     miniapp_dist: Path = ROOT / "miniapp" / "dist"
     programs_dir: Path = ROOT / "data" / "programs"
     # Local browser testing only: requests without Telegram initData act as this Telegram user.

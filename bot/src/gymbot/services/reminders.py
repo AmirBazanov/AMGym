@@ -51,6 +51,9 @@ GRACE = timedelta(minutes=30)
 CHECK_SECONDS = 30
 MAX_PER_USER = 20
 KINDS = ("text", "nutrition", "advice", "checkin")
+TEXT_MAX = 200
+# [0-9], not \d: pydantic's regex engine treats \d as any Unicode digit.
+TIME_PATTERN = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"
 ADVICE_RETRY = timedelta(minutes=10)
 # reminder id -> earliest next advice attempt (UTC) after an LLM failure. Lost on restart, which is fine.
 _advice_retry_at: dict[int, datetime] = {}
@@ -70,6 +73,18 @@ def hhmm_to_minute(value: str) -> int:
     """'09:30' -> 570. The format is validated by the API schema."""
     h, m = value.split(":")
     return int(h) * 60 + int(m)
+
+
+def reminder_text(kind: str, text: str | None) -> str | None:
+    """kind=text needs 1..TEXT_MAX characters of text (ValueError otherwise); other kinds build theirs at send time."""
+    if kind != "text":
+        return None
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("text is required for kind=text")
+    if len(text) > TEXT_MAX:
+        raise ValueError(f"text is longer than {TEXT_MAX}")
+    return text
 
 
 def due_at(day: date, minute: int, tz: ZoneInfo) -> datetime:

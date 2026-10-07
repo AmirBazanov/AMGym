@@ -16,3 +16,14 @@ async def is_allowed(session: AsyncSession, settings: Settings, telegram_id: int
         return telegram_id in settings.allowed_user_ids
     owner = await session.scalar(select(User.telegram_id).order_by(User.id).limit(1))
     return owner is None or owner == telegram_id
+
+
+async def owner_user(session: AsyncSession, settings: Settings) -> User | None:
+    """The owner's row, read only: the first user ALLOWED_USER_IDS lets in, else the first user at all.
+
+    Same rule as `is_allowed`; None while the owner has not reached the bot or the Mini App yet.
+    """
+    stmt = select(User).order_by(User.id).limit(1)
+    if settings.allowed_user_ids:
+        stmt = stmt.where(User.telegram_id.in_(settings.allowed_user_ids))
+    return await session.scalar(stmt)
