@@ -23,7 +23,7 @@ from gymbot.api.webhook import WEBHOOK_PATH, WebhookHandler
 from gymbot.config import Settings, get_settings
 from gymbot.db.migrate import upgrade_head
 from gymbot.db.session import make_engine
-from gymbot.handlers import advice, backup, chat_settings, common, facts, log_text, plan, voice
+from gymbot.handlers import advice, backup, chat_settings, common, facts, log_text, photo, plan, voice
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services import baselines, live
 from gymbot.services.access import is_allowed
@@ -179,6 +179,7 @@ async def run() -> None:
             plan.router,
             chat_settings.router,
             voice.router,
+            photo.router,
             log_text.router,
         )  # log_text last: it catches all text
         if settings.bot_mode == "webhook":

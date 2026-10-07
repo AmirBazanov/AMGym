@@ -12,7 +12,12 @@ A route that answered 429 is skipped until its limit resets (`cooldown_after`): 
 RATE_LIMIT_COOLDOWN. Groq's per-minute token limit refills in seconds, so a blanket minute would send a whole
 minute of messages to the weaker OpenRouter models. When every route failed and the soonest rate-limited one
 frees up within MAX_WAIT seconds, it is tried once more after that wait instead of failing.
-400/401/402/403/404/413 also move straight to the next route. Token usage per call is logged (no content).
+400/401/402/403/404/413 also move straight to the next route, and so does a timeout (a hung free endpoint
+would only hang again). Token usage per call is logged (no content, never an image).
+
+Food photos (`parse_photo`) go over their own routes (`vision_routes_from`: VISION_MODELS on Groq, then
+OPENROUTER_VISION_MODELS) with a short prompt and a VISION_TIMEOUT per request; the text routes reject images.
+A model shared by both lists (qwen on Groq) shares its 429 cooldown too, as it shares the quota.
 """
 
 from __future__ import annotations
@@ -24,13 +29,13 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import httpx
 from pydantic import ValidationError
 
 from gymbot.config import Settings
-from gymbot.llm.prompts import build_messages
+from gymbot.llm.prompts import build_messages, build_vision_messages
 from gymbot.llm.schemas import ParseResult
 
 log = logging.getLogger(__name__)
@@ -86,6 +91,7 @@ MIN_COOLDOWN = 1.0
 MAX_COOLDOWN = 24 * 3600.0  # a daily quota may reset in hours: retrying every minute would only hit it again
 MAX_WAIT = 3.0  # seconds worth waiting for a rate-limited route when every route failed
 NEXT_ROUTE_STATUSES = (400, 401, 402, 403, 404, 413, 429)  # bad request / key / quota / model gone / too big
+VISION_TIMEOUT = 20.0  # seconds per photo request: Groq answers in 1-2 s, a stuck free endpoint must not hold the user
 
 
 _DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
@@ -148,6 +154,19 @@ def routes_from(settings: Settings) -> list[Route]:
     return routes
 
 
+def vision_routes_from(settings: Settings) -> list[Route]:
+    """Routes that accept images: VISION_MODELS on Groq first, then OPENROUTER_VISION_MODELS (same keys)."""
+    routes: list[Route] = []
+    if groq_key := settings.groq_key:
+        routes += [Route("groq", settings.groq_base_url, groq_key, m) for m in settings.vision_models]
+    if settings.openrouter_api_key:
+        routes += [
+            Route("openrouter", settings.openrouter_base_url, settings.openrouter_api_key, m)
+            for m in settings.openrouter_vision_models
+        ]
+    return routes
+
+
 class _EmptyAnswer(LLMError):
     """The model answered with nothing usable; retrying the same route rarely helps."""
 
@@ -168,6 +187,7 @@ class OpenRouterClient:
         self.s = settings
         self.http = http or httpx.AsyncClient(timeout=60)
         self.routes = routes_from(settings)
+        self.vision_routes = vision_routes_from(settings)
         self._clock = clock
         self._sleep = sleep
         self._no_json_mode: set[str] = set()  # route names that returned 400 on response_format
@@ -179,19 +199,23 @@ class OpenRouterClient:
     async def _complete(
         self,
         route: Route,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         json_mode: bool,
         *,
         temperature: float = 0,
         use_reasoning: bool = True,
+        timeout: float | None = None,
     ) -> str:
+        """The model's answer text. `messages` content is a string or, for images, a list of parts;
+        `timeout` overrides the client's default for this request."""
         body: dict = {"model": route.model, "messages": messages, "temperature": temperature}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         headers = {"Authorization": f"Bearer {route.api_key}"}
         if route.provider == "openrouter":
             headers["X-Title"] = "GymAPP"
-        resp = await self.http.post(f"{route.base_url}/chat/completions", headers=headers, json=body)
+        extra = {} if timeout is None else {"timeout": timeout}
+        resp = await self.http.post(f"{route.base_url}/chat/completions", headers=headers, json=body, **extra)
         resp.raise_for_status()
         data = resp.json()
         if isinstance(usage := data.get("usage"), dict):
@@ -205,13 +229,17 @@ class OpenRouterClient:
         # Reasoning models sometimes leave `content` empty and put the answer after their reasoning.
         return message.get("content") or message.get("reasoning") or ""
 
-    async def _over_routes(self, call: Callable[[Route, bool], Awaitable[T]], *, json_mode: bool) -> T:
-        """Try `call(route, json_mode)` on every route in order, two attempts each, then the soonest
-        rate-limited route once more if it frees up within MAX_WAIT; see the module doc."""
-        if not self.routes:
+    async def _over_routes(
+        self, call: Callable[[Route, bool], Awaitable[T]], *, json_mode: bool, routes: list[Route] | None = None
+    ) -> T:
+        """Try `call(route, json_mode)` on every route in order (`routes`, default the text routes), two
+        attempts each, then the soonest rate-limited route once more if it frees up within MAX_WAIT; see the
+        module doc."""
+        routes = self.routes if routes is None else routes
+        if not routes:
             raise LLMError("no LLM API key: set GROQ_API_KEY (or STT_API_KEY) or OPENROUTER_API_KEY")
         last_err: Exception | None = None
-        for route in self.routes:
+        for route in routes:
             if self._cooldown_until.get(route.name, 0) > self._clock():
                 last_err = last_err or LLMError(f"{route.name} is rate-limited")
                 continue
@@ -220,10 +248,10 @@ class OpenRouterClient:
                 return result  # type: ignore[return-value]
         now = self._clock()
         waits = [
-            (until - now, i) for i, r in enumerate(self.routes) if (until := self._cooldown_until.get(r.name, 0)) > now
+            (until - now, i) for i, r in enumerate(routes) if (until := self._cooldown_until.get(r.name, 0)) > now
         ]
         if waits and (soonest := min(waits))[0] <= MAX_WAIT:
-            route = self.routes[soonest[1]]
+            route = routes[soonest[1]]
             log.info("llm: every route failed, waiting %.1f s for %s", soonest[0], route.name)
             await self._sleep(soonest[0])
             done, result, last_err = await self._try_route(route, call, json_mode, last_err)
@@ -257,8 +285,9 @@ class OpenRouterClient:
                     log.info("llm %s rate-limited for %.1f s", route.name, wait)
                 if status in NEXT_ROUTE_STATUSES:
                     break
-            except _EmptyAnswer as e:
-                log.warning("llm %s failed: %s", route.name, e)
+            except (_EmptyAnswer, httpx.TimeoutException) as e:
+                # Retrying the same route rarely helps: an empty answer repeats, a hung endpoint hangs again.
+                log.warning("llm %s failed: %s", route.name, type(e).__name__ if isinstance(e, httpx.HTTPError) else e)
                 last_err = e
                 break
             except (httpx.HTTPError, LLMError, ValidationError, ValueError, KeyError, TypeError) as e:
@@ -298,6 +327,30 @@ class OpenRouterClient:
 
         return await self._over_routes(call, json_mode=True)
 
+    async def parse_photo(
+        self,
+        image_b64: str,
+        mime: str = "image/jpeg",
+        caption: str = "",
+        facts: list[str] | None = None,
+    ) -> ParseResult:
+        """Foods on a photo as ParseResult(kind="food"); empty `foods` when the model sees no food.
+
+        Only the vision routes are tried. `caption` is the user's hint ("17 штук, 250 г"), `facts` the user's
+        active facts (portion sizes). The image goes to the provider only: never logged or stored.
+        """
+        messages = build_vision_messages(f"data:{mime};base64,{image_b64}", caption, facts)
+
+        async def call(route: Route, json_mode: bool) -> ParseResult:
+            raw = await self._complete(route, messages, json_mode, use_reasoning=False, timeout=VISION_TIMEOUT)
+            data = extract_json(_THINK.sub("", raw), prefer="foods")
+            foods = data.get("foods")
+            if not isinstance(foods, list):
+                raise LLMError("no foods list in the vision answer")
+            note = data.get("note")
+            return ParseResult(kind="food", foods=foods, note=note if isinstance(note, str) and note.strip() else None)
+
+        return await self._over_routes(call, json_mode=True, routes=self.vision_routes)
 
     async def complete_json(self, messages: list[dict[str, str]], prefer: str = "kind") -> dict:
         """A JSON object from the model (json mode where supported), with the same route fallback.

@@ -70,7 +70,7 @@ from sqlalchemy import select
 from gymbot.config import Settings
 from gymbot.db.models import FoodEntry, User
 from gymbot.db.session import Sessionmaker
-from gymbot.handlers import body_weight
+from gymbot.handlers import body_weight, saved_edits
 from gymbot.handlers.chat_settings import send_staged, stage_settings
 from gymbot.handlers.plan import send_after_wellbeing
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
@@ -92,6 +92,7 @@ router = Router(name="log_text")
 # Body weight buttons (bwsave:/bwdrop:) ride on this router, so main.py needs no change; this router's own
 # filters never match them, the sub-router gets them.
 router.include_router(body_weight.router)
+router.include_router(saved_edits.router)  # fixok:/fixno:/fixpick:, the same way
 
 
 @dataclass
@@ -681,6 +682,12 @@ async def process_text(
     if m := REMEMBER_CMD.match(text):
         await _offer_command(message, m["fact"], raw, prefix)
         return
+    # "удали самсу", "самса была 2, а не 3": saved records, their own preview (handlers/saved_edits.py). Not while
+    # a preview or the model's question is open: then it revises that preview in the dialog below.
+    if not _dialog_open(user_id, message.date) and await saved_edits.handle(
+        message, text, raw, prefix, settings, sessionmaker, llm
+    ):
+        return
     # A message that is only a weigh-in ("вес 84.6", "утром 84,2 кг") has nothing else to lose: its own preview,
     # no parser. Not while a preview or the model's question is open: "вес 85" may answer "какой вес в подходе?".
     if (kg := parse_body_weight(text)) is not None and not _dialog_open(user_id, message.date):
@@ -716,6 +723,27 @@ async def process_text(
             await send_staged(message, staged, prefix=prefix)
         return
     await _reply_parsed(message, text, raw, prefix, settings, sessionmaker, llm, prev, known, result)
+
+
+async def reply_with_result(
+    message: Message,
+    text: str,
+    result: ParseResult,
+    settings: Settings,
+    sessionmaker: Sessionmaker,
+    llm: OpenRouterClient,
+    *,
+    raw_text: str,
+    prefix: str = "",
+    known: list[str] | None = None,
+) -> None:
+    """Reply to a result parsed elsewhere (a food photo) as to a typed message: preview, buttons, dialog context.
+
+    `text` stands for the message in the dialog history the parser sees with the next message (so "их было
+    17" revises this preview); `raw_text` is how it is stored; `known` the user's facts, if already loaded.
+    """
+    prev = recent_exchange(message.from_user.id, message.date)  # type: ignore[union-attr]
+    await _reply_parsed(message, text, raw_text, prefix, settings, sessionmaker, llm, prev, known or [], result)
 
 
 async def _reply_parsed(

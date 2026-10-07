@@ -340,3 +340,37 @@ def build_settings_messages(text: str, context: str) -> list[dict[str, str]]:
         {"role": "system", "content": SETTINGS_SYSTEM_PROMPT},
         {"role": "user", "content": f"{context}\nСообщение: {text}"},
     ]
+
+
+# ---- Food by photo (OpenRouterClient.parse_photo): a vision model, its own short prompt ----
+# Short on purpose (~150 tokens): Groq's only vision model shares its per-minute token quota with text parsing,
+# and a photo already costs ~2K tokens of it. The full SYSTEM_PROMPT would crowd out the next text message.
+VISION_SYSTEM = """Ты оцениваешь еду по фото для дневника питания. Определи блюда на фото и вес порции.
+Ответь ТОЛЬКО JSON: {"foods":[{"description":str,"grams":number,"kcal":number,"protein_g":number,"fat_g":number,"carbs_g":number}],"note":str|null}.
+Одна запись на блюдо или компонент, название по-русски, числа, не диапазоны.
+Граммы и штуки из подписи важнее оценки по фото. Порции: каса ~300 г, лепёшка ~250 г, самса ~120 г, манты ~60 г/шт.
+Нет еды на фото: {"foods":[]}. note — коротко, если оценка неуверенная, иначе null."""
+VISION_FACTS_MAX_CHARS = 300  # the user's portion facts ("самса ~150 г") help, but the quota is shared
+VISION_DEFAULT_TEXT = "Оцени еду на фото."
+
+
+def build_vision_messages(image_url: str, caption: str = "", facts: list[str] | None = None) -> list[dict]:
+    """System prompt, then one user turn: the text part (caption as a hint) before the image (OpenRouter's advice).
+
+    `image_url` is a data URL ("data:image/jpeg;base64,...") or an https URL.
+    """
+    system = VISION_SYSTEM
+    if line := format_facts(facts or [], VISION_FACTS_MAX_CHARS):
+        system += f"\n{line}."
+    caption = caption.strip()
+    text = f"Подпись: {caption}" if caption else VISION_DEFAULT_TEXT
+    return [
+        {"role": "system", "content": system},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ],
+        },
+    ]

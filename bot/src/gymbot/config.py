@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     openrouter_fallback_models: list[str] = ["inclusionai/ling-3.0-flash-sante:free", "apodex/apodex-1.1-mini:free"]
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
+    # Food photos need models that accept images; the text routes above reject them (Groq gpt-oss: 400,
+    # OpenRouter ling: 404). Same order: VISION_MODELS on Groq, then OPENROUTER_VISION_MODELS.
+    # Checked 2026-10-08 (docs/reference/vision-food-models.md): qwen3.8-27b is Groq's only vision model and
+    # shares its token quota with text parsing; the free Gemma endpoints often answer 429.
+    vision_models: list[str] = ["qwen/qwen3.8-27b"]
+    openrouter_vision_models: list[str] = ["google/gemma-4-31b-it:free", "google/gemma-4-26b-a4b-it:free"]
+
     # Web search for unknown dishes (gymbot.services.food_lookup). Open Food Facts and Wikipedia need no key;
     # Tavily (https://tavily.com, free tier) is an extra source used only when the key is set.
     tavily_api_key: str = ""
