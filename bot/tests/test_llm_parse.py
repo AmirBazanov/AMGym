@@ -118,7 +118,7 @@ def test_regional_portions_example():
     assert r.kind == "food" and r.clarification is None and r.note is None
     by_name = {f.description: f.grams for f in r.foods}
     assert by_name == {"плов, каса": 300, "лепёшка, 0.5 шт": 125}
-    for word in ("каса", "касушка", "лепёшка ~250", "манты", "шашлык", "чучвара"):
+    for word in ("каса", "касушка", "лепёшка ~250", "манты", "шашлык", "чучвара", "курт", "не заменяй другим блюдом"):
         assert word in SYSTEM_PROMPT
 
 
@@ -134,7 +134,7 @@ def test_wellbeing_example_and_rule():
     assert w.sleep_hours == 6 and w.energy == 2
     assert [p.place for p in w.pains] == ["левое плечо"]
     assert '"wellbeing"' in SYSTEM_PROMPT and "сил мало" in SYSTEM_PROMPT
-    assert len(SYSTEM_PROMPT) < 2900  # keep the prompt compact for small free models
+    assert len(SYSTEM_PROMPT) < 3000  # keep the prompt compact for small free models
 
 
 def test_wellbeing_out_of_range_values_are_clamped_not_rejected():
