@@ -701,12 +701,22 @@ async def _reply_parsed(
         result = ParseResult(kind="question", clarification=MINIAPP_SETUP_ANSWER)
     # A question about a pending preview ("а сколько в ней калорий?") is about data the diary does not have
     # yet: the parser, who saw the preview, answers it. A parser reply claiming a write goes there too.
-    if (
+    # An objection right after a diary answer («там должно быть 6 упражнений») is not a record to clarify:
+    # the parser calls it unclear, but it continues the conversation.
+    follow_up = (
+        result.kind == "unknown"
+        and not result.unknown_terms
+        and prev is None
+        and bool(recent_answers(user_id, message.date))
+    )
+    if follow_up or (
         result.kind == "question"
         and not (prev and prev.token)
         and (wants_diary(text) or claims_action(result.clarification))
     ):
-        result = await _diary_answer(message, text, result, settings, sessionmaker, llm)
+        asked = result.model_copy(update={"kind": "question"}) if follow_up else result
+        answered = await _diary_answer(message, text, asked, settings, sessionmaker, llm)
+        result = result if answered is asked else answered  # failed: an unclear message stays unclear
     result = honest(result)
     # The model tends to repeat facts it was given: offer only new ones.
     offer = result.remember

@@ -1672,3 +1672,19 @@ def test_honest_diary_replies_are_not_claims(reply):
 )
 def test_bot_claims_are_caught(reply):
     assert log_text.claims_action(reply)
+
+
+async def test_objection_after_a_diary_answer_goes_to_the_diary(llm, settings, db, diary):
+    llm.answers = [
+        {"kind": "question", "clarification": "-"}, "Сегодня жим 60×10 ×3.",
+        {"kind": "unknown", "clarification": "Уточни название упражнения."}, "Да, 6 упражнений и 24 подхода, 6530 кг.",
+    ]
+    await send("сколько сегодня по тоннажу?", llm, settings, db)
+    msg = await send("там должно быть 6 упражнений всего 24 подхода", llm, settings, db, T0 + timedelta(minutes=1))
+    assert msg.answer.await_args.args[0] == "Да, 6 упражнений и 24 подхода, 6530 кг."
+
+
+async def test_unclear_message_without_a_recent_answer_stays_unclear(llm, settings, db, diary):
+    llm.answers = [{"kind": "unknown", "clarification": "Уточни название упражнения."}]
+    msg = await send("шесть по двадцать четыре", llm, settings, db)
+    assert len(llm.bodies) == 1 and "Уточни" in msg.answer.await_args.args[0]
