@@ -292,6 +292,24 @@ class DayPlan(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+# --- Body weight: one measurement per local day, from the chat or the Mini App (gymbot.services.body_weight) ---
+
+class BodyWeight(Base):
+    """The owner's body weight on one local day. A second measurement the same day replaces the first
+    (upsert by user and `day`); the newest day also sets User.weight_kg (the profile)."""
+
+    __tablename__ = "body_weights"
+    __table_args__ = (UniqueConstraint("user_id", "day"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    day: Mapped[date] = mapped_column(Date)  # local date of measured_at in TIMEZONE
+    measured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    weight_kg: Mapped[Decimal] = mapped_column(Numeric(5, 2))
+    source: Mapped[str] = mapped_column(String(16))  # chat | miniapp | mcp
+    note: Mapped[str | None] = mapped_column(Text)
+    raw_text: Mapped[str | None] = mapped_column(Text)  # the chat message ("[voice] ..." for voice)
+
+
 # --- Reminders (daily, local time in TIMEZONE) ---
 
 class Reminder(Base):

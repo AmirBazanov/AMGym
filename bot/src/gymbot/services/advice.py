@@ -8,6 +8,13 @@ inflate the shortfall); today's intake so far is a separate line. Training and w
 pains, the last note; gymbot.services.wellbeing) cover the last 14 local days including today.
 Active user facts (gymbot.services.facts) follow the profile, newest first, cut to FACTS_IN_CONTEXT, then
 the working weights the user named in them (gymbot.services.baselines.context_line, <= CONTEXT_CHARS).
+
+The muscle load block (`muscle_load`) is counted here, not by the model: main sets per muscle group
+(gymbot.services.plan.muscle_group, unmapped exercises are «прочее») over LOAD_DAYS local days and the
+groups still recovering (>= RECOVERY_MIN_SETS main sets less than RECOVERY_HOURS ago) with the local time
+they recover, so "what next" advice does not load the arms the day after an arms day, while the program's
+next arms day 48 h later stays as planned. The program line names today's program day and the next training
+day with its muscle groups (and its exercises when today is a rest day).
 build_context only reads: it never creates users or programs.
 """
 
@@ -18,22 +25,25 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gymbot.config import Settings
-from gymbot.db.models import Exercise, User, UserProgram, Workout, WorkoutSet
+from gymbot.db.models import Exercise, Program, ProgramDay, User, UserProgram, Workout, WorkoutSet
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.llm.prompts import ADVICE_DISCLAIMER, build_advice_messages, format_facts
 from gymbot.services import baselines
 from gymbot.services.facts import active_facts
-from gymbot.services.nutrition import day_summary, user_targets, week_summary
+from gymbot.services.nutrition import _aware, day_summary, user_targets, week_summary
+from gymbot.services.plan import muscle_group
 from gymbot.services.profile import GOAL_NAMES
 from gymbot.services.programs import find_day, format_item, load_program, program_position
 from gymbot.services.wellbeing import context_lines as wellbeing_lines
 
 FACTS_IN_CONTEXT = 400  # newest active facts that fit; the rest of the summary matters more
-CONTEXT_MAX = 2200  # room for facts (~400) and wellbeing (~450) next to 8 exercises and the program
+# Room for facts (~400), wellbeing (~450), the muscle load (~350) and two program days (~700) next to the
+# exercise lines, which are dropped first. ~1100 tokens: far below Groq's 8000 TPM per model.
+CONTEXT_MAX = 2900
 FOOD_DAYS = 7
 WORKOUT_DAYS = 14
 MAX_EXERCISES = 8
@@ -41,6 +51,17 @@ MAX_PLAN_ITEMS = 6
 ABOUT_IN_CONTEXT = 300
 FEW_FOOD_DAYS = 4  # fewer days with food than this: ask to log more
 TELEGRAM_MAX = 4096
+LOAD_DAYS = 7
+RECOVERY_HOURS = 48
+RECOVERY_MIN_SETS = 3  # fewer main sets (a warm-up, a test set) in RECOVERY_HOURS need no rest
+GROUP_NAMES = {
+    "biceps": "бицепс", "triceps": "трицепс", "shoulders": "плечи", "chest": "грудь", "back": "спина",
+    "legs": "ноги", "abs": "пресс",
+}
+MAIN_GROUPS = ("biceps", "triceps", "shoulders", "chest", "back", "legs")  # always listed, even with 0
+OTHER = "прочее"  # exercises muscle_group does not know
+WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+NEXT_DAY_SEARCH = 14  # days ahead to look for the next training day
 
 
 def _n(x: float | Decimal) -> str:
@@ -211,10 +232,117 @@ async def _training(session: AsyncSession, user: User, today: date) -> tuple[str
     return summary, lines
 
 
+# ---- muscle load ----
+
+
+def group_label(name: str) -> str:
+    """The Russian muscle group of an exercise for the load block, «прочее» when unknown."""
+    group = muscle_group(name)
+    return GROUP_NAMES[group] if group else OTHER
+
+
+def _ago(day: date, today: date) -> str:
+    n = (today - day).days
+    return {0: "сегодня", 1: "вчера", 2: "позавчера"}.get(n, f"{n} дн. назад")
+
+
+@dataclass
+class _GroupLoad:
+    sets: int = 0
+    last_day: date | None = None
+    recent_sets: int = 0  # main sets less than RECOVERY_HOURS ago
+    recent_at: datetime | None = None  # the latest of those sessions (UTC)
+
+
+async def muscle_load(session: AsyncSession, user_id: int, today: date, now_utc: datetime, tz: ZoneInfo) -> str:
+    """Main sets per muscle group over LOAD_DAYS local days up to today and the groups still recovering:
+    'Нагрузка по группам мышц за 7 дней: бицепс — 9 подх., последний раз 07.10 (вчера); …; грудь — 0.
+    Восстанавливаются (48 ч после тренировки): бицепс, трицепс — до пт 09.10 17:00. Отдохнули: …'"""
+    rows = (
+        await session.execute(
+            select(Workout.started_at, Workout.performed_on, Exercise.name, func.count(WorkoutSet.id))
+            .join(WorkoutSet, WorkoutSet.workout_id == Workout.id)
+            .join(Exercise, Exercise.id == WorkoutSet.exercise_id)
+            .where(Workout.user_id == user_id, Workout.performed_on >= today - timedelta(days=LOAD_DAYS - 1),
+                   Workout.performed_on <= today, WorkoutSet.drop_index == 0)
+            .group_by(Workout.id, Workout.started_at, Workout.performed_on, Exercise.name)
+        )
+    ).all()
+    head = f"Нагрузка по группам мышц за {LOAD_DAYS} дней"
+    if not rows:
+        return f"{head}: тренировок нет."
+    loads = {label: _GroupLoad() for label in [*(GROUP_NAMES[g] for g in MAIN_GROUPS), GROUP_NAMES["abs"], OTHER]}
+    for at, day, name, n in rows:
+        load = loads[group_label(name)]
+        load.sets += n
+        load.last_day = max(load.last_day or day, day)
+        if now_utc - (at := _aware(at)) < timedelta(hours=RECOVERY_HOURS):
+            load.recent_sets += n
+            load.recent_at = max(load.recent_at or at, at)
+    main = {GROUP_NAMES[g] for g in MAIN_GROUPS}
+    parts = [
+        f"{label} — {load.sets} подх., последний раз {load.last_day:%d.%m} ({_ago(load.last_day, today)})"
+        if load.last_day else f"{label} — 0"
+        for label, load in loads.items()
+        if label in main or load.sets
+    ]
+    lines = [f"{head} (основные подходы): " + "; ".join(parts) + "."]
+    until: dict[str, list[str]] = {}  # "до пт 09.10 17:00" -> groups, in the order of the block
+    for label, load in loads.items():
+        if label != OTHER and load.recent_sets >= RECOVERY_MIN_SETS and load.recent_at is not None:
+            free = (load.recent_at + timedelta(hours=RECOVERY_HOURS)).astimezone(tz)
+            until.setdefault(f"до {WEEKDAYS[free.weekday()]} {free:%d.%m %H:%M}", []).append(label)
+    if until:
+        recovering = [label for labels in until.values() for label in labels]
+        rested = [label for label in loads if label in main and label not in recovering]
+        groups = "; ".join(f"{', '.join(labels)} — {when}" for when, labels in until.items())
+        line = f"Восстанавливаются ({RECOVERY_HOURS} ч после тренировки): {groups}."
+        lines.append(line + (f" Отдохнули: {', '.join(rested)}." if rested else ""))
+    return "\n".join(lines)
+
+
 # ---- program ----
 
 
-async def _program_line(session: AsyncSession, user: User, today: date) -> str | None:
+def _day_plan(day: ProgramDay) -> str:
+    items = sorted(day.items, key=lambda i: i.order)
+    plan = ", ".join(f"{i.exercise.name} {format_item(i)}" for i in items[:MAX_PLAN_ITEMS])
+    if len(items) > MAX_PLAN_ITEMS:
+        plan += f" и ещё {len(items) - MAX_PLAN_ITEMS}"
+    return plan
+
+
+def next_training_day(program: Program, started_on: date, today: date) -> tuple[date, ProgramDay] | None:
+    """The first program day with exercises after `today` (within NEXT_DAY_SEARCH days), None after the end."""
+    weeks = len(program.weeks)
+    for k in range(1, NEXT_DAY_SEARCH + 1):
+        d = today + timedelta(days=k)
+        pos = program_position(started_on, weeks, d)
+        if pos.finished:
+            return None
+        if pos.not_started:
+            continue
+        day = find_day(program, pos.week, pos.weekday)
+        if day is not None and day.items:
+            return d, day
+    return None
+
+
+def _next_line(program: Program, started_on: date, today: date, items: bool = True) -> str:
+    """' Следующая тренировка по программе: пт 09.10 (бицепс, трицепс): <exercises>.'; without `items` (today
+    is a training day: today's plan is the next session) only the date and the groups."""
+    found = next_training_day(program, started_on, today)
+    if found is None:
+        return ""
+    d, day = found
+    groups = list(dict.fromkeys(group_label(i.exercise.name) for i in sorted(day.items, key=lambda i: i.order)))
+    line = f" Следующая тренировка по программе: {WEEKDAYS[d.weekday()]} {d:%d.%m} ({', '.join(groups)})"
+    return line + (f": {_day_plan(day)}." if items else ".")
+
+
+async def _program_line(
+    session: AsyncSession, user: User, today: date, today_plan: bool = True
+) -> str | None:
     # Not users.active_program(): that one creates a program on first use, and this module only reads.
     up = await session.scalar(
         select(UserProgram).where(UserProgram.user_id == user.id).order_by(UserProgram.id.desc()).limit(1)
@@ -225,27 +353,36 @@ async def _program_line(session: AsyncSession, user: User, today: date) -> str |
     weeks = len(program.weeks)
     pos = program_position(up.started_on, weeks, today)
     if pos.not_started:
-        return f"Программа «{program.name}» начнётся {up.started_on:%d.%m}."
+        return f"Программа «{program.name}» начнётся {up.started_on:%d.%m}.{_next_line(program, up.started_on, today)}"
     if pos.finished:
         return f"Программа «{program.name}» пройдена."
     line = f"Программа «{program.name}»: неделя {pos.week} из {weeks}"
     day = find_day(program, pos.week, pos.weekday)
-    if day is None:
-        return line + ", сегодня день отдыха."
-    items = sorted(day.items, key=lambda i: i.order)
-    plan = ", ".join(f"{i.exercise.name} {format_item(i)}" for i in items[:MAX_PLAN_ITEMS])
-    if len(items) > MAX_PLAN_ITEMS:
-        plan += f" и ещё {len(items) - MAX_PLAN_ITEMS}"
-    return line + f", сегодня по плану: {plan}."
+    if day is None or not day.items:
+        return line + f", сегодня день отдыха.{_next_line(program, up.started_on, today)}"
+    following = _next_line(program, up.started_on, today, items=False)
+    if not today_plan:
+        return line + f", сегодня день тренировки (план на сегодня ниже).{following}"
+    return line + f", сегодня по плану: {_day_plan(day)}.{following}"
 
 
 # ---- public API ----
 
 
 async def build_context(
-    session: AsyncSession, user: User, settings: Settings, tz: ZoneInfo, now_utc: datetime
+    session: AsyncSession,
+    user: User,
+    settings: Settings,
+    tz: ZoneInfo,
+    now_utc: datetime,
+    *,
+    for_answer: bool = False,
 ) -> str:
-    """Compact Russian summary (<= CONTEXT_MAX characters) of the user's data for the advice prompt."""
+    """Compact Russian summary (<= CONTEXT_MAX characters) of the user's data for the advice prompt.
+
+    `for_answer`: the diary answer (gymbot.services.answer) adds its own counted blocks, so the per-exercise
+    lines (its records block holds them with the whole history) and today's program day (its adjusted plan
+    follows) are left out: the same numbers twice only cost tokens."""
     today = now_utc.astimezone(tz).date()
     facts = format_facts([f.text for f in await active_facts(session, user.id)], FACTS_IN_CONTEXT)
     weights = baselines.context_line(await baselines.current(session, user.id))
@@ -257,8 +394,11 @@ async def build_context(
         *await _food_lines(session, user, today, tz),
     ]
     training, exercises = await _training(session, user, today)
-    program = await _program_line(session, user, today)
-    tail = [*await wellbeing_lines(session, user, today, tz), *([program] if program else [])]
+    if for_answer:
+        exercises = []
+    load = await muscle_load(session, user.id, today, now_utc, tz)
+    program = await _program_line(session, user, today, today_plan=not for_answer)
+    tail = [load, *await wellbeing_lines(session, user, today, tz), *([program] if program else [])]
     # Drop exercise lines (least recent first) until the summary fits.
     for n in range(min(len(exercises), MAX_EXERCISES), -1, -1):
         shown = exercises[:n]

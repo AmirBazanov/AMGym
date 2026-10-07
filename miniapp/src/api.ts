@@ -270,3 +270,28 @@ export function getTodayPlan(): Promise<DayPlan> {
 export function regenerateTodayPlan(): Promise<DayPlan> {
   return api<DayPlan>('/plan/today/regenerate', { method: 'POST' })
 }
+
+// ---- Body weight: one value per day (upsert), from the chat, the Mini App or MCP. Never cached offline. ----
+
+export type BodyWeightSource = 'chat' | 'miniapp' | 'mcp'
+
+export interface BodyWeight {
+  date: string // YYYY-MM-DD in the server TIMEZONE
+  weightKg: number
+  source: BodyWeightSource
+}
+
+/** Values of the last `days` days (1..3660), oldest first. Raw JSON: parse with bodyWeight.parseBodyWeights. */
+export function getBodyWeights(days: number): Promise<unknown> {
+  return api<unknown>(`/body-weight?days=${days}`)
+}
+
+/** Without a date the server stores it for its own "today". 422: weight outside 30..250 or a bad date. */
+export function saveBodyWeight(weightKg: number, date?: string): Promise<unknown> {
+  return api<unknown>('/body-weight', { method: 'POST', body: JSON.stringify(date ? { weightKg, date } : { weightKg }) })
+}
+
+/** 404 when there is no value for that date. */
+export function deleteBodyWeight(date: string): Promise<void> {
+  return api<void>(`/body-weight/${encodeURIComponent(date)}`, { method: 'DELETE' })
+}

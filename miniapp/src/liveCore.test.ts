@@ -22,6 +22,9 @@ describe('parseChange', () => {
   it('reads known topics', () => {
     expect(parseChange('{"topics":["nutrition","state"]}')).toEqual(['nutrition', 'state'])
   })
+  it('keeps the weight topic', () => {
+    expect(parseChange('{"topics":["weight","state"]}')).toEqual(['weight', 'state'])
+  })
   it('drops unknown names, non-strings and duplicates', () => {
     expect(parseChange('{"topics":["plan","bogus",3,null,"plan","facts"]}')).toEqual(['plan', 'facts'])
   })

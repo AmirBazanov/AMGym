@@ -7,12 +7,17 @@ OpenRouter key). Free models are rate-limited and sometimes return prose around 
      structured-outputs"), then we retry without it and remember that for the route,
   2. extract the first {...} block,
   3. validate with pydantic and retry once / fall back to the next route.
-A route that answered 429 is skipped for RATE_LIMIT_COOLDOWN (no waiting for retry-after: there are
-other routes); 400/401/402/403/404/413 also move straight to the next route.
+A route that answered 429 is skipped until its limit resets (`cooldown_after`): Groq says when in
+`retry-after` or `x-ratelimit-reset-tokens` / `-requests` ("7.66s", "2m59.56s"); without them
+RATE_LIMIT_COOLDOWN. Groq's per-minute token limit refills in seconds, so a blanket minute would send a whole
+minute of messages to the weaker OpenRouter models. When every route failed and the soonest rate-limited one
+frees up within MAX_WAIT seconds, it is tried once more after that wait instead of failing.
+400/401/402/403/404/413 also move straight to the next route. Token usage per call is logged (no content).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -76,8 +81,48 @@ def _rejects_json_mode(resp: httpx.Response) -> bool:
 
 T = TypeVar("T")
 
-RATE_LIMIT_COOLDOWN = 60.0  # seconds a route is skipped after a 429
+RATE_LIMIT_COOLDOWN = 60.0  # seconds a route is skipped after a 429 that does not say when it resets
+MIN_COOLDOWN = 1.0
+MAX_COOLDOWN = 24 * 3600.0  # a daily quota may reset in hours: retrying every minute would only hit it again
+MAX_WAIT = 3.0  # seconds worth waiting for a rate-limited route when every route failed
 NEXT_ROUTE_STATUSES = (400, 401, 402, 403, 404, 413, 429)  # bad request / key / quota / model gone / too big
+
+
+_DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
+_TRY_AGAIN = re.compile(r"try again in\s+((?:\d+(?:\.\d+)?(?:ms|h|m|s))+)", re.IGNORECASE)
+
+
+def parse_duration(value: str | None) -> float | None:
+    """Seconds in a Go-style duration ("7.66s", "2m59.56s", "1h2m", "250ms") or a plain number of seconds."""
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    parts = _DURATION_PART.findall(value)
+    if not parts or "".join(n + u for n, u in parts) != value:
+        return None
+    scale = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 0.001}
+    return sum(float(n) * scale[u] for n, u in parts)
+
+
+def cooldown_after(resp: httpx.Response) -> float:
+    """Seconds until a 429'd route may be tried again: `retry-after`, else the reset of the exhausted limit
+    (x-ratelimit-reset-requests when no requests remain, else -tokens), else "try again in 7.5s" from the
+    error text, else RATE_LIMIT_COOLDOWN; clamped to [MIN_COOLDOWN, MAX_COOLDOWN]."""
+    h = resp.headers
+    found = parse_duration(h.get("retry-after"))
+    if found is None:
+        requests_out = h.get("x-ratelimit-remaining-requests", "").strip() == "0"
+        first, second = ("requests", "tokens") if requests_out else ("tokens", "requests")
+        found = parse_duration(h.get(f"x-ratelimit-reset-{first}")) or parse_duration(h.get(f"x-ratelimit-reset-{second}"))
+    if found is None and (m := _TRY_AGAIN.search(resp.text)):
+        found = parse_duration(m.group(1))
+    if found is None:
+        found = RATE_LIMIT_COOLDOWN
+    return min(max(found, MIN_COOLDOWN), MAX_COOLDOWN)
 
 
 @dataclass(frozen=True)
@@ -118,11 +163,13 @@ class OpenRouterClient:
         settings: Settings,
         http: httpx.AsyncClient | None = None,
         clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
     ):
         self.s = settings
         self.http = http or httpx.AsyncClient(timeout=60)
         self.routes = routes_from(settings)
         self._clock = clock
+        self._sleep = sleep
         self._no_json_mode: set[str] = set()  # route names that returned 400 on response_format
         self._cooldown_until: dict[str, float] = {}  # route name -> clock() when it may be tried again
 
@@ -146,14 +193,21 @@ class OpenRouterClient:
             headers["X-Title"] = "GymAPP"
         resp = await self.http.post(f"{route.base_url}/chat/completions", headers=headers, json=body)
         resp.raise_for_status()
-        message = resp.json()["choices"][0]["message"]
+        data = resp.json()
+        if isinstance(usage := data.get("usage"), dict):
+            log.info(
+                "llm %s tokens: prompt %s, completion %s",
+                route.name, usage.get("prompt_tokens"), usage.get("completion_tokens"),
+            )
+        message = data["choices"][0]["message"]
         if not use_reasoning:
             return message.get("content") or ""
         # Reasoning models sometimes leave `content` empty and put the answer after their reasoning.
         return message.get("content") or message.get("reasoning") or ""
 
     async def _over_routes(self, call: Callable[[Route, bool], Awaitable[T]], *, json_mode: bool) -> T:
-        """Try `call(route, json_mode)` on every route in order, two attempts each, see the module doc."""
+        """Try `call(route, json_mode)` on every route in order, two attempts each, then the soonest
+        rate-limited route once more if it frees up within MAX_WAIT; see the module doc."""
         if not self.routes:
             raise LLMError("no LLM API key: set GROQ_API_KEY (or STT_API_KEY) or OPENROUTER_API_KEY")
         last_err: Exception | None = None
@@ -161,30 +215,56 @@ class OpenRouterClient:
             if self._cooldown_until.get(route.name, 0) > self._clock():
                 last_err = last_err or LLMError(f"{route.name} is rate-limited")
                 continue
-            for _attempt in range(2):
-                use_json = json_mode and route.name not in self._no_json_mode
-                try:
-                    return await call(route, use_json)
-                except httpx.HTTPStatusError as e:
-                    log.warning("llm %s failed: %s", route.name, e.response.status_code)
-                    last_err = e
-                    status = e.response.status_code
-                    if status == 400 and use_json and _rejects_json_mode(e.response):
-                        # Provider rejects response_format (e.g. Novita: "does not support structured-outputs").
-                        self._no_json_mode.add(route.name)
-                        continue
-                    if status == 429:
-                        self._cooldown_until[route.name] = self._clock() + RATE_LIMIT_COOLDOWN
-                    if status in NEXT_ROUTE_STATUSES:
-                        break
-                except _EmptyAnswer as e:
-                    log.warning("llm %s failed: %s", route.name, e)
-                    last_err = e
-                    break
-                except (httpx.HTTPError, LLMError, ValidationError, ValueError, KeyError, TypeError) as e:
-                    log.warning("llm %s failed: %s", route.name, e)
-                    last_err = e
+            done, result, last_err = await self._try_route(route, call, json_mode, last_err)
+            if done:
+                return result  # type: ignore[return-value]
+        now = self._clock()
+        waits = [
+            (until - now, i) for i, r in enumerate(self.routes) if (until := self._cooldown_until.get(r.name, 0)) > now
+        ]
+        if waits and (soonest := min(waits))[0] <= MAX_WAIT:
+            route = self.routes[soonest[1]]
+            log.info("llm: every route failed, waiting %.1f s for %s", soonest[0], route.name)
+            await self._sleep(soonest[0])
+            done, result, last_err = await self._try_route(route, call, json_mode, last_err)
+            if done:
+                return result  # type: ignore[return-value]
         raise LLMError(f"all models failed: {last_err}")
+
+    async def _try_route(
+        self,
+        route: Route,
+        call: Callable[[Route, bool], Awaitable[T]],
+        json_mode: bool,
+        last_err: Exception | None,
+    ) -> tuple[bool, T | None, Exception | None]:
+        """(answered, the answer, the last error) after up to two attempts on `route`."""
+        for _attempt in range(2):
+            use_json = json_mode and route.name not in self._no_json_mode
+            try:
+                return True, await call(route, use_json), last_err
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                log.warning("llm %s failed: %s", route.name, status)
+                last_err = e
+                if status == 400 and use_json and _rejects_json_mode(e.response):
+                    # Provider rejects response_format (e.g. Novita: "does not support structured-outputs").
+                    self._no_json_mode.add(route.name)
+                    continue
+                if status == 429:
+                    wait = cooldown_after(e.response)
+                    self._cooldown_until[route.name] = self._clock() + wait
+                    log.info("llm %s rate-limited for %.1f s", route.name, wait)
+                if status in NEXT_ROUTE_STATUSES:
+                    break
+            except _EmptyAnswer as e:
+                log.warning("llm %s failed: %s", route.name, e)
+                last_err = e
+                break
+            except (httpx.HTTPError, LLMError, ValidationError, ValueError, KeyError, TypeError) as e:
+                log.warning("llm %s failed: %s", route.name, e)
+                last_err = e
+        return False, None, last_err
 
     async def complete_text(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
         """Plain text generation (no JSON mode) with the same route fallback as parse_message.

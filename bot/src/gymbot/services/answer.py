@@ -6,14 +6,20 @@ asks again here (`respond`), in three layers against made-up numbers:
 1. A factual question (gymbot.services.answer_intent.classify: the day's workout and tonnage, food and
    KBJU left, an exercise's last time and record) is answered in code from the database
    (gymbot.services.answer_direct), no model at all.
-2. Anything else goes to the model with the advice summary (gymbot.services.advice: profile, facts, food,
-   training with the last sets and 1RM, wellbeing, program), the day's workout, food and per-exercise
-   records counted here, today's adjusted plan (gymbot.services.plan), the weights set for today from the
+2. Anything else goes to the model with the advice summary (gymbot.services.advice, `for_answer`: profile,
+   facts, food, the training totals, the muscle load and the groups still recovering, wellbeing, the program
+   and its next training day), the day's workout, food and per-exercise records counted here, today's adjusted plan (gymbot.services.plan), the weights set for today from the
    chat (gymbot.services.overrides), the workout in progress in the Mini App (gymbot.services.active_workout)
    and the last questions and answers of the dialog. Its answer is checked in code
    (gymbot.services.answer_check): a claim about the past that the summary does not hold gets one
    regeneration with a correction, then an honest fallback that shows the counted block.
 3. The model answers at ANSWER_TEMPERATURE, and the prompt says to admit what the diary lacks.
+
+Several questions in a row reuse the summary: `respond` keeps it per user for CONTEXT_TTL seconds
+(`ContextCache`) unless the local day changes or anything published a change for the user
+(gymbot.services.live.changes: every write from the chat, the Mini App API and MCP does). The weights set
+for today, the workout in progress and the body weight line are read fresh every time: the Mini App
+updates the workout in progress on every set without publishing.
 
 Only reads, except that the plan service stores today's plan and the user row is created on first use.
 """
@@ -22,6 +28,9 @@ from __future__ import annotations
 
 import logging
 import re
+import time
+import weakref
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -34,7 +43,7 @@ from gymbot.db.models import User
 from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.prompts import build_answer_messages
-from gymbot.services import active_workout, advice, nutrition, overrides, plan
+from gymbot.services import active_workout, advice, body_weight, live, nutrition, overrides, plan
 from gymbot.services import answer_direct as direct
 from gymbot.services.answer_check import Evidence, correction, violations
 from gymbot.services.answer_intent import classify, mentions
@@ -47,6 +56,7 @@ ANSWER_MAX = 1500  # characters sent to the chat; the prompt asks for far less
 NO_TRAINING = "Сегодня тренировки по программе нет."
 DONE_MAX = 900  # characters of the "done on the last training day" block
 ANSWER_TEMPERATURE = 0.2  # low: the answer retells the summary, it does not invent
+CONTEXT_TTL = 60.0  # seconds a user's summary is reused for the next questions (see ContextCache)
 
 
 async def done_block(session: AsyncSession, user_id: int, today: date) -> str:
@@ -87,6 +97,77 @@ class Context:
         return Evidence(f"{self.text}\n{said}", {*self.history, *self.in_progress}, names, self.aliases)
 
 
+@dataclass
+class _Base:
+    """The part of the summary that is cached between questions (all but the lines `gather` reads fresh)."""
+
+    text: str
+    done: str
+    food: str
+    history: dict[str, direct.ExerciseHistory]
+    catalog: list[str]
+    aliases: dict[str, list[str]]
+
+
+class ContextCache:
+    """Per user `_Base` for `ttl` seconds of `clock`, valid while the local day and live.changes() hold."""
+
+    def __init__(self, ttl: float = CONTEXT_TTL, clock: Callable[[], float] = time.monotonic) -> None:
+        self.ttl = ttl
+        self._clock = clock
+        self._rows: dict[int, tuple[float, int, date, _Base]] = {}
+
+    def get(self, user_id: int, day: date) -> _Base | None:
+        row = self._rows.get(user_id)
+        if row is None:
+            return None
+        expires, stamp, cached_day, base = row
+        if self._clock() >= expires or stamp != live.changes(user_id) or cached_day != day:
+            del self._rows[user_id]
+            return None
+        return base
+
+    def put(self, user_id: int, day: date, stamp: int, base: _Base) -> None:
+        self._rows[user_id] = (self._clock() + self.ttl, stamp, day, base)
+
+
+# One cache per database (sessionmaker): tests open a fresh database each and reuse the same user ids.
+_caches: weakref.WeakKeyDictionary[Sessionmaker, ContextCache] = weakref.WeakKeyDictionary()
+
+
+def cache_for(sessionmaker: Sessionmaker) -> ContextCache:
+    cache = _caches.get(sessionmaker)
+    if cache is None:
+        cache = _caches[sessionmaker] = ContextCache()
+    return cache
+
+
+async def _base(
+    session: AsyncSession,
+    user: User,
+    settings: Settings,
+    llm: OpenRouterClient | None,
+    tz: ZoneInfo,
+    now_utc: datetime,
+) -> _Base:
+    today_local = now_utc.astimezone(tz).date()
+    await active_program(session, user, today_local)
+    await session.commit()
+    summary = await advice.build_context(session, user, settings, tz, now_utc, for_answer=True)
+    built = await plan.get_or_build(session, user, settings, llm, tz, now_utc)
+    today = plan.plan_text(built) if built is not None else NO_TRAINING
+    done = await done_block(session, user.id, today_local)
+    food = direct.food_block(await nutrition.day_summary(session, user, today_local, tz))
+    history = await direct.exercise_history(session, user.id, today_local)
+    catalog, aliases = await direct.known_exercises(session)
+    records = direct.records_block(history, await direct.last_training_day(session, user.id, today_local))
+    text = (
+        f"{summary}\n{done}\n{food}\n{records}\n"
+        f"План на сегодня ({now_utc.astimezone(tz):%d.%m}):\n{today}"
+    )
+    return _Base(text, done, food, history, catalog, aliases)
+
+
 async def gather(
     session: AsyncSession,
     user: User,
@@ -94,28 +175,23 @@ async def gather(
     llm: OpenRouterClient | None,
     tz: ZoneInfo,
     now_utc: datetime,
+    cache: ContextCache | None = None,
 ) -> Context:
     """The advice summary, the counted blocks and today's plan. Starts the default program like /plan;
-    commits."""
+    commits. With `cache` the summary of the last CONTEXT_TTL seconds is reused (see the module doc)."""
     today_local = now_utc.astimezone(tz).date()
-    await active_program(session, user, today_local)
-    await session.commit()
-    summary = await advice.build_context(session, user, settings, tz, now_utc)
-    built = await plan.get_or_build(session, user, settings, llm, tz, now_utc)
-    today = plan.plan_text(built) if built is not None else NO_TRAINING
+    base = cache.get(user.id, today_local) if cache is not None else None
+    if base is None:
+        stamp = live.changes(user.id)  # taken before building: a change meanwhile makes the entry stale
+        base = await _base(session, user, settings, llm, tz, now_utc)
+        if cache is not None:
+            cache.put(user.id, today_local, stamp, base)
     weights = overrides.context_line(await overrides.for_day(session, user.id, today_local))
     in_progress = await active_workout.context_for(session, user.id, now_utc, tz)
-    done = await done_block(session, user.id, today_local)
-    food = direct.food_block(await nutrition.day_summary(session, user, today_local, tz))
-    history = await direct.exercise_history(session, user.id, today_local)
-    catalog, aliases = await direct.known_exercises(session)
-    tail = "".join(f"\n{line}" for line in (weights, in_progress) if line)
-    text = (
-        f"{summary}\n{done}\n{food}\n{direct.records_block(history)}\n"
-        f"План на сегодня ({now_utc.astimezone(tz):%d.%m}):\n{today}{tail}"
-    )
-    running = mentions(in_progress, catalog, aliases) if in_progress else []
-    return Context(text, done, food, history, running, catalog, aliases)
+    body = await body_weight.context_line(session, user.id, today_local)
+    tail = "".join(f"\n{line}" for line in (weights, in_progress, body) if line)
+    running = mentions(in_progress, base.catalog, base.aliases) if in_progress else []
+    return Context(base.text + tail, base.done, base.food, base.history, running, base.catalog, base.aliases)
 
 
 async def build_context(
@@ -214,5 +290,5 @@ async def respond(
         if q is not None and (text := await direct.reply(session, user, question, q, tz, now_utc)) is not None:
             log.info("diary answer: %s from the database", q.intent.value)
             return Reply(text, DIRECT)
-        ctx = await gather(session, user, settings, llm, tz, now_utc)
+        ctx = await gather(session, user, settings, llm, tz, now_utc, cache_for(sessionmaker))
     return await checked_answer(llm, ctx, question, dialog)

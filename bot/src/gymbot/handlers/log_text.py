@@ -70,6 +70,7 @@ from sqlalchemy import select
 from gymbot.config import Settings
 from gymbot.db.models import FoodEntry, User
 from gymbot.db.session import Sessionmaker
+from gymbot.handlers import body_weight
 from gymbot.handlers.chat_settings import send_staged, stage_settings
 from gymbot.handlers.plan import send_after_wellbeing
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
@@ -79,6 +80,7 @@ from gymbot.services import active_workout as aw
 from gymbot.services import answer as qa
 from gymbot.services import baselines, facts, food_lookup, live
 from gymbot.services.answer_intent import classify as classify_question
+from gymbot.services.body_weight import parse_chat as parse_body_weight
 from gymbot.services.programs import exercise_catalog, normalize
 from gymbot.services.users import get_or_create_user
 from gymbot.services.wellbeing import wellbeing_entry
@@ -87,6 +89,9 @@ from gymbot.services.workouts import save_from_chat
 log = logging.getLogger(__name__)
 
 router = Router(name="log_text")
+# Body weight buttons (bwsave:/bwdrop:) ride on this router, so main.py needs no change; this router's own
+# filters never match them, the sub-router gets them.
+router.include_router(body_weight.router)
 
 
 @dataclass
@@ -675,6 +680,11 @@ async def process_text(
     user_id = message.from_user.id  # type: ignore[union-attr]
     if m := REMEMBER_CMD.match(text):
         await _offer_command(message, m["fact"], raw, prefix)
+        return
+    # A message that is only a weigh-in ("вес 84.6", "утром 84,2 кг") has nothing else to lose: its own preview,
+    # no parser. Not while a preview or the model's question is open: "вес 85" may answer "какой вес в подходе?".
+    if (kg := parse_body_weight(text)) is not None and not _dialog_open(user_id, message.date):
+        await body_weight.offer(message, kg, raw, prefix)
         return
     # Settings commands ("норма 2800 ккал", "поставь сегодня жим 85") are staged first, but the parser still
     # gets the text: a record in it is never lost (handlers/chat_settings.py). Not while a preview or the

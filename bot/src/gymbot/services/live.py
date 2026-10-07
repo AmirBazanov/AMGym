@@ -23,8 +23,10 @@ from typing import Literal
 
 log = logging.getLogger(__name__)
 
-Topic = Literal["state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts"]
-TOPICS: frozenset[str] = frozenset({"state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts"})
+Topic = Literal["state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts", "weight"]
+TOPICS: frozenset[str] = frozenset(
+    {"state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts", "weight"}
+)
 
 TOKEN_TTL = 60  # seconds; only needed to open the stream, which then lives on
 MAX_STREAMS_PER_USER = 3  # a 4th stream closes the oldest one (Mini App reopened, stale tabs)
@@ -167,10 +169,20 @@ class Hub:
 hub = Hub()
 
 
+_changes: dict[int, int] = {}  # user id -> number of publishes so far (in this process)
+
+
+def changes(user_id: int) -> int:
+    """A counter that grows on every `publish` for the user: in-process caches of the user's data
+    (gymbot.services.answer) compare it to know that something changed."""
+    return _changes.get(user_id, 0)
+
+
 def publish(user_id: int | None, *topics: Topic) -> None:
     """Tell the user's open Mini Apps what changed. Call after the commit. Never raises."""
     if user_id is None:
         return
+    _changes[user_id] = _changes.get(user_id, 0) + 1
     try:
         hub.publish(user_id, topics)
     except Exception:

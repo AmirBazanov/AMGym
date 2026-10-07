@@ -1,0 +1,125 @@
+name: Uptime
+
+# Outside check of the production server: /api/health (touches the database) and the Telegram webhook
+# as Telegram sees it (getWebhookInfo). Alerts go to the owner's Telegram once when something breaks,
+# again every 6 hours while it stays broken, and once on recovery. The last state lives in the Actions
+# cache (a file restored from the newest "uptime-state-*" entry). See deploy/README.md, "Uptime".
+# Scheduled workflows run only from the default branch; GitHub may start them a few minutes late.
+
+on:
+  schedule:
+    - cron: "3-59/10 * * * *"  # off the round minutes: top-of-hour schedules are delayed the most
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Restore last state
+        uses: actions/cache/restore@v4
+        with:
+          path: .uptime-state
+          key: uptime-state-${{ github.run_id }}
+          restore-keys: uptime-state-
+
+      - name: Check health and webhook
+        id: check
+        env:
+          SITE: https://gym.algex.ru
+          TOKEN: ${{ secrets.TG_ALERT_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TG_ALERT_CHAT_ID }}
+          # Repository variable: "true" when TG_ALERT_BOT_TOKEN is not the production bot's token.
+          SKIP_WEBHOOK: ${{ vars.UPTIME_SKIP_WEBHOOK }}
+        run: |
+          set -uo pipefail
+          # Never echo $TOKEN or the API URLs built from it; no `set -x` here.
+          REMIND_SECONDS=21600
+          now=$(date +%s)
+          prev=ok; alerted_at=0
+          if [ -f .uptime-state ]; then read -r prev alerted_at < .uptime-state || true; fi
+          prev=${prev:-ok}; alerted_at=${alerted_at:-0}
+          problems=()
+
+          # 1. The app and its database, 3 attempts 20 s apart.
+          code=000
+          for attempt in 1 2 3; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -A amgym-uptime "$SITE/api/health" || true)
+            [ "$code" = 200 ] && break
+            [ "$attempt" -lt 3 ] && sleep 20
+          done
+          [ "$code" = 200 ] || problems+=("/api/health: HTTP $code после 3 попыток (000 = нет соединения, 403 = Cloudflare WAF, 502/503 = сервис или база)")
+
+          # 2. The webhook from Telegram's side (only meaningful with the production bot's token).
+          if [ -n "$TOKEN" ] && [ "${SKIP_WEBHOOK:-}" != "true" ]; then
+            info=$(curl -s --max-time 15 "https://api.telegram.org/bot${TOKEN}/getWebhookInfo" || true)
+            if [ "$(jq -r '.ok' <<<"$info" 2>/dev/null)" != "true" ]; then
+              problems+=("getWebhookInfo не ответил (неверный TG_ALERT_BOT_TOKEN или Telegram недоступен)")
+            else
+              hook=$(jq -r '.result.url // ""' <<<"$info")
+              pending=$(jq -r '.result.pending_update_count // 0' <<<"$info")
+              err_at=$(jq -r '.result.last_error_date // 0' <<<"$info")
+              err_msg=$(jq -r '.result.last_error_message // ""' <<<"$info")
+              [ -n "$hook" ] || problems+=("вебхук не установлен (локальный запуск с боевым токеном? sudo systemctl restart gymbot)")
+              [ "$pending" -gt 20 ] && problems+=("в очереди вебхука $pending апдейтов")
+              if [ "$err_at" -gt 0 ] && [ $((now - err_at)) -lt 900 ]; then
+                problems+=("ошибка вебхука $(((now - err_at) / 60)) мин назад: $err_msg")
+              fi
+            fi
+          fi
+
+          state=ok
+          [ ${#problems[@]} -eq 0 ] || state=fail
+          for p in "${problems[@]}"; do echo "::warning::$p"; done
+          echo "state: $prev -> $state"
+
+          text=""
+          if [ "$state" = fail ] && { [ "$prev" != fail ] || [ $((now - alerted_at)) -ge $REMIND_SECONDS ]; }; then
+            [ "$prev" = fail ] && head="GymAPP всё ещё не работает" || head="GymAPP: проблема"
+            text="$head ($SITE)"
+            for p in "${problems[@]}"; do text+=$'\n'"• $p"; done
+          elif [ "$state" = ok ] && [ "$prev" = fail ]; then
+            text="GymAPP снова работает ($SITE)"
+          fi
+
+          next_alerted=$alerted_at
+          if [ -n "$text" ]; then
+            if [ -z "$TOKEN" ] || [ -z "$CHAT_ID" ]; then
+              echo "::notice::TG_ALERT_BOT_TOKEN / TG_ALERT_CHAT_ID secrets are not set: no Telegram alert (see deploy/README.md)"
+              next_alerted=$now
+            else
+              sent=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+                "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+                --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=${text}" || true)
+              if [ "$sent" = 200 ]; then
+                echo "alert sent"
+                next_alerted=$now
+              else
+                echo "::error::Telegram sendMessage failed (HTTP $sent): state kept, the next run retries"
+                exit 1
+              fi
+            fi
+          fi
+
+          new="$state $next_alerted"
+          if [ "$new" != "$prev $alerted_at" ]; then
+            echo "$new" > .uptime-state
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          # Without alert secrets a red run (GitHub's own failure email) is the only signal.
+          if [ "$state" = fail ] && { [ -z "$TOKEN" ] || [ -z "$CHAT_ID" ]; }; then exit 1; fi
+          exit 0
+
+      - name: Save state
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .uptime-state
+          key: uptime-state-${{ github.run_id }}

@@ -40,11 +40,13 @@ export function LineSeries({
   x,
   y,
   unit,
+  decimals = false,
 }: {
   data: object[]
   x: string
   y: string
   unit: string
+  decimals?: boolean // fractional axis ticks, for narrow ranges like body weight
 }) {
   return (
     <ResponsiveContainer width="100%" height={200}>
@@ -57,7 +59,14 @@ export function LineSeries({
         </defs>
         <CartesianGrid vertical={false} stroke="var(--sep)" />
         <XAxis dataKey={x} {...axis} minTickGap={16} />
-        <YAxis {...axis} width={40} domain={['auto', 'auto']} allowDecimals={false} />
+        <YAxis
+          {...axis}
+          width={40}
+          domain={['auto', 'auto']}
+          allowDecimals={decimals}
+          // Decimal comma for weight ticks; other charts keep the default (no thousands separator).
+          tickFormatter={decimals ? (v: number) => String(v).replace('.', ',') : undefined}
+        />
         <Tooltip
           content={<Tip unit={unit} labelKey={x} />}
           cursor={{ stroke: 'var(--hint)', strokeDasharray: '3 3' }}

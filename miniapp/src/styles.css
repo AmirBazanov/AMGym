@@ -1190,3 +1190,26 @@ table.nutrition-table td.over {
   white-space: nowrap;
   color: var(--hint);
 }
+
+/* ---------- body weight ---------- */
+.weight-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 8px;
+}
+.weight-input .field {
+  height: 52px;
+  font-size: 20px;
+}
+.weight-input .btn {
+  width: auto;
+  padding: 0 18px;
+  white-space: nowrap;
+}
+.weight-value {
+  font-weight: 600;
+  white-space: nowrap;
+}

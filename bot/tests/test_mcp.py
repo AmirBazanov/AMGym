@@ -50,7 +50,7 @@ TZ = "Europe/Moscow"
 TOOLS = {
     "nutrition_summary", "training_summary", "wellbeing_summary", "program_status", "profile_and_facts",
     "query", "schema", "set_targets", "add_fact", "deactivate_fact", "set_reminder", "delete_reminder",
-    "regenerate_plan", "log_note", "send_message", "service_status", "set_weight_override",
+    "regenerate_plan", "log_note", "send_message", "service_status", "set_weight_override", "log_body_weight",
 }
 
 
@@ -158,7 +158,7 @@ async def test_list_tools_and_annotations(tmp_path, db):
     async with running(tmp_path, db) as (app, _), mcp_client(app) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}
     assert set(tools) == TOOLS
-    assert len(tools) == 17
+    assert len(tools) == 18
     assert tools["nutrition_summary"].annotations.read_only_hint is True
     assert tools["query"].annotations.read_only_hint is True
     assert tools["set_targets"].annotations.read_only_hint is False

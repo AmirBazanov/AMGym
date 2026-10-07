@@ -5,12 +5,16 @@ import pytest
 
 from gymbot.config import Settings
 from gymbot.llm.openrouter import (
+    MAX_COOLDOWN,
+    MIN_COOLDOWN,
     RATE_LIMIT_COOLDOWN,
     LLMClient,
     LLMError,
     OpenRouterClient,
     Route,
+    cooldown_after,
     extract_json,
+    parse_duration,
     routes_from,
 )
 
@@ -410,3 +414,93 @@ async def test_think_block_is_ignored_when_parsing():
     think = '<think>maybe {"kind": "workout"}</think>' + json.dumps(GOOD)
     rec = Recorder({"groq/g1": think})
     assert (await groq_client(rec).parse_message("hi", [])).kind == "unknown"
+
+
+# ---- rate limits: when a 429'd route may be tried again ----
+
+
+@pytest.mark.parametrize(
+    ("value", "seconds"),
+    [("7", 7.0), ("7.66s", 7.66), ("2m59.56s", 179.56), ("1h2m", 3720.0), ("250ms", 0.25), ("", None),
+     ("soon", None), (None, None)],
+)
+def test_parse_duration(value, seconds):
+    got = parse_duration(value)
+    assert got == pytest.approx(seconds) if seconds is not None else got is None
+
+
+@pytest.mark.parametrize(
+    ("headers", "text", "seconds"),
+    [
+        ({"retry-after": "7"}, "", 7.0),
+        ({"retry-after": "3", "x-ratelimit-reset-tokens": "40s"}, "", 3.0),  # retry-after wins
+        ({"x-ratelimit-remaining-requests": "12", "x-ratelimit-reset-tokens": "7.66s",
+          "x-ratelimit-reset-requests": "2m59.56s"}, "", 7.66),  # tokens per minute ran out
+        ({"x-ratelimit-remaining-requests": "0", "x-ratelimit-reset-tokens": "7.66s",
+          "x-ratelimit-reset-requests": "2m59.56s"}, "", 179.56),  # requests ran out
+        ({}, '{"error": {"message": "Rate limit reached. Please try again in 1m26.4s."}}', 86.4),
+        ({}, "", RATE_LIMIT_COOLDOWN),
+        ({"retry-after": "0.2"}, "", MIN_COOLDOWN),
+        ({"retry-after": str(10 * 24 * 3600)}, "", MAX_COOLDOWN),
+    ],
+)
+def test_cooldown_after(headers, text, seconds):
+    assert cooldown_after(httpx.Response(429, headers=headers, text=text)) == pytest.approx(seconds)
+
+
+async def test_429_cooldown_follows_retry_after():
+    clock = Clock()
+    rec = Recorder({"groq/g1": httpx.Response(429, headers={"retry-after": "7"})})
+    c = groq_client(rec, clock)
+    await c.parse_message("hi", [])
+    assert rec.names == ["groq/g1", "groq/g2"]
+    clock.t += 6
+    await c.parse_message("hi", [])
+    assert rec.names[2:] == ["groq/g2"]  # still cooling down
+    clock.t += 2
+    rec.answers = {}
+    await c.parse_message("hi", [])
+    assert rec.names[3:] == ["groq/g1"]  # 8 s later the better model is back, not after a whole minute
+
+
+async def test_every_route_failed_waits_for_the_soonest_reset():
+    clock, slept = Clock(), []
+    rec = Recorder({
+        "groq/g1": httpx.Response(429, headers={"retry-after": "2"}),
+        "groq/g2": httpx.Response(429, headers={"retry-after": "30"}),
+        "openrouter/m1": httpx.Response(503),
+        "openrouter/m2": httpx.Response(429),
+    })
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.t += seconds
+        rec.answers = {}  # the limit has reset
+
+    c = LLMClient(groq_settings(), httpx.AsyncClient(transport=httpx.MockTransport(rec)), clock, sleep)
+    assert (await c.parse_message("hi", [])).kind == "unknown"
+    assert slept == [2.0]
+    assert rec.names == ["groq/g1", "groq/g2", "openrouter/m1", "openrouter/m1", "openrouter/m2", "groq/g1"]
+
+
+async def test_no_wait_when_the_soonest_reset_is_far():
+    slept = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    rec = Recorder({name: httpx.Response(429, headers={"retry-after": "20"})
+                    for name in ("groq/g1", "groq/g2", "openrouter/m1", "openrouter/m2")})
+    c = LLMClient(groq_settings(), httpx.AsyncClient(transport=httpx.MockTransport(rec)), Clock(), sleep)
+    with pytest.raises(LLMError, match="all models failed"):
+        await c.complete_text(MSGS)
+    assert slept == [] and len(rec.calls) == 4
+
+
+async def test_usage_is_logged_without_content(caplog):
+    caplog.set_level("INFO", logger="gymbot.llm.openrouter")
+    body = {"choices": [{"message": {"content": "секретный ответ"}}], "usage": {"prompt_tokens": 2418, "completion_tokens": 95}}
+    rec = Recorder({"groq/g1": httpx.Response(200, json=body)})
+    assert await groq_client(rec).complete_text(MSGS) == "секретный ответ"
+    assert "groq/g1 tokens: prompt 2418, completion 95" in caplog.text
+    assert "секретный" not in caplog.text and "stt-key" not in caplog.text

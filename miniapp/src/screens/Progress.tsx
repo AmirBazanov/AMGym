@@ -5,6 +5,7 @@ import { bestE1rm } from '../progression'
 import { currentRun, useStore } from '../store'
 import { exerciseSeries, formatKg, formatShortDate, formatTonnage, weeklyVolume } from '../stats'
 import { haptic } from '../telegram'
+import { BodyWeightSection } from './ProgressWeight'
 
 type Metric = 'maxWeight' | 'e1rm' | 'volume'
 const METRICS: { key: Metric; label: string; title: string; unit: string }[] = [
@@ -28,12 +29,16 @@ export function Progress() {
   const [metric, setMetric] = useState<Metric>('maxWeight')
   const [period, setPeriod] = useState<number | null>(56)
 
+  // Body weight does not depend on workouts: shown even before the first one.
   if (!names.length)
     return (
-      <div className="empty">
-        <div className="big">📈</div>
-        Графики появятся после первой тренировки.
-      </div>
+      <>
+        <div className="hero">
+          <div className="eyebrow">Прогресс</div>
+        </div>
+        <div className="card hint">Графики силы появятся после первой тренировки.</div>
+        <BodyWeightSection />
+      </>
     )
 
   const series = exerciseSeries(history, name, period)
@@ -162,6 +167,8 @@ export function Progress() {
       <div className="chart-card">
         <BarSeries data={weekly} x="label" y="tons" unit="т" />
       </div>
+
+      <BodyWeightSection />
     </>
   )
 }

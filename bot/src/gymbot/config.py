@@ -75,11 +75,18 @@ class Settings(BaseSettings):
     # false = only the HTTP server (Mini App + API), handy for UI work without Telegram access.
     run_bot: bool = True
 
+    # Daily copy of the SQLite database to the owner's Telegram chat (gymbot.services.backup), plus local
+    # rotated copies next to the database in backups/. Empty = on for BOT_MODE=webhook (the server), off otherwise.
+    backup_enabled: bool | None = None
+    backup_hour: int = Field(default=4, ge=0, le=23)  # local hour in TIMEZONE
+
     @model_validator(mode="after")
     def _derive_urls(self) -> "Settings":
         self.public_url = self.public_url.strip().rstrip("/")
         if not self.miniapp_url:
             self.miniapp_url = self.public_url
+        if self.backup_enabled is None:
+            self.backup_enabled = self.bot_mode == "webhook"
         return self
 
     @property

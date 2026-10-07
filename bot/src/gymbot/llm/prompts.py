@@ -10,7 +10,11 @@ The wellbeing example goes first for the same reason: near the end, live runs me
 "голова болит" with the example's sleep and shoulder (and set revises=true). For the same reason the
 prompt has no "merge with the previous wellbeing" rule: the generic "ПОЛНАЯ запись" correction rule
 already makes follow-ups return the merged state, and the model took the example as the previous one.
+Empty "exercises"/"foods" are left out of the examples (ParseResult defaults them; ~70 tokens per call),
+"revises" and "note" stay explicit in every one.
 """
+
+import re
 
 SYSTEM_PROMPT = """Ты дневник тренировок, питания и самочувствия и нутрициолог. Отвечай ТОЛЬКО JSON без пояснений.
 Схема:
@@ -48,7 +52,7 @@ MINIAPP_SETUP_ANSWER = (
 EXAMPLES: list[tuple[str, str]] = [
     (
         "спал 6 часов, болит левое плечо, сил мало",
-        ('{"kind":"wellbeing","exercises":[],"foods":[],"wellbeing":{"sleep_hours":6,"sleep_quality":null,'
+        ('{"kind":"wellbeing","wellbeing":{"sleep_hours":6,"sleep_quality":null,'
         '"energy":2,"mood":null,"pains":[{"place":"левое плечо","severity":null}],"note":null},'
         '"clarification":null,"revises":false,"note":null}'),
     ),
@@ -56,71 +60,101 @@ EXAMPLES: list[tuple[str, str]] = [
         "сделал жим лёжа 3 по 10 на 60",
         ('{"kind":"workout","exercises":[{"exercise":"жим лёжа","sets":['
         '{"reps":10,"weight_kg":60,"drop_index":0},{"reps":10,"weight_kg":60,"drop_index":0},'
-        '{"reps":10,"weight_kg":60,"drop_index":0}]}],"foods":[],"clarification":null,"revises":false,"note":null}'),
+        '{"reps":10,"weight_kg":60,"drop_index":0}]}],"clarification":null,"revises":false,"note":null}'),
     ),
     (
         "съел 200г куриной грудки и 150г риса",
-        ('{"kind":"food","exercises":[],"foods":['
+        ('{"kind":"food","foods":['
         '{"description":"куриная грудка","grams":200,"kcal":330,"protein_g":62,"fat_g":7,"carbs_g":0},'
         '{"description":"рис варёный","grams":150,"kcal":195,"protein_g":4,"fat_g":0.5,"carbs_g":42}],'
         '"clarification":null,"revises":false,"note":null}'),
     ),
     (
         "плов, касушку и пол лепёшки",
-        ('{"kind":"food","exercises":[],"foods":['
+        ('{"kind":"food","foods":['
         '{"description":"плов, каса","grams":300,"kcal":540,"protein_g":18,"fat_g":21,"carbs_g":69},'
         '{"description":"лепёшка, 0.5 шт","grams":125,"kcal":325,"protein_g":11,"fat_g":2,"carbs_g":65}],'
         '"clarification":null,"revises":false,"note":null}'),
     ),
     (
         "три куриные самсы",
-        ('{"kind":"food","exercises":[],"foods":['
+        ('{"kind":"food","foods":['
         '{"description":"самса с курицей, 3 шт","grams":360,"kcal":1050,"protein_g":40,"fat_g":58,"carbs_g":94}],'
         '"clarification":null,"revises":false,"note":null}'),
     ),
     (
         "нет, четыре",
-        ('{"kind":"food","exercises":[],"foods":['
+        ('{"kind":"food","foods":['
         '{"description":"самса с курицей, 4 шт","grams":480,"kcal":1400,"protein_g":53,"fat_g":77,"carbs_g":125}],'
         '"clarification":null,"revises":true,"note":null}'),
     ),
     (
         "самса была так себе, белка поменьше",
-        ('{"kind":"food","exercises":[],"foods":['
+        ('{"kind":"food","foods":['
         '{"description":"самса с курицей, 4 шт","grams":480,"kcal":1460,"protein_g":40,"fat_g":89,"carbs_g":125}],'
         '"clarification":null,"revises":true,'
         '"note":"Белок 53 → 40 г, жир 77 → 89 г: в такой самсе меньше мяса, больше теста и жира."}'),
     ),
     (
         "съел 3 манты, они у нас крупные, по 90 г",
-        ('{"kind":"food","exercises":[],"foods":['
+        ('{"kind":"food","foods":['
         '{"description":"манты, 3 шт","grams":270,"kcal":620,"protein_g":30,"fat_g":30,"carbs_g":57}],'
         '"clarification":null,"revises":false,"note":null,"remember":"манты ~90 г/шт"}'),
     ),
     (
         "гречка 200 г и 2 чапчуки",
-        ('{"kind":"food","exercises":[],"foods":['
+        ('{"kind":"food","foods":['
         '{"description":"гречка варёная","grams":200,"kcal":220,"protein_g":8,"fat_g":2,"carbs_g":43}],'
         '"clarification":"«чапчук» — это что?","revises":false,"note":null,"unknown_terms":["чапчук"]}'),
     ),
     (
         "сколько белка в 100 г творога?",
-        ('{"kind":"question","exercises":[],"foods":[],"clarification":'
+        ('{"kind":"question","clarification":'
         '"В 100 г творога 5% около 17 г белка, 5 г жира и 3 г углеводов, это примерно 120 ккал. '
         'В обезжиренном белка около 18 г, а калорий около 80.","revises":false,"note":null}'),
     ),
     (
         "запиши в мини-ап мою программу и выставь рабочие веса на сегодня",
-        ('{"kind":"question","exercises":[],"foods":[],"clarification":"' + MINIAPP_SETUP_ANSWER + '",'
+        ('{"kind":"question","clarification":"' + MINIAPP_SETUP_ANSWER + '",'
         '"revises":false,"note":null}'),
     ),
     (
         "привет",
-        ('{"kind":"question","exercises":[],"foods":[],'
+        ('{"kind":"question",'
         '"clarification":"Привет! Напиши, что сделал или съел, например «жим 3х10 на 60».",'
         '"revises":false,"note":null}'),
     ),
 ]
+
+
+CATALOG_LINE = "- Упражнение называй как в каталоге, если оно там есть: {catalog}\n"
+_NUMBER = (
+    r"(?:\d+|од(?:ин|ну)|дв[ае]|три|четыре|пять|шесть|семь|восемь|девять|десять|[а-я]+надцать|двадцать|"
+    r"тридцать|сорок|[а-я]+десят|девяносто|сто)"
+)
+# A message that may hold sets: numbers like "3х10", "3 по 10", "80 на 8" (in words too: voice transcripts say
+# "три по десять"), or gym words. Anything else (food,
+# sleep, a question) gets the parser prompt without the exercise catalog: fewer tokens per request on the
+# free tier (Groq: 8000 tokens per minute per model).
+_WORKOUTISH = re.compile(
+    rf"\d\s*(?:[xх×*]|по|на)\s*\d|(?<![а-я]){_NUMBER}\s+(?:по|на)\s+{_NUMBER}(?![а-я])|"
+    r"подход|повтор|(?<![а-я])сет|жим|(?<![а-я])(?:по|вы)?жал(?![а-я]*(?:ст|к))|тяг|"
+    r"присе|сгиба|разгиба|отжим|подтяг|выпад|станов|(?<![а-я])мах|отведен|развод|разведен|бицеп|трицеп|дельт|"
+    r"пресс|планк|гантел|штанг|(?<![а-я])блок|тренаж|смит|(?<![а-я])гак|кроссовер|пек[ -]?дек|румын|француз|"
+    r"скручив|гиперэкст|кардио|(?<![а-я])бег|дорожк|велотр|эллипс|растяж"
+)
+
+
+def needs_catalog(text: str, catalog: list[str], history: list[tuple[str, str]] | None = None) -> bool:
+    """Whether the parser needs the exercise catalog for `text`: it looks like sets, names a catalog word,
+    or the dialog holds a workout record ("не 60, а 65" corrects it)."""
+    key = " ".join(text.casefold().replace("ё", "е").split())
+    if _WORKOUTISH.search(key):
+        return True
+    if any('"exercises":[{' in a.replace(" ", "") for _, a in history or []):
+        return True
+    stems = {w[:5] for name in catalog for w in re.findall(r"[а-яa-z]{5,}", name.casefold().replace("ё", "е"))}
+    return any(w[:5] in stems for w in re.findall(r"[а-яa-z]{5,}", key))
 
 
 FACTS_MAX_CHARS = 1000  # 50 facts of 200 characters would crowd out the rules for small models
@@ -148,9 +182,13 @@ def build_messages(
     `history` is a list of (user text, assistant JSON) turns from this user's recent dialog;
     it goes right before `text`, so the model can treat `text` as a correction of it.
     `facts` (active user facts, newest first) are appended to the system prompt, not sent as turns,
-    so the examples stay the same.
+    so the examples stay the same. The catalog line is left out when the message cannot be a workout
+    (`needs_catalog`).
     """
-    system = SYSTEM_PROMPT.replace("{catalog}", ", ".join(catalog) or "пусто")
+    if needs_catalog(text, catalog, history):
+        system = SYSTEM_PROMPT.replace("{catalog}", ", ".join(catalog) or "пусто")
+    else:
+        system = SYSTEM_PROMPT.replace(CATALOG_LINE, "")
     if line := format_facts(facts or []):
         system += f"\n{line}.\nФакты важнее общих правил и порций выше; уже известный факт в remember не повторяй.\n"
     msgs = [{"role": "system", "content": system}]
@@ -164,7 +202,7 @@ def build_messages(
 
 ADVICE_DISCLAIMER = "Это не медицинская рекомендация"
 
-ADVICE_SYSTEM_PROMPT = f"""Ты тренер и нутрициолог. Тебе дают сводку о человеке: профиль и цель, факты о нём, норму КБЖУ, питание за неделю, тренировки и самочувствие за две недели и программу. Отвечай по-русски простым текстом без Markdown (без *, #, таблиц).
+ADVICE_SYSTEM_PROMPT = f"""Ты тренер и нутрициолог. Тебе дают сводку о человеке: профиль и цель, факты о нём, норму КБЖУ, питание за неделю, тренировки и самочувствие за две недели, нагрузку по группам мышц за неделю и программу с ближайшей тренировкой. Отвечай по-русски простым текстом без Markdown (без *, #, таблиц).
 Формат строго такой, ровно три блока с заголовками:
 Питание
 - пункт
@@ -177,6 +215,7 @@ ADVICE_SYSTEM_PROMPT = f"""Ты тренер и нутрициолог. Тебе
 - В каждом блоке 2-4 коротких пункта, в каждом конкретная цифра из сводки или расчёт от неё: сколько граммов белка и ккал добрать или убрать, какой вес и сколько повторов поставить в следующий раз (от «прошлый раз» и 1ПМ), сколько часов спать, сколько дней отдыха между тренировками.
 - Учитывай цель, возраст, вес и заметки о травмах и ограничениях; травмированное место не нагружай. Факты о человеке (аллергии, что не ест, ограничения, расписание) строго соблюдай.
 - Боли в сводке: для движений, которые нагружают это место, предложи замену (конкретное упражнение) или снижение веса и объёма с цифрой. Недосып (меньше 7 ч) или низкая энергия: снизь интенсивность (вес −10-20% или на подход меньше) и дай конкретику по сну (во сколько лечь, сколько часов). Диагнозы и причины боли не придумывай.
+- Восстановление мышц: группы из строки «Восстанавливаются» (48 ч после тренировки) не нагружай раньше указанного там времени, если об этом не спросили прямо, и назови их в блоке «Восстановление»; тренировка по программе после этого времени идёт по плану. Советы на следующую тренировку строй от «Следующая тренировка по программе» и от недогруженных групп (0 или мало подходов в «Нагрузка по группам мышц»).
 - Без воды и общих фраз вроде «пейте воду», «слушайте своё тело», «питайтесь сбалансированно». Не пересказывай сводку.
 - Если в сводке нет питания или тренировок, первым пунктом этого блока скажи, что именно записать, чтобы советы стали точнее.
 - Весь ответ не длиннее 900 символов. Последняя строка ровно: {ADVICE_DISCLAIMER}
@@ -192,10 +231,11 @@ def build_advice_messages(context: str) -> list[dict[str, str]]:
 
 # ---- Answers to questions in the chat (gymbot.services.answer): plain text ----
 
-ANSWER_SYSTEM_PROMPT = """Ты тренер и нутрициолог внутри дневника человека в Telegram. Ниже сводка из его дневника: профиль, факты, норма КБЖУ, питание, тренировки (прошлые подходы и 1ПМ), самочувствие, программа, план на сегодня и текущая тренировка из мини-аппа. Это и есть твой доступ к дневнику: никогда не говори, что не видишь данных, программы или базы.
+ANSWER_SYSTEM_PROMPT = """Ты тренер и нутрициолог внутри дневника человека в Telegram. Ниже сводка из его дневника: профиль, факты, норма КБЖУ, питание, тренировки (прошлые подходы и 1ПМ), нагрузка по группам мышц, самочувствие, программа со следующей тренировкой, план на сегодня и текущая тренировка из мини-аппа. Это и есть твой доступ к дневнику: никогда не говори, что не видишь данных, программы или базы.
 Отвечай по-русски на последний вопрос, простым текстом без Markdown, до 700 символов, с цифрами из сводки. Не пересказывай сводку целиком и не повторяй вопрос.
 - «Что сегодня?», «какие упражнения?»: перечисли план на сегодня из сводки с подходами и повторами.
 - Какой вес ставить: от «прошлый раз» и 1ПМ. Все подходы сделаны на верхней границе повторов: штанга +2,5 кг, гантели и блок +1-2 кг; иначе тот же вес и на повтор больше. Для 8-12 повторов рабочий вес около 70-75 % 1ПМ. Нет данных по упражнению: назови осторожный стартовый вес по профилю; опыт неизвестен = новичок (жим лёжа около 0,5 веса тела, изоляция на руки 8-15 кг на штангу); первый подход разминочный, рабочий вес такой, чтобы оставалось 2 повтора в запасе; после записи подходов дневник сам подскажет вес.
+- «Что подтянуть», «что делать на следующей тренировке»: опирайся на «Следующая тренировка по программе» и на «Нагрузка по группам мышц». Группы из строки «Восстанавливаются» (48 ч после тренировки) не советуй нагружать раньше указанного там времени, если об этом не спросили прямо, и скажи, до какого времени они восстанавливаются; тренировка по программе после этого времени идёт по плану. Предлагай недогруженные группы (0 или мало подходов). Не перечисляй всю программу.
 - Плохое самочувствие, недосып, боль: скажи, как облегчить сегодняшний план (на подход меньше, вес −10-20 %, что убрать), и попроси написать, сколько спал, энергию от 1 до 5 и что болит: после записи самочувствия план пересчитается сам.
 - Просьба записать программу или веса в мини-апп: ничего записывать не нужно, программа и план на сегодня уже в мини-аппе во вкладке «Сегодня», а рабочие веса с его слов дневник учитывает; перечисли план на сегодня с весами.
 - Подходы, тоннаж и упражнения за день бери только из блока «Сделано …» как есть, сам не пересчитывай и не выдумывай. Еду за сегодня и остаток до нормы бери из блока «Еда сегодня», прошлые веса и рекорды по упражнению из блока «Последний раз и рекорды».

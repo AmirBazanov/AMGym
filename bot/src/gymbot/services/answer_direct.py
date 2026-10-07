@@ -306,13 +306,19 @@ def exercise_line(h: ExerciseHistory, record_first: bool = False, today: date | 
     return _sentence(f"{_cap(h.name)}: {last}") + (f" Рекорд: {rec}." if rec else "")
 
 
-def records_block(history: dict[str, ExerciseHistory]) -> str:
-    """For the model: per exercise (most recent first, capped) the last day's sets and the best 1RM."""
+def records_block(history: dict[str, ExerciseHistory], done_day: date | None = None) -> str:
+    """For the model: per exercise (most recent first, capped) the last day's sets and the best 1RM.
+
+    `done_day`: the day the "Сделано …" block lists (gymbot.services.answer.done_block); exercises last done
+    that day point there instead of repeating their sets, so more exercises fit in RECORDS_MAX."""
     if not history:
         return "Рекордов нет: в истории нет подходов."
     lines = ["Последний раз и рекорды по упражнениям, вся история:"]
     for h in list(history.values())[:RECORDS_IN_CONTEXT]:
-        line = f"- {h.name}: {last_time(h)}"
+        if done_day is not None and h.last_day == done_day:
+            line = f"- {h.name}: последний раз {done_day:%d.%m} (подходы в блоке «Сделано»)"
+        else:
+            line = f"- {h.name}: {last_time(h)}"
         if rec := record(h):
             line += f"; рекорд {rec}"
         if len("\n".join([*lines, line])) > RECORDS_MAX:

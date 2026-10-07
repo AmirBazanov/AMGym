@@ -45,6 +45,7 @@ from gymbot.db.models import Exercise, Reminder, User, UserFact, UserProgram, Wo
 from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import OpenRouterClient, routes_from
 from gymbot.services import baselines, live
+from gymbot.services import body_weight as bwt
 from gymbot.services import facts as fx
 from gymbot.services import nutrition as nut
 from gymbot.services import overrides as ov
@@ -598,6 +599,26 @@ def build_mcp(
             raise ToolError("Сегодня не тренировочный день по программе: плана нет.")
         return dumps({"readiness": built.out.readiness, "adjusted": built.out.adjusted,
                       "text": day_plan.plan_text(built)})
+
+    @tool(WRITE)
+    async def log_body_weight(
+        weight_kg: Annotated[float, Field(ge=bwt.MIN_KG, le=bwt.MAX_KG)],
+        day: Annotated[date | None, Field(description="YYYY-MM-DD, местная дата; null = сегодня")] = None,
+    ) -> str:
+        """Записать вес тела владельца за день (одно значение в день: повтор за тот же день заменяет его).
+        Самый свежий день становится весом в профиле."""
+        when = day or today()
+        if not bwt.MIN_DATE <= when <= today():
+            raise ToolError("Дата не может быть в будущем.")
+        async with owner_session() as (session, user):
+            now = datetime.now(UTC)
+            saved = await bwt.upsert(session, user, when, weight_kg, bwt.measured_at_for(when, tz, now), "mcp")
+            await session.commit()
+            live.publish(user.id, "weight", "state")
+            return dumps({
+                "date": when.isoformat(), "weight_kg": float(saved.row.weight_kg),
+                "replaced": num(saved.replaced), "profile_updated": saved.profile_updated,
+            })
 
     @tool(WRITE)
     async def log_note(text: Annotated[str, Field(max_length=2000)]) -> str:

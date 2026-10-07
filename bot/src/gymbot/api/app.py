@@ -1,6 +1,7 @@
 """HTTP API for the Mini App, plus the built Mini App itself (miniapp/dist) on the same port."""
 
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, date, datetime, timedelta
@@ -25,6 +26,7 @@ from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.mcp_server import MCP_PATH, BearerGuard, mcp_http
 from gymbot.services import active_workout as aw
 from gymbot.services import baselines as bl
+from gymbot.services import body_weight as bwt
 from gymbot.services import facts as fx
 from gymbot.services import live
 from gymbot.services import nutrition as nut
@@ -40,6 +42,7 @@ from gymbot.services.users import active_program, get_or_create_user, set_progra
 
 log = logging.getLogger(__name__)
 
+HEALTH_TIMEOUT = 2.0  # seconds for the database ping in /api/health
 NUTRITION_MIN_DATE = date(2000, 1, 1)
 
 
@@ -235,6 +238,17 @@ def create_app(
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
+        """Open, cheap and touching the database: the outside uptime check (.github/workflows/uptime.yml)."""
+
+        async def ping() -> None:
+            async with sessionmaker() as session:
+                await session.execute(select(1))
+
+        try:
+            await asyncio.wait_for(ping(), HEALTH_TIMEOUT)
+        except Exception as e:
+            log.warning("health: database check failed: %s", type(e).__name__)
+            raise HTTPException(503, "database unavailable") from e
         return {"status": "ok"}
 
     @app.get("/api/state")
@@ -365,6 +379,38 @@ def create_app(
         await session.delete(entry)
         await session.commit()
         live.publish(user.id, "wellbeing", "plan")
+
+    # Body weight, one measurement per local day (gymbot.services.body_weight). Writes publish "weight" (the
+    # chart) and "state" (the profile weight follows the newest day).
+    @app.get("/api/body-weight")
+    async def list_body_weight(
+        session: Session, tg: TgUser, days: Annotated[int, Query(ge=1, le=bwt.MAX_DAYS)] = bwt.DEFAULT_DAYS
+    ) -> list[bwt.BodyWeightOut]:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        rows = await bwt.series(session, user.id, datetime.now(tz).date(), days)
+        return [bwt.entry_out(r) for r in rows]
+
+    @app.post("/api/body-weight")
+    async def post_body_weight(body: bwt.BodyWeightIn, session: Session, tg: TgUser) -> bwt.BodyWeightOut:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        now = datetime.now(UTC)
+        today = now.astimezone(tz).date()
+        day = body.date or today
+        if not bwt.MIN_DATE <= day <= today:
+            raise HTTPException(422, f"date must be {bwt.MIN_DATE}..{today}")
+        saved = await bwt.upsert(session, user, day, body.weightKg, bwt.measured_at_for(day, tz, now), "miniapp")
+        out = bwt.entry_out(saved.row)
+        await session.commit()
+        live.publish(user.id, "weight", "state")
+        return out
+
+    @app.delete("/api/body-weight/{day}", status_code=204)
+    async def delete_body_weight(day: date, session: Session, tg: TgUser) -> None:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        if not await bwt.remove(session, user, day):
+            raise HTTPException(404, "not found")
+        await session.commit()
+        live.publish(user.id, "weight", "state")
 
     # 409 only for the active-facts limit: the Mini App shows its limit message on any 409.
     @app.get("/api/facts")

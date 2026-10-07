@@ -256,14 +256,19 @@ def loads(place: str, exercise: str) -> bool:
     return bool(_LOADS[region].search(name))
 
 
-# Muscle groups for soreness and for checking replacements; legs first ("сгибания ног" is not biceps).
+# Muscle groups for soreness, for checking replacements and for the weekly load in the advice summary
+# (gymbot.services.advice.muscle_load). Checked in order: abs first ("подъём ног в висе"), then legs
+# ("сгибания ног" is not biceps, "становая тяга" is not back), triceps before chest ("французский жим лёжа").
 _GROUPS = [
-    ("legs", re.compile(r"ног|квадр|бедр|ягодиц|присед|выпад|румынск|гак|икр")),
+    ("abs", re.compile(r"пресс|скручивани|планк|подъем[а-я ]* ног[а-я ]* в вис")),
+    ("legs", re.compile(r"(?<![а-я])ног|квадр|бедр|ягодиц|присед|выпад|румынск|станов|гак|икр")),  # not "горизонтальНОГо"
     ("triceps", re.compile(r"трицепс|французск|разгибани|жим узким")),
     ("biceps", re.compile(r"бицепс|сгибани|молотк|предплеч")),
-    ("shoulders", re.compile(r"дельт|плеч|жим[а-я ]* сидя|жим стоя|армейск|отведени|тяга к подбородку|махи")),
-    ("chest", re.compile(r"груд|жим[а-я ]* лежа|разведени|отжимани|кроссовер|бабочк")),
-    ("back", re.compile(r"спин|широч|тяга|подтягивани|пуловер")),
+    ("shoulders", re.compile(
+        r"дельт|плеч|жим[а-я ]* сидя|жим стоя|жим[а-я ]* над головой|армейск|отведени|тяга к подбородку|махи"
+    )),
+    ("chest", re.compile(r"груд|жим[а-я ]* лежа|разведени|разводк|отжимани|кроссовер|бабочк")),
+    ("back", re.compile(r"спин|широч|тяга|подтягивани|пуловер|гиперэкстенз")),
 ]
 _EQUIPMENT = [
     ("cable", re.compile(r"блок|кроссовер")),

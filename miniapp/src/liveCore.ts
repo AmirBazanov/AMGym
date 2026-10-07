@@ -2,7 +2,7 @@
 // the reconnect backoff, the refresh bus for server-only screens and the connection state machine.
 // No window/fetch/EventSource here, so tests run in node; live.ts wires it to the browser.
 
-export const TOPICS = ['state', 'nutrition', 'reminders', 'facts', 'wellbeing', 'plan', 'workouts'] as const
+export const TOPICS = ['state', 'nutrition', 'reminders', 'facts', 'wellbeing', 'plan', 'workouts', 'weight'] as const
 export type Topic = (typeof TOPICS)[number]
 
 const KNOWN = new Set<string>(TOPICS)
