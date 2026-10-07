@@ -71,6 +71,7 @@ from gymbot.config import Settings
 from gymbot.db.models import FoodEntry, User
 from gymbot.db.session import Sessionmaker
 from gymbot.handlers import body_weight, saved_edits
+from gymbot.handlers import products as product_cards
 from gymbot.handlers.chat_settings import send_staged, stage_settings
 from gymbot.handlers.plan import send_after_wellbeing
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
@@ -682,6 +683,12 @@ async def process_text(
     if m := REMEMBER_CMD.match(text):
         await _offer_command(message, m["fact"], raw, prefix)
         return
+    # Packaged products (handlers/products.py): an amount for the open product card ("60 г") unless the parser's
+    # open dialog is newer, or a short message about a saved product ("тот же батончик", "протеин 1 скуп").
+    ex = recent_exchange(user_id, message.date)
+    dialog_at = ex.at if ex is not None and _dialog_open(user_id, message.date) else None
+    if await product_cards.on_text(message, text, raw, sessionmaker, dialog_at=dialog_at, prefix=prefix):
+        return
     # "удали самсу", "самса была 2, а не 3": saved records, their own preview (handlers/saved_edits.py). Not while
     # a preview or the model's question is open: then it revises that preview in the dialog below.
     if not _dialog_open(user_id, message.date) and await saved_edits.handle(
@@ -706,8 +713,10 @@ async def process_text(
     # Without a record in the dialog the parser sees the recent questions, so "а по жиму?" stays a question.
     history = prev.history() if prev else _answers_history(user_id, message.date)
     await message.bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
+    # Saved products the message names, with their exact numbers (only those: the prompt stays short).
+    mine = await product_cards.parser_context(sessionmaker, user_id, text)
     try:
-        result = await llm.parse_message(text, catalog, history or None, known)
+        result = await llm.parse_message(text, catalog, history or None, [mine, *known] if mine else known)
     except LLMError:
         if staged is not None:
             await send_staged(message, staged, prefix=prefix)
@@ -741,8 +750,13 @@ async def reply_with_result(
 
     `text` stands for the message in the dialog history the parser sees with the next message (so "их было
     17" revises this preview); `raw_text` is how it is stored; `known` the user's facts, if already loaded.
+    The result never revises an open preview: its model did not see that record, so a common name ("плов"
+    typed with "лепёшка", then a photo of the plov) would silently drop the rest. It gets its own preview and
+    the earlier one keeps its buttons. Answers to the parser's question before any record still chain.
     """
     prev = recent_exchange(message.from_user.id, message.date)  # type: ignore[union-attr]
+    if prev is not None and prev.token:
+        prev = None
     await _reply_parsed(message, text, raw_text, prefix, settings, sessionmaker, llm, prev, known or [], result)
 
 
@@ -909,6 +923,8 @@ async def save(
         PENDING[token] = pending  # let the user press again
         raise
     _forget(cb.from_user.id, token)
+    # "не 3, а 2" right after this tap fixes the saved rows, not a new preview (handlers/saved_edits.py)
+    saved_edits.remember_saved(cb.from_user.id, pending.result.kind, pending.raw_text, pending.sent_at)
     LOOKUPS.pop(token, None)  # the variants are moot once the record is saved
     if cb.message:
         saved = pending.result.model_copy(update={"clarification": None})  # the question is moot now

@@ -310,6 +310,35 @@ class BodyWeight(Base):
     raw_text: Mapped[str | None] = mapped_column(Text)  # the chat message ("[voice] ..." for voice)
 
 
+# --- Packaged products the user has eaten (barcode / label / manual), for exact repeats ---
+
+class Product(Base):
+    """A packaged product with label numbers per 100 g, remembered when its food entry is saved.
+
+    `barcode` is unique per user (NULLs allowed: a label photo may have none). `updated_at` is also the last
+    time the product was eaten, so "тот же батончик" picks the newest. `aliases`: extra names, comma-separated.
+    See gymbot.services.products.
+    """
+
+    __tablename__ = "products"
+    __table_args__ = (UniqueConstraint("user_id", "barcode"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    brand: Mapped[str | None] = mapped_column(String(200))
+    barcode: Mapped[str | None] = mapped_column(String(32))
+    kcal_100g: Mapped[Decimal] = mapped_column(Numeric(6, 1))
+    protein_100g: Mapped[Decimal] = mapped_column(Numeric(5, 1))
+    fat_100g: Mapped[Decimal] = mapped_column(Numeric(5, 1))
+    carbs_100g: Mapped[Decimal] = mapped_column(Numeric(5, 1))
+    net_weight_g: Mapped[Decimal | None] = mapped_column(Numeric(7, 1))  # the whole package
+    serving_g: Mapped[Decimal | None] = mapped_column(Numeric(6, 1))  # one serving / scoop
+    source: Mapped[str] = mapped_column(String(16))  # off | label | manual
+    aliases: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 # --- Reminders (daily, local time in TIMEZONE) ---
 
 class Reminder(Base):

@@ -7,7 +7,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -193,14 +193,20 @@ async def save_from_chat(
 
 
 async def delete_last_chat_sets(session: AsyncSession, user: User) -> int:
-    """/undo: remove the sets added by the latest chat message. Returns how many were removed."""
-    last = await session.scalar(
-        select(WorkoutSet)
-        .join(Workout)
+    """/undo: remove the sets added by the latest chat message. Returns how many were removed.
+
+    The latest message is the trailing run of set_index in the chat workout save_from_chat stamped last
+    (finished_at). Not the highest set id: an edit from the chat (gymbot.services.saved_edits) may insert
+    sets in the middle of a workout, or of an older one."""
+    latest = await session.scalar(
+        select(Workout.id)
         .where(Workout.user_id == user.id, Workout.source == "chat")
-        .order_by(WorkoutSet.id.desc())
+        .order_by(func.coalesce(Workout.finished_at, Workout.started_at).desc(), Workout.id.desc())
         .limit(1)
     )
+    last = await session.scalar(
+        select(WorkoutSet).where(WorkoutSet.workout_id == latest).order_by(WorkoutSet.set_index.desc()).limit(1)
+    ) if latest is not None else None
     if last is None:
         return 0
     sets = (

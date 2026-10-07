@@ -11,6 +11,7 @@ from test_log_text import T0, USER, FakeLLM, callback, food, message, token_of
 from gymbot.db.models import FoodEntry, User, WellbeingEntry, Workout, WorkoutSet
 from gymbot.handlers import log_text
 from gymbot.handlers import saved_edits as hse
+from gymbot.llm.schemas import ParsedExercise, ParsedSet, ParseResult
 from gymbot.services import live
 from gymbot.services import saved_edits as se
 from gymbot.services.programs import get_or_create_exercise
@@ -802,8 +803,8 @@ async def test_cancel_a_hard_offer(llm, settings, db):
 
 
 async def test_cancel_a_soft_offer_adds_the_hint(llm, settings, db):
-    llm.answers = [food(1, "бутерброд"), food(1, "бутерброд без сыра")]
-    await saved("бутерброд", llm, settings, db)
+    llm.answers = [food(1, "бутерброд с сыром"), food(1, "бутерброд без сыра")]
+    await saved("бутерброд с сыром", llm, settings, db)
     soft = await send("бутерброд без сыра", llm, settings, db, T0 + timedelta(minutes=1))
     assert reply(soft).startswith("Исправить?")
     cb = callback(f"fixno:{fix_token(soft)}")
@@ -822,8 +823,8 @@ async def test_soft_edit_of_food_saved_two_hours_ago_goes_to_the_parser(llm, set
 
 
 async def test_soft_edit_just_inside_the_hour_routes(llm, settings, db):
-    llm.answers = [food(1, "бутерброд"), food(1, "бутерброд без сыра")]
-    await saved("бутерброд", llm, settings, db)
+    llm.answers = [food(1, "бутерброд с сыром"), food(1, "бутерброд без сыра")]
+    await saved("бутерброд с сыром", llm, settings, db)
     msg = await send("бутерброд без сыра", llm, settings, db, T0 + timedelta(minutes=se.SOFT_MINUTES - 1))
     assert reply(msg).startswith("Исправить?") and len(hse.OFFERS) == 1
 
@@ -857,7 +858,7 @@ async def test_workout_answer_for_a_food_edit_is_not_understood(llm, settings, d
 async def test_unchanged_answer_says_so(llm, settings, db):
     await add_food(db, T0 - timedelta(minutes=30))
     llm.answers = [food(3)]
-    e = await send("самса была 3, а не 2", llm, settings, db)
+    e = await send("исправь самсу", llm, settings, db)
     assert reply(e) == hse.SAME and not hse.OFFERS
 
 
@@ -931,10 +932,183 @@ def test_original_strips_the_edit_trail():
 def test_long_units_and_bolshe():
     today = T0.date()
     assert se.detect("в плове было 250 граммов, а не 350", today).pair == (250, 350)
-    assert se.detect("самса была больше, а не 120 г", today).kind is None
+    bolshe = se.detect("самса была больше, а не 120 г", today)  # no number pair, no wellbeing word: parser's
+    assert bolshe is None or bolshe.kind != "wellbeing"
 
 
 async def test_new_sleep_record_with_nothing_saved_goes_to_the_parser(llm, settings, db):
     llm.answers = [{"kind": "wellbeing", "wellbeing": {"sleep_hours": 5}}]
     msg = await send("спал 5 часов, а не 8", llm, settings, db)
     assert len(llm.bodies) == 1 and token_of(msg) in log_text.PENDING
+
+
+# ---- review fixes ----
+
+REVIEW_NEGATIVES = [
+    # 1: infinitives, questions and plain phrases are not commands
+    "как убрать живот", "хочу убрать живот к лету", "надо убрать сладкое", "удалить жир с боков как",
+    "нужно исправить технику", "поправить осанку", "исправить осанку упражнения", "удали программу",
+    "были у врача, а не в зале", "присед был тяжелый а не легкий", "убрать бы самсу", "можно удалить запись",
+    "стереть историю", "изменить вес в жиме", "поменял жим на присед, а не на тягу",
+    # 2: a new record with "а не" stays a new record
+    "съел 2 самсы, а не 3 как обычно", "присел 100 на 5, а не 95", "выпил 2 кофе, а не 1",
+    "сделал жим 85, а не 80", "пожал 90 на 3, а не 85", "доел плов, а не бросил",
+    # 3: plan and today's weights
+    "убери из плана жим", "давай сегодня жим 85, а не 80", "поставь жим 85, а не 80",
+    "завтра будет присед 100, а не 95", "в плане жим 85, а не 80", "удали напоминание про креатин",
+    # 4: another cup, not a fix
+    "ещё кофе без сахара", "еще чай без сахара", "второй бутерброд без сыра", "выпил чай без сахара",
+]
+
+
+@pytest.mark.parametrize("text", REVIEW_NEGATIVES)
+def test_review_negatives_do_not_route(text):
+    assert se.detect(text, TODAY) is None
+
+
+@pytest.mark.parametrize("text", ["как убрать живот", "надо убрать сладкое", "нужно исправить технику",
+                                  "были у врача, а не в зале", "съел 2 самсы, а не 3 как обычно"])
+async def test_review_negatives_reach_the_parser(text, llm, settings, db):
+    await add_food(db, T0 - timedelta(hours=1), "самса, 1 шт", kcal=400, grams=150, raw="самса")
+    llm.answers = [{"kind": "question", "clarification": "Ответ."}]
+    await send(text, llm, settings, db)
+    assert len(llm.bodies) == 1 and not hse.OFFERS and not hse.CHOICES
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["удали самсу", "удали пожалуйста самсу", "убери самсу", "сотри самсу", "исправь самсу", "поправь плов",
+     "измени жим", "самса была 2, а не 3", "не 3, а 2", "2, а не 3", "спал 7, а не 5", "сон был 7, а не 5",
+     "в жиме не 80, а 85", "не самса, а беляш", "настроение было отличное, а не плохое", "бутерброд без сыра",
+     "обед без хлеба", "удали вчерашнюю тренировку", "удали последний подход"],
+)
+def test_review_positives_route(text):
+    assert se.detect(text, TODAY) is not None
+
+
+def test_pozhaluysta_is_not_a_record_verb():
+    intent = se.detect("удали пожалуйста самсу", TODAY)
+    assert intent is not None and intent.words == ("самсу",)
+
+
+async def test_new_record_with_a_ne_never_edits_yesterday(llm, settings, db):
+    await add_food(db, T0 - timedelta(days=1), "самса, 1 шт", kcal=400, grams=150, raw="самса")
+    llm.answers = [food(2)]
+    msg = await send("съел 2 самсы, а не 3 как обычно", llm, settings, db)
+    assert token_of(msg) in log_text.PENDING and not hse.OFFERS
+
+
+async def test_pair_must_hold_the_old_value_exactly(llm, settings, db):
+    await add_food(db, T0 - timedelta(minutes=30), "самса, 1 шт", kcal=400, grams=150, raw="самса")
+    msg = await send("самса была 2, а не 3", llm, settings, db)
+    assert reply(msg).startswith("Не нашёл «самса» со значением 3") and llm.bodies == [] and not hse.OFFERS
+
+
+async def test_workout_pair_must_match_the_weight(llm, settings, db):
+    await add_workout(db, TODAY, [("Жим штанги лёжа", [(5, 95), (5, 95)])], source="chat", raw="жим 2 по 5 на 95")
+    msg = await send("в жиме было 100, а не 90", llm, settings, db)
+    assert reply(msg).startswith("Не нашёл") and not hse.OFFERS
+
+
+async def test_soft_needs_the_ingredient_in_the_saved_record(llm, settings, db):
+    await add_food(db, T0 - timedelta(minutes=20), "чай", kcal=2, grams=200, raw="чай")
+    llm.answers = [food(1, "чай без сахара")]
+    msg = await send("чай без сахара", llm, settings, db)
+    assert token_of(msg) in log_text.PENDING and not hse.OFFERS  # another cup: the parser's preview
+
+
+async def test_soft_edits_when_the_ingredient_is_there(llm, settings, db):
+    await add_food(db, T0 - timedelta(minutes=20), "чай с сахаром", kcal=60, grams=200, raw="чай с сахаром")
+    llm.answers = [food(1, "чай")]
+    msg = await send("чай без сахара", llm, settings, db)
+    assert reply(msg).startswith("Исправить?") and len(hse.OFFERS) == 1
+
+
+async def test_soft_meal_respects_the_hour_and_never_yesterday(llm, settings, db):
+    lunch = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)  # yesterday 13:00 in Moscow
+    await add_food(db, lunch, "хлеб", kcal=250, grams=100, raw="обед: суп и хлеб")
+    await add_food(db, T0 - timedelta(hours=2), "хлеб", kcal=250, grams=100, raw="обед: суп и хлеб")
+    llm.answers = [{"kind": "question", "clarification": "Ок."}]
+    await send("обед без хлеба", llm, settings, db)
+    assert len(llm.bodies) == 1 and not hse.OFFERS  # both lunches are older than SOFT_MINUTES
+
+
+async def test_soft_meal_within_the_hour_routes(llm, settings, db):
+    await add_food(db, T0 - timedelta(minutes=10), "хлеб", kcal=250, grams=100, raw="обед: суп и хлеб")
+    llm.answers = [{"kind": "food", "foods": [
+        {"description": "суп", "grams": 300, "kcal": 150, "protein_g": 6, "fat_g": 6, "carbs_g": 18}]}]
+    msg = await send("обед без хлеба", llm, settings, db)
+    assert reply(msg).startswith("Исправить?") and len(hse.OFFERS) == 1
+
+
+async def test_whole_workout_delete_is_stale_if_a_set_was_added(llm, settings, db):
+    wid = await add_workout(db, TODAY - timedelta(days=1), [("Присед", [(5, 100)])])
+    d = await send("удали вчерашнюю тренировку", llm, settings, db)
+    async with db() as s:
+        w = await s.get(Workout, wid)
+        ex = await get_or_create_exercise(s, "Присед")
+        s.add(WorkoutSet(workout_id=w.id, exercise_id=ex.id, set_index=1, reps=5, weight_kg=100))
+        await s.commit()
+    cb = callback(f"fixok:{fix_token(d)}")
+    await hse.confirm(cb, settings, db)
+    assert alert_of(cb) and len(await rows(db, WorkoutSet)) == 2 and len(await rows(db, Workout)) == 1
+
+
+def test_edited_rejects_an_exercise_without_sets():
+    unit = se.Unit("workout", "exercise", (1,), T0, TODAY, ParseResult(kind="workout", exercises=[
+        ParsedExercise(exercise="жим", sets=[ParsedSet(reps=8, weight_kg=80)])]))
+    empty = ParseResult.model_construct(kind="workout", exercises=[ParsedExercise(exercise="жим", sets=[])])
+    assert se.edited(unit, empty) is None
+
+
+async def test_undo_after_an_edit_that_inserted_sets_in_the_middle(llm, settings, db):
+    llm.answers = [
+        {"kind": "workout", "exercises": [{"exercise": "Жим штанги лёжа", "sets": [{"reps": 8, "weight_kg": 80}]}]},
+        {"kind": "workout", "exercises": [{"exercise": "Присед", "sets": [{"reps": 5, "weight_kg": 100}]}]},
+        {"kind": "workout", "exercises": [{"exercise": "Жим штанги лёжа", "sets": [
+            {"reps": 8, "weight_kg": 80}, {"reps": 8, "weight_kg": 80}]}]},
+    ]
+    await saved("жим 8 на 80", llm, settings, db)
+    await saved("присед 5 на 100", llm, settings, db, T0 + timedelta(minutes=5))
+    e = await send("исправь жим: 2 подхода по 8 на 80", llm, settings, db, T0 + timedelta(minutes=6))
+    await hse.confirm(callback(f"fixok:{fix_token(e)}"), settings, db)
+    sets = await rows(db, WorkoutSet, WorkoutSet.set_index)
+    assert [s.reps for s in sets] == [8, 8, 5]  # the added bench set sits before the squat
+    async with db() as s:
+        user = await get_or_create_user(s, USER, "Amir")
+        removed = await delete_last_chat_sets(s, user)
+        await s.commit()
+    assert removed == 1  # /undo removes the last message (the squat), not the set added by the edit
+    assert [s.reps for s in await rows(db, WorkoutSet, WorkoutSet.set_index)] == [8, 8]
+
+
+async def test_not_3_but_2_right_after_saving_edits_that_record(llm, settings, db, published):
+    llm.answers = [food(3)]
+    await saved("три самсы", llm, settings, db)
+    llm.answers = [food(2, revises=True)]
+    e = await send("не 3, а 2", llm, settings, db, T0 + timedelta(minutes=1))
+    assert reply(e).startswith("Исправить?") and "→ самса, 2 шт" in reply(e)
+    assert llm.last_messages()[-3] == "самса, 3 шт 450 г"  # the saved record as the previous turn
+    await hse.confirm(callback(f"fixok:{fix_token(e)}"), settings, db)
+    rows_ = await rows(db, FoodEntry)
+    assert [(r.description, r.raw_text) for r in rows_] == [("самса, 2 шт", "три самсы\n[edit] не 3, а 2")]
+
+
+async def test_not_3_but_2_long_after_saving_goes_to_the_parser(llm, settings, db):
+    llm.answers = [food(3)]
+    await saved("три самсы", llm, settings, db)
+    llm.answers = [food(2)]
+    msg = await send("не 3, а 2", llm, settings, db, T0 + hse.LAST_SAVED_WINDOW + timedelta(minutes=1))
+    assert token_of(msg) in log_text.PENDING and not hse.OFFERS
+
+
+async def test_not_80_but_85_right_after_saving_sets_touches_only_that_message(llm, settings, db):
+    await add_workout(db, TODAY, [("Жим штанги лёжа", [(8, 80)])], source="chat", raw="жим 8 на 80")
+    llm.answers = [{"kind": "workout", "exercises": [
+        {"exercise": "Жим штанги лёжа", "sets": [{"reps": 6, "weight_kg": 80}]}]}]
+    await saved("жим 6 на 80", llm, settings, db)
+    e = await send("не 80, а 85", llm, settings, db, T0 + timedelta(minutes=1))
+    assert "85 кг × 6" in reply(e) and llm.bodies and len(llm.bodies) == 1  # deterministic, no model call
+    await hse.confirm(callback(f"fixok:{fix_token(e)}"), settings, db)
+    sets = await rows(db, WorkoutSet, WorkoutSet.set_index)
+    assert [(s.reps, float(s.weight_kg)) for s in sets] == [(8, 80.0), (6, 85.0)]

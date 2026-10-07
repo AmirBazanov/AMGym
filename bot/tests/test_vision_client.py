@@ -208,7 +208,7 @@ async def test_429_on_first_vision_route_goes_to_gemma_and_never_to_text_models(
             return httpx.Response(429, headers={"retry-after": "100"}, json={"error": "rate"})
         return reply(FOOD)
 
-    result = await make_client(handler).parse_photo(B64)
+    result = (await make_client(handler).parse_photo(B64)).result
 
     assert models == [QWEN, GEMMA_31]
     assert result.kind == "food"
@@ -237,7 +237,7 @@ async def test_read_timeout_tries_next_route_after_one_attempt():
             raise httpx.ReadTimeout("slow", request=req)
         return reply(FOOD)
 
-    result = await make_client(handler).parse_photo(B64)
+    result = (await make_client(handler).parse_photo(B64)).result
 
     assert models == [QWEN, GEMMA_31]  # the hung route once, not twice
     assert result.foods[0].description == "самса"
@@ -265,7 +265,7 @@ async def test_400_without_json_mode_support_retries_the_same_route_without_it()
             return httpx.Response(400, json={"error": {"message": "does not support response_format"}})
         return reply(FOOD)
 
-    result = await make_client(handler).parse_photo(B64)
+    result = (await make_client(handler).parse_photo(B64)).result
 
     assert [b["model"] for b in bodies] == [QWEN, QWEN]
     assert "response_format" in bodies[0] and "response_format" not in bodies[1]
@@ -276,7 +276,7 @@ async def test_400_without_json_mode_support_retries_the_same_route_without_it()
 
 
 async def test_valid_answer_becomes_a_food_result():
-    result = await make_client(lambda req: reply(FOOD)).parse_photo(B64, caption="250 г")
+    result = (await make_client(lambda req: reply(FOOD)).parse_photo(B64, caption="250 г")).result
     assert result.kind == "food"
     assert len(result.foods) == 1
     f = result.foods[0]
@@ -287,12 +287,12 @@ async def test_valid_answer_becomes_a_food_result():
 
 async def test_blank_or_missing_note_is_none():
     for note in ({"note": None}, {"note": "  "}, {}):
-        result = await make_client(lambda req, n=note: reply({"foods": FOOD["foods"], **n})).parse_photo(B64)
+        result = (await make_client(lambda req, n=note: reply({"foods": FOOD["foods"], **n})).parse_photo(B64)).result
         assert result.note is None
 
 
 async def test_no_food_is_an_empty_result_not_an_error():
-    result = await make_client(lambda req: reply({"foods": []})).parse_photo(B64)
+    result = (await make_client(lambda req: reply({"foods": []})).parse_photo(B64)).result
     assert result.kind == "food"
     assert result.foods == [] and result.unknown_terms == []
 
@@ -303,26 +303,26 @@ async def test_food_with_null_kcal_moves_to_unknown_terms():
         {"description": "гульчатай, 2 шт", "grams": None, "kcal": None, "protein_g": None, "fat_g": None,
          "carbs_g": None},
     ]}
-    result = await make_client(lambda req: reply(answer)).parse_photo(B64)
+    result = (await make_client(lambda req: reply(answer)).parse_photo(B64)).result
     assert [f.description for f in result.foods] == ["самса"]
     assert result.unknown_terms == ["гульчатай"]
 
 
 async def test_prose_and_fences_around_the_json_are_ignored():
     content = "Вот оценка:\n```json\n" + json.dumps(FOOD, ensure_ascii=False) + "\n```\nПриятного!"
-    result = await make_client(lambda req: reply(content)).parse_photo(B64)
+    result = (await make_client(lambda req: reply(content)).parse_photo(B64)).result
     assert result.foods[0].description == "самса"
 
 
 async def test_thinking_block_before_the_json_is_ignored():
     content = '<think>может быть {"foods": 1}?</think>' + json.dumps(FOOD, ensure_ascii=False)
-    result = await make_client(lambda req: reply(content)).parse_photo(B64)
+    result = (await make_client(lambda req: reply(content)).parse_photo(B64)).result
     assert result.foods[0].kcal == 650
 
 
 async def test_json_with_unrelated_object_first_prefers_the_foods_object():
     content = '{"x": 1} ' + json.dumps(FOOD, ensure_ascii=False)
-    result = await make_client(lambda req: reply(content)).parse_photo(B64)
+    result = (await make_client(lambda req: reply(content)).parse_photo(B64)).result
     assert len(result.foods) == 1
 
 
@@ -331,11 +331,11 @@ async def test_answer_without_a_foods_list_falls_to_the_next_route():
 
     def handler(req):
         models.append(json.loads(req.content)["model"])
-        return reply({"kind": "unknown"}) if len(models) <= 2 else reply(FOOD)
+        return reply({"kind": "unknown"}) if len(models) <= 1 else reply(FOOD)
 
-    result = await make_client(handler).parse_photo(B64)
-    # two attempts on qwen (an invalid answer is retried), then the first gemma answers
-    assert models == [QWEN, QWEN, GEMMA_31]
+    result = (await make_client(handler).parse_photo(B64)).result
+    # one attempt on qwen (a retry would cost another image of the shared quota), then gemma answers
+    assert models == [QWEN, GEMMA_31]
     assert result.kind == "food"
 
 
@@ -423,3 +423,127 @@ async def test_image_is_not_logged_on_timeout_and_429(caplog):
         await make_client(handler).parse_photo(B64)
     assert_no_image(caplog)
     assert B64[:40] not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "no json here at all",
+        '{"foods": "плов"}',
+        '{"foods": [{"description": "плов", "grams": 300, "kcal": -5, "protein_g": 1, "fat_g": 1, "carbs_g": 1}]}',
+        '{"foods": [{"description": "плов", "kcal": 500}]}',
+    ],
+    ids=["prose", "foods-not-a-list", "negative-kcal", "missing-fields"],
+)
+async def test_unusable_answer_goes_to_the_next_route_without_a_retry(content):
+    models: list[str] = []
+
+    def handler(req):
+        models.append(json.loads(req.content)["model"])
+        return reply(content) if len(models) == 1 else reply(FOOD)
+
+    result = (await make_client(handler).parse_photo(B64)).result
+    assert models == [QWEN, GEMMA_31]  # a retry on qwen would spend another image of the shared quota
+    assert result.kind == "food" and result.foods
+
+
+# ---- package labels (PhotoParse.label) ----
+
+LABEL = {
+    "name": "Протеиновый батончик",
+    "brand": "Bombbar",
+    "per100": {"kcal": 360, "protein_g": 33, "fat_g": 12, "carbs_g": 30},
+    "net_weight_g": 60,
+    "serving_g": None,
+}
+
+
+async def test_label_answer_becomes_a_parsed_label_and_an_empty_result():
+    parsed = await make_client(lambda req: reply({"label": LABEL})).parse_photo(B64)
+    assert parsed.result.kind == "food"
+    assert parsed.result.foods == [] and parsed.result.unknown_terms == []
+    label = parsed.label
+    assert label is not None
+    assert (label.name, label.brand) == ("Протеиновый батончик", "Bombbar")
+    assert (label.per100.kcal, label.per100.protein_g, label.per100.fat_g, label.per100.carbs_g) == (360, 33, 12, 30)
+    assert label.net_weight_g == 60 and label.serving_g is None
+
+
+async def test_food_answer_has_no_label():
+    parsed = await make_client(lambda req: reply(FOOD)).parse_photo(B64)
+    assert parsed.label is None
+    assert len(parsed.result.foods) == 1
+
+
+async def test_label_numbers_may_be_strings_with_comma_and_units():
+    label = {
+        "name": "Йогурт",
+        "per100": {"kcal": "449 ккал", "protein_g": "12,5", "fat_g": "20,5 г", "carbs_g": "50"},
+        "net_weight_g": "125 г",
+        "serving_g": "0",
+    }
+    parsed = await make_client(lambda req: reply({"label": label})).parse_photo(B64)
+    assert parsed.label is not None
+    p = parsed.label.per100
+    assert (p.kcal, p.protein_g, p.fat_g, p.carbs_g) == (449, 12.5, 20.5, 50)
+    assert parsed.label.net_weight_g == 125
+    assert parsed.label.serving_g is None  # 0 = unknown
+
+
+async def test_label_and_foods_in_one_answer_label_wins():
+    parsed = await make_client(lambda req: reply({"label": LABEL, "foods": FOOD["foods"]})).parse_photo(B64)
+    assert parsed.label is not None and parsed.label.brand == "Bombbar"
+    assert parsed.result.foods == []
+
+
+async def test_label_after_foods_in_the_text_is_still_found():
+    content = json.dumps({"foods": FOOD["foods"], "label": LABEL}, ensure_ascii=False)
+    parsed = await make_client(lambda req: reply(content)).parse_photo(B64)
+    assert parsed.label is not None and parsed.result.foods == []
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [{"label": "Bombbar"}, {"label": None}, {"note": "не вижу"}, {"foods": "плов", "label": 5}],
+    ids=["label-string", "label-null", "neither", "foods-not-a-list"],
+)
+async def test_neither_foods_nor_label_goes_to_the_next_route_after_one_attempt(answer):
+    models: list[str] = []
+
+    def handler(req):
+        models.append(json.loads(req.content)["model"])
+        return reply(answer) if len(models) == 1 else reply(FOOD)
+
+    parsed = await make_client(handler).parse_photo(B64)
+    assert models == [QWEN, GEMMA_31]
+    assert parsed.result.foods and parsed.label is None
+
+
+async def test_an_unreadable_label_is_still_an_answer_no_next_route():
+    """kcal that disagree with the macros are the handler's business (check_label), not a reason to ask again."""
+    bad = {**LABEL, "per100": {"kcal": 900, "protein_g": 3, "fat_g": 2, "carbs_g": 5}}
+    models: list[str] = []
+
+    def handler(req):
+        models.append(json.loads(req.content)["model"])
+        return reply({"label": bad})
+
+    parsed = await make_client(handler).parse_photo(B64)
+    assert models == [QWEN]
+    assert parsed.label is not None and parsed.label.per100.kcal == 900
+
+
+async def test_label_with_missing_numbers_is_returned_as_read():
+    parsed = await make_client(lambda req: reply({"label": {"name": "Что-то", "per100": {"kcal": 300}}})).parse_photo(B64)
+    assert parsed.label is not None
+    assert parsed.label.per100.kcal == 300 and parsed.label.per100.protein_g is None
+
+
+async def test_label_without_per100_is_an_empty_label_not_an_error():
+    parsed = await make_client(lambda req: reply({"label": {"name": "Что-то", "per100": None}})).parse_photo(B64)
+    assert parsed.label is not None and parsed.label.per100.kcal is None
+
+
+def test_vision_prompt_asks_for_a_label_when_the_photo_is_a_package():
+    assert '"label"' in VISION_SYSTEM and "per100" in VISION_SYSTEM
+    assert "net_weight_g" in VISION_SYSTEM and "serving_g" in VISION_SYSTEM

@@ -36,7 +36,7 @@ from pydantic import ValidationError
 
 from gymbot.config import Settings
 from gymbot.llm.prompts import build_messages, build_vision_messages
-from gymbot.llm.schemas import ParseResult
+from gymbot.llm.schemas import ParsedLabel, ParseResult, PhotoParse
 
 log = logging.getLogger(__name__)
 
@@ -333,22 +333,33 @@ class OpenRouterClient:
         mime: str = "image/jpeg",
         caption: str = "",
         facts: list[str] | None = None,
-    ) -> ParseResult:
-        """Foods on a photo as ParseResult(kind="food"); empty `foods` when the model sees no food.
+    ) -> PhotoParse:
+        """Foods on a photo (`result`, kind="food"; empty `foods` when the model sees no food), or the numbers
+        of a package label (`label`; then `result.foods` is empty). A label wins over foods in one answer.
 
         Only the vision routes are tried. `caption` is the user's hint ("17 штук, 250 г"), `facts` the user's
         active facts (portion sizes). The image goes to the provider only: never logged or stored.
         """
         messages = build_vision_messages(f"data:{mime};base64,{image_b64}", caption, facts)
 
-        async def call(route: Route, json_mode: bool) -> ParseResult:
+        async def call(route: Route, json_mode: bool) -> PhotoParse:
             raw = await self._complete(route, messages, json_mode, use_reasoning=False, timeout=VISION_TIMEOUT)
-            data = extract_json(_THINK.sub("", raw), prefer="foods")
-            foods = data.get("foods")
-            if not isinstance(foods, list):
-                raise LLMError("no foods list in the vision answer")
-            note = data.get("note")
-            return ParseResult(kind="food", foods=foods, note=note if isinstance(note, str) and note.strip() else None)
+            # A broken answer goes straight to the next route: a retry would spend another ~2K image tokens
+            # of the per-minute quota that text parsing shares. An unclear label is still an answer: the
+            # handler asks for another photo (gymbot.services.products.check_label).
+            try:
+                content = _THINK.sub("", raw)
+                data = extract_json(content, prefer="label" if '"label"' in content else "foods")
+                if isinstance(label := data.get("label"), dict):
+                    return PhotoParse(result=ParseResult(kind="food"), label=ParsedLabel.model_validate(label))
+                foods = data.get("foods")
+                if not isinstance(foods, list):
+                    raise LLMError("neither foods nor label")
+                note = data.get("note")
+                note = note if isinstance(note, str) and note.strip() else None
+                return PhotoParse(result=ParseResult(kind="food", foods=foods, note=note))
+            except (LLMError, ValidationError, ValueError, TypeError) as e:
+                raise _EmptyAnswer(f"unusable vision answer: {type(e).__name__}") from e
 
         return await self._over_routes(call, json_mode=True, routes=self.vision_routes)
 

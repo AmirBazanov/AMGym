@@ -47,7 +47,7 @@ from gymbot.services.wellbeing import parse_pains
 
 Kind = Literal["food", "workout", "wellbeing"]
 Action = Literal["delete", "edit"]
-Level = Literal["entry", "group", "exercise", "set", "workout", "wellbeing"]
+Level = Literal["entry", "group", "exercise", "message", "set", "workout", "wellbeing"]
 
 MAX_DAYS = 14  # records older than this many local days are never touched from the chat
 MAX_CHOICES = 5
@@ -57,8 +57,17 @@ EDIT_MARK = "[edit]"
 
 # ---- intent ----
 
-_DELETE = re.compile(r"(?<!\w)(?:удали|убери|сотри|удалить|убрать|стереть)(?:те)?(?!\w)")
-_FIX = re.compile(r"(?<!\w)(?:исправь|поправь|измени|исправить|поправить)(?:те)?(?!\w)")
+# Imperatives only: "убрать живот", "исправить технику", "надо убрать сладкое" are not commands to the bot.
+_DELETE = re.compile(r"(?<!\w)(?:удали|убери|сотри)(?:те)?(?!\w)")
+_FIX = re.compile(r"(?<!\w)(?:исправь|поправь|измени)(?:те)?(?!\w)")
+# Not records: the plan, the program, settings ("убери из плана жим", "удали программу").
+_NOT_RECORDS = re.compile(
+    r"(?<!\w)(?:план\w*|программ\w*|напомина\w*|напомни\w*|факт\w*|норм[аеуы]?|цел[ьи]|таймер\w*|профил\w*)(?!\w)"
+)
+# Plans for later, not a fix of the past ("давай сегодня жим 85, а не 80", "хочу убрать живот").
+_FUTURE = re.compile(r"(?<!\w)(?:давай(?:те)?|поставь|выставь|будет|буду|сделаю|хочу|планирую|надо|нужно)(?!\w)")
+# "ещё кофе без сахара" is another cup, not a fix of the first one.
+_REPEAT = re.compile(r"(?<!\w)(?:ещ[её]|снова|опять|втор\w*|друг\w*|новы\w*)(?!\w)")
 _NUM_WORDS = {
     "ноль": 0, "один": 1, "одна": 1, "одну": 1, "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5,
     "шесть": 6, "семь": 7, "восемь": 8, "девять": 9, "десять": 10, "полтора": 1.5, "полторы": 1.5,
@@ -68,13 +77,14 @@ _NUM = r"(?:\d+(?:[.,]\d+)?|" + "|".join(_NUM_WORDS) + r")"
 _WAS_NOT = re.compile(
     rf"(?<!\w)(?P<new>{_NUM})(?!\w)(?:\s*[a-zа-я.]{{0,12}})?\s*,?\s*а\s+не\s+(?P<old>{_NUM})(?!\w)"
 )
-_WAS_NOT_WORDS = re.compile(r"(?<!\w)(?:был|была|было|были)(?!\w).*?(?<!\w)а\s+не(?!\w)")
 # "в жиме не 80, а 85", "не самса, а беляш": weak, see the module docstring.
+# "настроение было отличное, а не плохое": wellbeing values are words; weak, wellbeing only.
+_WAS_NOT_WORDS = re.compile(r"(?<!\w)(?:был|была|было|были)(?!\w).*?(?<!\w)а\s+не(?!\w)")
 _NOT_BUT = re.compile(r"(?:^|[\s,])не\s+(?P<old>[^,]{1,30}?)\s*,?\s+а\s+(?P<new>[^,]{1,30})$")
-_WITHOUT = re.compile(r"^(?P<name>[a-zа-я][a-zа-я\s-]{1,40}?)\s+без\s+[a-zа-я]")
+_WITHOUT = re.compile(r"^(?P<name>[a-zа-я][a-zа-я\s-]{1,40}?)\s+без\s+(?P<without>[a-zа-я]{3,})")
 _RECORD_VERB = re.compile(
-    r"(?<!\w)(?:съел\w*|поел\w*|выпил\w*|доел\w*|перекусил\w*|сделал\w*|пожал\w*|выжал\w*|отжал\w*|присел\w*|"
-    r"подтянул\w*|пробежал\w*|позанимал\w*|спал\w*|поспал\w*)(?!\w)"
+    r"(?<!\w)(?:съел\w*|поел\w*|выпил\w*|доел\w*|перекусил\w*|сделал\w*|пожал(?!уйста)\w*|выжал\w*|отжал\w*|"
+    r"присел\w*|подтянул\w*|пробежал\w*|позанимал\w*)(?!\w)"
 )
 _LATEST = re.compile(r"(?<!\w)последн\w*")
 _FOOD_HINT = re.compile(r"(?<!\w)(?:еда|еду|еды|ед[еы]|ккал|калори\w*|перекус\w*|напит\w*)(?!\w)")
@@ -85,6 +95,7 @@ _SET_WORD = re.compile(r"(?<!\w)(?:подход\w*|сет|сета|сеты)(?!\
 _WELLBEING_HINT = re.compile(
     r"(?<!\w)(?:сон|сна|сну|спал\w*|поспал\w*|энерги\w*|настроени\w*|самочувстви\w*|бол(?!ьш)[ьиело]\w*)(?!\w)"
 )
+_SLEEP_VERB = re.compile(r"(?<!\w)(?:спал\w*|поспал\w*)(?!\w)")
 _SLEEP = re.compile(r"(?<!\w)(?:сон|сна|сну|спал\w*|поспал\w*)(?!\w)")
 _BODY_WEIGHT = re.compile(r"(?<!\w)(?:вес|весил\w*|взвеш\w*)(?!\w)")
 _WEEKDAYS = ("понедельн", "вторн", "сред", "четверг", "пятниц", "суббот", "воскресен")
@@ -115,8 +126,10 @@ class Intent:
     whole_workout: bool  # "тренировку"
     sets_only: bool  # "подход": the last set, not all sets of an exercise
     pair: tuple[float, float] | None  # (new, old) of "N, а не M"
-    soft: bool = False  # "<блюдо> без …": only food saved in the last SOFT_MINUTES
-    record_verb: bool = False  # "съел …": with nothing found the parser gets it
+    soft: bool = False  # "<блюдо> без …": only food saved in the last SOFT_MINUTES that has the ingredient
+    record_verb: bool = False  # "спал 7, а не 5": with nothing found the parser gets it
+    imperative: bool = False  # "удали", "исправь"...
+    without: str | None = None  # the ingredient of "<блюдо> без <ингредиент>"
 
 
 def _num(s: str) -> float | None:
@@ -163,24 +176,31 @@ def detect(text: str, today: date) -> Intent | None:
     if "?" in text or is_settings_request(text):
         return None
     norm = normalize(text)
-    if len(norm.split()) > MAX_WORDS:
+    if len(norm.split()) > MAX_WORDS or _NOT_RECORDS.search(norm) or _FUTURE.search(norm):
         return None
     delete = bool(_DELETE.search(norm))
+    imperative = delete or bool(_FIX.search(norm))
+    # "съел 2 самсы, а не 3 как обычно", "присел 100 на 5, а не 95": a new record, unless told to fix
+    if _RECORD_VERB.search(norm) and not imperative:
+        return None
     pair = None
     if m := _WAS_NOT.search(norm):
         new, old = _num(m["new"]), _num(m["old"])
         pair = (new, old) if new is not None and old is not None else None
-    fix = bool(_FIX.search(norm) or pair or _WAS_NOT_WORDS.search(norm))
     weak = soft = False
-    name_part = norm
-    if not delete and not fix:
-        if (m := _NOT_BUT.search(norm)) and len(norm.split()) <= 7:
-            weak, old_s, new_s = True, m["old"], m["new"]
-            old, new = _num(old_s), _num(new_s)
+    name_part, without = norm, None
+    if not imperative and pair is None:
+        if _WAS_NOT_WORDS.search(norm) and _WELLBEING_HINT.search(norm):
+            weak = True
+        elif (m := _NOT_BUT.search(norm)) and len(norm.split()) <= 7:
+            weak, name_part = True, norm[: m.start()] + " " + m["old"]  # the new part is not saved yet
+            old, new = _num(m["old"]), _num(m["new"])
             pair = (new, old) if new is not None and old is not None else None
         elif (m := _WITHOUT.match(norm)) and len(norm.split()) <= 5 and not re.search(r"\d", norm):
+            if _REPEAT.search(m["name"]):
+                return None
             weak = soft = True
-            name_part = m["name"]
+            name_part, without = m["name"], m["without"]
         else:
             return None
     meal = m[1] if (m := _MEAL.search(norm)) else None
@@ -192,10 +212,7 @@ def detect(text: str, today: date) -> Intent | None:
         kind = "food"
     else:
         kind = None
-    record_verb = bool(_RECORD_VERB.search(norm))
     words = _words(name_part)
-    if weak and record_verb:  # "съел бутерброд без сыра" is a new record
-        return None
     if kind is None and not words and _BODY_WEIGHT.search(norm):  # body weight is upserted per day: skip
         return None
     return Intent(
@@ -211,7 +228,9 @@ def detect(text: str, today: date) -> Intent | None:
         sets_only=bool(_SET_WORD.search(norm)) and (delete or bool(_LATEST.search(norm))),
         pair=pair,
         soft=soft,
-        record_verb=record_verb,
+        record_verb=bool(_SLEEP_VERB.search(norm)),
+        imperative=imperative,
+        without=without,
     )
 
 
@@ -324,7 +343,9 @@ def _has_value(unit: Unit, old: float) -> bool:
             f.grams == old or f.kcal == old or re.search(rf"(?<![\d.]){old:g}\s*шт", f.description) for f in r.foods
         )
     if unit.kind == "workout":
-        return any(s.weight_kg == old or s.reps == old for ex in r.exercises for s in ex.sets)
+        return any(s.weight_kg == old or s.reps == old for ex in r.exercises for s in ex.sets) or any(
+            len(ex.sets) == old for ex in r.exercises
+        )
     w = r.wellbeing
     return w is not None and old in (w.sleep_hours, w.energy, w.mood, w.sleep_quality)
 
@@ -334,6 +355,16 @@ class Found:
     units: list[Unit]
     too_old: bool = False
     day: date | None = None  # the day searched (for "не нашёл за …")
+    explain: bool = False  # nothing found, but the command was clear: say so instead of passing it on
+
+
+@dataclass(frozen=True)
+class LastSaved:
+    """The record this chat saved last (handlers/log_text.py save): "не 3, а 2" right after saving fixes it."""
+
+    kind: str
+    raw_text: str
+    sent_at: datetime  # the previewed message's time (UTC): food rows carry it as eaten_at
 
 
 async def _load(session: AsyncSession, user_id: int, first: date, last: date, tz: ZoneInfo) -> list[Unit]:
@@ -396,6 +427,14 @@ async def _load(session: AsyncSession, user_id: int, first: date, last: date, tz
             units.append(Unit("workout", "set", tuple(s.id for s in last), ex_at, w.performed_on,
                               _sets_record(last), workout_id=w.id, names=names,
                               raw_texts=tuple(s.raw_text for s in last)))
+            # the exercise's sets from one chat message (see LastSaved)
+            by_msg: dict[str, list[WorkoutSet]] = {}
+            for s in ex_sets:
+                if key := original(s.raw_text):
+                    by_msg.setdefault(key, []).append(s)
+            for key, msg_sets in by_msg.items():
+                units.append(Unit("workout", "message", tuple(s.id for s in msg_sets), ex_at, w.performed_on,
+                                  _sets_record(msg_sets), workout_id=w.id, names=names, raw_texts=(key,)))
     wellbeing = list(
         await session.scalars(
             select(WellbeingEntry)
@@ -424,7 +463,7 @@ def _select(units: list[Unit], intent: Intent, tz: ZoneInfo, now: datetime) -> l
     if kind == "wellbeing":
         picked = [u for u in units if u.kind == "wellbeing"]
         if intent.pair:
-            picked = [u for u in picked if _has_value(u, intent.pair[1])] or picked
+            picked = [u for u in picked if _has_value(u, intent.pair[1])]
         if intent.action == "edit":
             return picked[-1:]  # one "how do I feel" record per day is the usual case: the newest
         return picked
@@ -453,20 +492,57 @@ def _select(units: list[Unit], intent: Intent, tz: ZoneInfo, now: datetime) -> l
         u.score = _score(intent.words, u.names)
         if u.score:
             scored.append(u)
-    if intent.soft:
-        recent = now - timedelta(minutes=SOFT_MINUTES)
-        scored = [u for u in scored if u.kind == "food" and u.at >= recent]
     if not scored:
         return []
     best = max(u.score for u in scored)
     picked = [u for u in scored if u.score == best]
     if intent.pair:
-        picked = [u for u in picked if _has_value(u, intent.pair[1])] or ([] if intent.weak else picked)
+        picked = [u for u in picked if _has_value(u, intent.pair[1])]  # the old value must be there exactly
     return picked
 
 
-async def find(session: AsyncSession, user_id: int, intent: Intent, now: datetime, tz: ZoneInfo) -> Found:
-    """Candidate units, newest first: one = the target, several = buttons, none = not found."""
+def _select_soft(units: list[Unit], intent: Intent, tz: ZoneInfo, now: datetime) -> list[Unit]:
+    """"бутерброд без сыра": food saved in the last SOFT_MINUTES, named by every word, that has the ingredient
+    ("чай без сахара" after a plain "чай" is another cup: the parser's)."""
+    recent = now - timedelta(minutes=SOFT_MINUTES)
+    out = []
+    for u in units:
+        if u.kind != "food" or u.at < recent or intent.without is None:
+            continue
+        if intent.words:
+            if u.level != "entry" or _score(intent.words, u.names) != len(intent.words):
+                continue
+        elif not (intent.meal and u.level == "group" and _in_meal(u, intent.meal, tz)):
+            continue
+        if any(_close(intent.without, n) for n in u.names):
+            out.append(u)
+    return out
+
+
+def _select_last(units: list[Unit], intent: Intent, last: LastSaved) -> list[Unit]:
+    """"не 3, а 2" right after saving: the rows of that saved message that hold the old value."""
+    if intent.pair is None or intent.action != "edit" or intent.kind not in (None, last.kind):
+        return []
+    if last.kind == "food":
+        level: Level = "entry"
+    elif last.kind == "workout":
+        level = "message"
+    else:
+        level = "wellbeing"
+    return [
+        u for u in units
+        if u.level == level and u.kind == last.kind and any(original(r) == last.raw_text for r in u.raw_texts)
+        and (u.kind == "workout" or u.at == _aware(last.sent_at))
+        and _has_value(u, intent.pair[1])
+    ]
+
+
+async def find(
+    session: AsyncSession, user_id: int, intent: Intent, now: datetime, tz: ZoneInfo, last: LastSaved | None = None
+) -> Found:
+    """Candidate units, newest first: one = the target, several = buttons, none = not found.
+
+    `last` is the chat's just-saved record: a command naming nothing ("не 3, а 2") is about it."""
     today = now.astimezone(tz).date()
     oldest = today - timedelta(days=MAX_DAYS)
     if intent.day is not None and intent.day < oldest:
@@ -474,6 +550,15 @@ async def find(session: AsyncSession, user_id: int, intent: Intent, now: datetim
     if intent.day is not None:
         picked = _select(await _load(session, user_id, intent.day, intent.day, tz), intent, tz, now)
         day = intent.day
+    elif intent.soft:  # the last SOFT_MINUTES, across midnight but never the day before
+        units = await _load(session, user_id, today - timedelta(days=1), today, tz)
+        picked, day = _select_soft(units, intent, tz, now), today
+    elif (
+        last is not None and intent.pair is not None and intent.action == "edit" and not intent.words
+        and not intent.meal and not intent.latest and intent.kind in (None, last.kind)
+    ):
+        units = await _load(session, user_id, today - timedelta(days=1), today, tz)
+        picked, day = _select_last(units, intent, last), today
     else:
         # today, then yesterday (a late workout corrected the next morning); "последн…" looks back MAX_DAYS
         first = oldest if intent.latest else today - timedelta(days=1)
@@ -487,7 +572,19 @@ async def find(session: AsyncSession, user_id: int, intent: Intent, now: datetim
     picked.sort(key=lambda u: u.at, reverse=True)
     if intent.latest and picked:
         picked = picked[:1]
-    return Found(picked, day=day)
+    found = Found(picked, day=day)
+    found.explain = not picked and explainable(intent)
+    return found
+
+
+def explainable(intent: Intent) -> bool:
+    """Whether "не нашёл" is the right reply rather than the parser's: an imperative ("убери плов"), a value
+    pair ("самса была 2, а не 3") or a word saying which record or day. Weak forms and "спал …" never."""
+    if intent.weak or intent.record_verb:
+        return False
+    return intent.imperative or intent.pair is not None or bool(
+        intent.kind or intent.meal or intent.latest or intent.day is not None
+    )
 
 
 # ---- rendering ----
@@ -644,7 +741,7 @@ def edited(unit: Unit, result: ParseResult) -> ParseResult | None:
             foods = [best]
         return ParseResult(kind="food", foods=foods, note=result.note)
     if unit.kind == "workout":
-        if len(r.exercises) != 1 or not result.exercises:
+        if len(r.exercises) != 1 or not result.exercises or not all(e.sets for e in result.exercises):
             return None
         names = _name_words(r.exercises[0].exercise)
         ex = max(result.exercises, key=lambda e: _score(_name_words(e.exercise), names))
@@ -752,6 +849,8 @@ async def apply(
         raise Stale
     if action == "delete":
         if unit.level == "workout":
+            if {s.id for s in workout.sets} != set(unit.ids):  # a set was added or removed since the preview
+                raise Stale
             await session.delete(workout)
             return
         for s in sets:
@@ -788,6 +887,10 @@ async def apply(
             ))
     for s in sets[len(new_ex.sets):]:
         await session.delete(s)
+    await session.flush()
+    left = await session.get(Workout, workout.id, options=[selectinload(Workout.sets)], populate_existing=True)
+    if left is not None and not left.sets:  # never leave an empty workout behind
+        await session.delete(left)
 
 
 def _set_food(e: FoodEntry, f: ParsedFood) -> None:

@@ -23,7 +23,18 @@ from gymbot.api.webhook import WEBHOOK_PATH, WebhookHandler
 from gymbot.config import Settings, get_settings
 from gymbot.db.migrate import upgrade_head
 from gymbot.db.session import make_engine
-from gymbot.handlers import advice, backup, chat_settings, common, facts, log_text, photo, plan, voice
+from gymbot.handlers import (
+    advice,
+    backup,
+    chat_settings,
+    common,
+    facts,
+    log_text,
+    photo,
+    plan,
+    products,
+    voice,
+)
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services import baselines, live
 from gymbot.services.access import is_allowed
@@ -74,6 +85,7 @@ async def setup_bot_ui(bot: Bot, settings: Settings) -> None:
             BotCommand(command="undo", description="Удалить последнюю запись"),
             BotCommand(command="advice", description="Советы по питанию, тренировкам и восстановлению"),
             BotCommand(command="facts", description="Что я помню о тебе"),
+            BotCommand(command="products", description="Мои продукты (штрихкод, этикетка)"),
             BotCommand(command="help", description="Как записывать"),
             BotCommand(command="backup", description="Копия базы в чат"),
         ]
@@ -180,6 +192,7 @@ async def run() -> None:
             chat_settings.router,
             voice.router,
             photo.router,
+            products.router,
             log_text.router,
         )  # log_text last: it catches all text
         if settings.bot_mode == "webhook":

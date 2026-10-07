@@ -168,3 +168,66 @@ class ParseResult(BaseModel):
         if self.kind == "wellbeing":
             return self.wellbeing is not None and not self.wellbeing.is_empty()
         return False
+
+
+# ---- Food photo (OpenRouterClient.parse_photo) ----
+
+_LABEL_NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
+
+
+def _label_number(v: Any) -> float | None:
+    """A label number: 12.5, "12,5", "12,5 г"; None when missing, negative or unreadable (never rejected:
+    gymbot.services.products decides whether the label is usable)."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int | float):
+        return float(v) if v >= 0 else None
+    if isinstance(v, str) and (m := _LABEL_NUMBER.search(v)) and not v.strip().startswith("-"):
+        return float(m.group().replace(",", "."))
+    return None
+
+
+class LabelPer100(BaseModel):
+    kcal: float | None = None
+    protein_g: float | None = None
+    fat_g: float | None = None
+    carbs_g: float | None = None
+
+    @field_validator("kcal", "protein_g", "fat_g", "carbs_g", mode="before")
+    @classmethod
+    def _number(cls, v: Any) -> float | None:
+        return _label_number(v)
+
+
+class ParsedLabel(BaseModel):
+    """What the vision model read off a package: numbers as printed, per 100 g. Lenient on purpose."""
+
+    name: str | None = None
+    brand: str | None = None
+    per100: LabelPer100 = LabelPer100()
+    net_weight_g: float | None = None
+    serving_g: float | None = None
+
+    @field_validator("name", "brand", mode="before")
+    @classmethod
+    def _text(cls, v: Any) -> str | None:
+        text = " ".join(str(v).split())[:200] if isinstance(v, str | int | float) and not isinstance(v, bool) else ""
+        return text or None
+
+    @field_validator("net_weight_g", "serving_g", mode="before")
+    @classmethod
+    def _weight(cls, v: Any) -> float | None:
+        n = _label_number(v)
+        return n if n else None  # 0 = unknown
+
+    @field_validator("per100", mode="before")
+    @classmethod
+    def _per100(cls, v: Any) -> Any:
+        return v if isinstance(v, (dict, LabelPer100)) else {}
+
+
+class PhotoParse(BaseModel):
+    """A food photo: `result` (kind="food", foods estimated from a plate) or `label` (a package)."""
+
+    result: ParseResult
+    label: ParsedLabel | None = None

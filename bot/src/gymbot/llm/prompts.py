@@ -343,13 +343,14 @@ def build_settings_messages(text: str, context: str) -> list[dict[str, str]]:
 
 
 # ---- Food by photo (OpenRouterClient.parse_photo): a vision model, its own short prompt ----
-# Short on purpose (~150 tokens): Groq's only vision model shares its per-minute token quota with text parsing,
+# Short on purpose (~250 tokens with the label line): Groq's only vision model shares its per-minute token quota with text parsing,
 # and a photo already costs ~2K tokens of it. The full SYSTEM_PROMPT would crowd out the next text message.
 VISION_SYSTEM = """Ты оцениваешь еду по фото для дневника питания. Определи блюда на фото и вес порции.
 Ответь ТОЛЬКО JSON: {"foods":[{"description":str,"grams":number,"kcal":number,"protein_g":number,"fat_g":number,"carbs_g":number}],"note":str|null}.
 Одна запись на блюдо или компонент, название по-русски, числа, не диапазоны.
 Граммы и штуки из подписи важнее оценки по фото. Порции: каса ~300 г, лепёшка ~250 г, самса ~120 г, манты ~60 г/шт.
-Нет еды на фото: {"foods":[]}. note — коротко, если оценка неуверенная, иначе null."""
+Нет еды на фото: {"foods":[]}. note — коротко, если оценка неуверенная, иначе null.
+Упаковка или этикетка, а не блюдо: не оценивай, перепиши с этикетки {"label":{"name":str|null,"brand":str|null,"per100":{"kcal":number,"protein_g":number,"fat_g":number,"carbs_g":number},"net_weight_g":number|null,"serving_g":number|null}}, per100 — на 100 г, name и brand только как написано на упаковке, иначе null."""
 VISION_FACTS_MAX_CHARS = 300  # the user's portion facts ("самса ~150 г") help, but the quota is shared
 VISION_DEFAULT_TEXT = "Оцени еду на фото."
 

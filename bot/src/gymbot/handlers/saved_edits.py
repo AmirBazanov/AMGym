@@ -86,6 +86,21 @@ class Choice:
 
 OFFERS: dict[str, Offer] = {}
 CHOICES: dict[str, Choice] = {}
+# What each chat saved last (log_text.save): "не 3, а 2" right after "Сохранить" fixes that record.
+LAST_SAVED: dict[int, se.LastSaved] = {}
+LAST_SAVED_WINDOW = timedelta(minutes=15)  # from the previewed message to the correction
+
+
+def remember_saved(tg_id: int, kind: str, raw_text: str, sent_at: datetime) -> None:
+    LAST_SAVED.pop(tg_id, None)
+    if len(LAST_SAVED) >= MAX_PENDING:
+        LAST_SAVED.pop(next(iter(LAST_SAVED)))
+    LAST_SAVED[tg_id] = se.LastSaved(kind, raw_text, sent_at)
+
+
+def _last_saved(tg_id: int, now: datetime) -> se.LastSaved | None:
+    last = LAST_SAVED.get(tg_id)
+    return last if last is not None and timedelta(0) <= now - last.sent_at <= LAST_SAVED_WINDOW else None
 
 Send = Callable[[str, InlineKeyboardMarkup | None], Awaitable[object]]
 
@@ -143,6 +158,8 @@ def not_found(intent: se.Intent, found: se.Found, today) -> str:  # type: ignore
     where = _day_text(found.day, today) if intent.day is not None else (
         "за последние две недели" if intent.latest else "за сегодня и вчера"
     )
+    if intent.pair is not None:
+        what += f" со значением {intent.pair[1]:g}"
     return f"Не нашёл {what} {where}. Если это было в другой день, назови его: «вчерашний плов», «за 06.10»."
 
 
@@ -160,12 +177,15 @@ async def handle(
     tg_id = message.from_user.id  # type: ignore[union-attr]
     async with sessionmaker() as session:
         user_id = await session.scalar(select(User.id).where(User.telegram_id == tg_id))
-        found = await se.find(session, user_id, intent, now, tz) if user_id is not None else se.Found([], day=intent.day or today)
+        found = (
+            await se.find(session, user_id, intent, now, tz, _last_saved(tg_id, now))
+            if user_id is not None else se.Found([], day=intent.day or today, explain=se.explainable(intent))
+        )
     if found.too_old:
         await message.answer(prefix + TOO_OLD)
         return True
     if not found.units:
-        if intent.weak or intent.record_verb:  # a new record after all: the parser's
+        if not found.explain:  # a new record or not about the diary after all: the parser's
             return False
         await message.answer(prefix + not_found(intent, found, today))
         return True
