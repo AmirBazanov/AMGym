@@ -376,6 +376,17 @@ class Plan:
         """Whether the result is something to look at in the Mini App (the diary button after applying)."""
         return bool(self.targets or self.rest is not None or self.program or self.weights)
 
+    def live_topics(self) -> list[Any]:
+        """What the open Mini App refetches after applying (gymbot.services.live)."""
+        topics: list[Any] = []
+        if self.targets or self.rest is not None or self.program or self.weights:
+            topics.append("state")
+        if self.program:
+            topics.append("plan")  # another program day
+        if self.new_reminders or self.reminder_ops:
+            topics.append("reminders")
+        return topics
+
 
 def _mmss(seconds: int) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"

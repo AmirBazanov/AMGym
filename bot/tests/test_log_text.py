@@ -10,12 +10,13 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from gymbot.db.models import FoodEntry, User, UserFact, WellbeingEntry
+from gymbot.db.models import ActiveWorkout, FoodEntry, User, UserFact, WellbeingEntry
 from gymbot.handlers import log_text
 from gymbot.llm.openrouter import OpenRouterClient
-from gymbot.llm.prompts import EXAMPLES
+from gymbot.llm.prompts import EXAMPLES, MINIAPP_SETUP_ANSWER
 from gymbot.llm.schemas import ParseResult
 from gymbot.services import food_lookup
+from gymbot.services.workouts import WorkoutIn
 
 T0 = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
 USER = 42
@@ -1412,3 +1413,240 @@ def test_setup_guard_stays_quiet_for_a_workout_the_user_states(text):
     wk = ParseResult.model_validate(workout("жим лёжа"))
     assert wk.kind == "workout"
     assert not log_text.is_setup_request(text, wk), text
+
+
+# ---- a reply that is not a record never claims a write (ACTION_CLAIM, NO_ACTION) ----
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Записал твой подход ✅",
+        "записал",
+        "Записано: жим 80×8",
+        "Записала!",
+        "Добавил подход в дневник",
+        "Добавлен подход",
+        "Добавила в дневник",
+        "Сохранил 3 подхода",
+        "Сохранено ✅",
+        "Сохранила",
+        "Обновил рабочий вес",
+        "ОК, ЗАПИСАЛ",  # case-insensitive
+        "Ты не записал, а я записал",  # the second one is the bot's own claim
+    ],
+)
+def test_claims_action_detects_a_claimed_write(reply):
+    assert log_text.claims_action(reply) is True, reply
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        None,
+        "",
+        "Около 300 ккал.",
+        "Подходы запишешь после зала.",  # a future action of the user
+        "Ты записал 3 подхода, они в мини-аппе.",  # what the user did
+        "ты добавил подход в мини-апп",
+        "Вы записали жим в мини-аппе, а я вижу его в сводке.",
+        "Ты сохранил тренировку? Тогда она в истории.",
+        MINIAPP_SETUP_ANSWER,
+    ],
+)
+def test_claims_action_ignores_honest_replies(reply):
+    assert log_text.claims_action(reply) is False, reply
+
+
+def test_the_no_action_replacement_is_not_a_claim_itself():
+    assert log_text.claims_action(log_text.NO_ACTION) is False
+
+
+def test_claims_action_never_flags_the_miniapp_setup_answer_even_with_a_claim_word():
+    assert log_text.claims_action(MINIAPP_SETUP_ANSWER + " Записал.") is True  # only the exact text is exempt
+    assert log_text.claims_action(MINIAPP_SETUP_ANSWER) is False
+
+
+@pytest.mark.parametrize("kind", ["question", "unknown"])
+def test_honest_replaces_a_claim_in_a_non_record(kind):
+    result = ParseResult.model_validate({"kind": kind, "clarification": "Записал твой подход ✅"})
+    fixed = log_text.honest(result)
+    assert fixed.kind == kind and fixed.clarification == log_text.NO_ACTION
+    assert result.clarification == "Записал твой подход ✅"  # the original is not mutated
+
+
+def test_honest_keeps_honest_replies_and_records():
+    question = ParseResult.model_validate({"kind": "question", "clarification": "Около 300 ккал."})
+    assert log_text.honest(question) is question
+    setup = ParseResult(kind="question", clarification=MINIAPP_SETUP_ANSWER)
+    assert log_text.honest(setup) is setup
+    record = ParseResult.model_validate({**workout("жим лёжа"), "clarification": "Записал? Уточни вес."})
+    assert log_text.honest(record) is record  # a real record keeps its note, the preview says "Записать?"
+    assert log_text.honest(ParseResult.model_validate({"kind": "unknown"})).clarification is None
+
+
+async def test_parser_reply_claiming_a_write_becomes_no_action(llm, settings, db):
+    llm.answers = [{"kind": "question", "clarification": "Записал твой подход ✅"}]
+    msg = await send("жим 80×8", llm, settings, db)
+    assert msg.answer.await_args.args[0] == log_text.NO_ACTION
+    assert "reply_markup" not in msg.answer.await_args.kwargs and not log_text.PENDING
+
+
+async def test_unknown_reply_claiming_a_write_becomes_no_action(llm, settings, db):
+    llm.answers = [{"kind": "unknown", "clarification": "Сохранил, всё в дневнике"}]
+    msg = await send("ммм ну это", llm, settings, db)
+    assert msg.answer.await_args.args[0] == log_text.NO_ACTION
+
+
+async def test_diary_answer_claiming_a_write_becomes_no_action(llm, settings, db, diary):
+    # The parser's claim sends a short text without "?" to the diary answer; that one claims a write too.
+    llm.answers = [{"kind": "question", "clarification": "Записал твой подход ✅"}, "Добавил подход в дневник."]
+    msg = await send("жим 80×8", llm, settings, db)
+    assert len(llm.bodies) == 2  # the parser, then the diary answer
+    assert msg.answer.await_args.args[0] == log_text.NO_ACTION
+    assert log_text.QA[USER][0][1] == log_text.NO_ACTION  # the next question sees the corrected reply
+    assert not log_text.PENDING
+
+
+async def test_honest_diary_answer_replaces_the_parsers_claim_and_stays(llm, settings, db, diary):
+    answer = "В мини-аппе отмечено 2 подхода жима лёжа."
+    llm.answers = [{"kind": "question", "clarification": "Записал твой подход ✅"}, answer]
+    msg = await send("жим 80×8", llm, settings, db)
+    assert len(llm.bodies) == 2
+    assert msg.answer.await_args.args[0] == answer
+
+
+async def test_claim_inside_a_long_question_diary_answer_is_replaced(llm, settings, db, diary):
+    llm.answers = [{"kind": "question", "clarification": "-"}, "Сохранил твой вес, теперь он 80 кг."]
+    msg = await send("какой у меня сейчас рабочий вес в жиме?", llm, settings, db)
+    assert msg.answer.await_args.args[0] == log_text.NO_ACTION
+
+
+async def test_miniapp_setup_answer_is_not_replaced_by_no_action(llm, settings, db):
+    llm.answers = [{"kind": "question", "clarification": MINIAPP_SETUP_ANSWER}]
+    msg = await send("выставь рабочие веса", llm, settings, db)
+    assert msg.answer.await_args.args[0] == MINIAPP_SETUP_ANSWER
+
+
+# ---- wants_diary: questions about what the bot sees in the Mini App ----
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["тебе видно", "видишь?", "Видишь", "ты видишь", "я вижу", "в мини-аппе", "мини-апп", "миниапп", "Mini App", "mini app"],
+)
+def test_wants_diary_for_short_visibility_questions(text):
+    assert len(text.split()) <= log_text.SMALL_TALK_WORDS  # short: only the visibility words make it a question
+    assert log_text.wants_diary(text) is True
+
+
+@pytest.mark.parametrize("text", ["привет", "спасибо", "ок", "понял", "жим 80×8"])
+def test_wants_diary_is_false_for_small_talk(text):
+    assert log_text.wants_diary(text) is False
+
+
+def test_wants_diary_for_questions_and_long_texts_as_before():
+    assert log_text.wants_diary("что у меня сегодня?") is True
+    assert log_text.wants_diary("расскажи про мой прогресс по жиму") is True  # more than SMALL_TALK_WORDS
+
+
+@pytest.mark.parametrize("text", ["тебе видно", "видишь"])
+async def test_visibility_question_goes_to_the_diary_answer(llm, settings, db, diary, text):
+    answer = "Вижу в мини-аппе: жим лёжа 82.5×8, 82.5×8 (2 из 4 подходов)."
+    llm.answers = [{"kind": "question", "clarification": "Пока нет."}, answer]
+    msg = await send(text, llm, settings, db)
+    assert len(llm.bodies) == 2  # the parser, then the diary answer
+    assert msg.answer.await_args.args[0] == answer
+
+
+# ---- workout preview warns about sets already ticked in the Mini App ----
+
+NOTE = (
+    "В мини-аппе уже отмечено: жим лёжа 82.5×8 ×2 — если это те же подходы, не сохраняй, "
+    "они попадут в историю по «Завершить»."
+)
+BENCH_PREVIEW = "Записать?\n• жим лёжа: 60 кг × 10"
+
+
+async def put_snapshot(db, *, updated_ago: timedelta = timedelta(), done: bool = True, started_ago=timedelta(minutes=30)):
+    """The user's workout in progress, relative to the real clock (the overlap check uses datetime.now)."""
+    now = datetime.now(UTC)
+    sets = [{"weight": 82.5, "reps": 8 if done else None, "done": done} for _ in range(2)]
+    body = WorkoutIn.model_validate({
+        "id": "w1", "programId": "", "week": 1, "weekday": 3, "startedAt": now - started_ago,
+        "exercises": [
+            {"name": "жим лёжа", "target": "4х6-8", "sets": sets},
+            {"name": "присед", "sets": [{"weight": 100, "reps": 5, "done": True}]},
+        ],
+    })
+    async with db() as s:
+        user = await s.scalar(select(User).where(User.telegram_id == USER))
+        if user is None:
+            user = User(telegram_id=USER, rest_seconds=90)
+            s.add(user)
+            await s.flush()
+        s.add(ActiveWorkout(
+            user_id=user.id, client_id="w1", payload=body.model_dump_json(), updated_at=now - updated_ago
+        ))
+        await s.commit()
+
+
+async def test_workout_preview_warns_about_sets_already_in_the_miniapp(llm, settings, db):
+    await put_snapshot(db)
+    llm.answers = [workout("жим лёжа")]
+    msg = await send("жим лёжа 10 на 60", llm, settings, db)
+    assert msg.answer.await_args.args[0] == f"{BENCH_PREVIEW}\n\n{NOTE}"
+    assert buttons(msg) == [["save", "drop"]]  # the user still decides
+    assert "присед" not in msg.answer.await_args.args[0]  # only the exercises of the preview
+
+
+async def test_overlap_note_goes_before_the_fact_offer(llm, settings, db):
+    await put_snapshot(db)
+    llm.answers = [with_fact(workout("жим лёжа"), "жим лёжа делаю с паузой")]
+    msg = await send("жим лёжа 10 на 60, обычно с паузой", llm, settings, db)
+    assert msg.answer.await_args.args[0] == f"{BENCH_PREVIEW}\n\n{NOTE}\n\nЗапомнить: «жим лёжа делаю с паузой»"
+    assert buttons(msg) == [["save", "drop"], ["remember"]]
+
+
+async def test_workout_preview_without_a_snapshot_has_no_note(llm, settings, db):
+    llm.answers = [workout("жим лёжа")]
+    msg = await send("жим лёжа 10 на 60", llm, settings, db)
+    assert msg.answer.await_args.args[0] == BENCH_PREVIEW
+
+
+async def test_workout_preview_for_another_exercise_has_no_note(llm, settings, db):
+    await put_snapshot(db)
+    llm.answers = [workout("становая тяга")]
+    msg = await send("становая 10 на 60", llm, settings, db)
+    assert msg.answer.await_args.args[0] == "Записать?\n• становая тяга: 60 кг × 10"
+
+
+async def test_workout_preview_ignores_a_snapshot_with_nothing_ticked(llm, settings, db):
+    await put_snapshot(db, done=False)
+    llm.answers = [workout("жим лёжа")]
+    msg = await send("жим лёжа 10 на 60", llm, settings, db)
+    assert msg.answer.await_args.args[0] == BENCH_PREVIEW
+
+
+async def test_workout_preview_ignores_a_stale_snapshot(llm, settings, db):
+    await put_snapshot(db, updated_ago=timedelta(hours=7))
+    llm.answers = [workout("жим лёжа")]
+    msg = await send("жим лёжа 10 на 60", llm, settings, db)
+    assert msg.answer.await_args.args[0] == BENCH_PREVIEW
+
+
+async def test_food_preview_has_no_workout_note(llm, settings, db):
+    await put_snapshot(db)
+    llm.answers = [food(1, "жим лёжа")]
+    msg = await send("жим лёжа", llm, settings, db)
+    assert "В мини-аппе" not in msg.answer.await_args.args[0]
+
+
+async def test_overlap_check_failure_keeps_the_preview(llm, settings, db, monkeypatch):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(log_text.aw, "overlap_for", boom)
+    llm.answers = [workout("жим лёжа")]
+    msg = await send("жим лёжа 10 на 60", llm, settings, db)
+    assert msg.answer.await_args.args[0] == BENCH_PREVIEW and buttons(msg) == [["save", "drop"]]

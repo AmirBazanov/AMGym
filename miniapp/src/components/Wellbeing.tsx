@@ -17,7 +17,9 @@ export interface WellbeingData {
 
 /** Server-only data: loaded when the screen opens and again when the app comes back to the foreground. */
 export function useWellbeing(): WellbeingData {
-  const r = useRemote<WellbeingEntry[]>(`wellbeing:${WELLBEING_DAYS}`, () => getWellbeing(WELLBEING_DAYS))
+  const r = useRemote<WellbeingEntry[]>(`wellbeing:${WELLBEING_DAYS}`, () => getWellbeing(WELLBEING_DAYS), [
+    'wellbeing',
+  ])
   const [hidden, setHidden] = useState<Set<number>>(new Set())
   const [failed, setFailed] = useState(false)
 

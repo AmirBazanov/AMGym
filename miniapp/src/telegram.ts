@@ -68,6 +68,22 @@ export function onForeground(cb: () => void): () => void {
 
 const FOREGROUND_GAP_MS = 1000
 
+/**
+ * Calls `cb` when the app goes to the background: the page is hidden or Telegram reports `deactivated`
+ * (minimized; the page may stay "visible" and JS may be suspended soon after). Returns the unsubscribe.
+ */
+export function onBackground(cb: () => void): () => void {
+  const onVisibility = () => {
+    if (document.visibilityState === 'hidden') cb()
+  }
+  document.addEventListener('visibilitychange', onVisibility)
+  tg?.onEvent?.('deactivated', cb)
+  return () => {
+    document.removeEventListener('visibilitychange', onVisibility)
+    tg?.offEvent?.('deactivated', cb)
+  }
+}
+
 export const haptic = {
   tap: () => tg?.HapticFeedback?.impactOccurred('light'),
   select: () => tg?.HapticFeedback?.selectionChanged(),

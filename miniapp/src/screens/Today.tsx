@@ -36,6 +36,7 @@ import {
 import { overrideReason, suggestWeight } from '../progression'
 import { actions, currentRun, isStarted, lastSetsFor, overridesFor, planMode, useStore, type Workout } from '../store'
 import { formatKg } from '../stats'
+import type { Topic } from '../liveCore'
 import { useRemote } from '../useRemote'
 import { confirm, haptic } from '../telegram'
 import { entriesCount, formatWellbeing, groupByDate, localISODate } from '../wellbeing'
@@ -95,9 +96,12 @@ interface DayPlanState {
   regenerate: () => void
 }
 
+// The server's plan depends on the history, settings and wellbeing notes too.
+const PLAN_TOPICS: readonly Topic[] = ['plan', 'workouts', 'state', 'wellbeing']
+
 /** Today's adaptive plan. Loaded on open and on return to the app; a failed refetch keeps the last answer. */
 function useDayPlan(): DayPlanState {
-  const r = useRemote<DayPlan>('plan:today', getTodayPlan)
+  const r = useRemote<DayPlan>('plan:today', getTodayPlan, PLAN_TOPICS)
   const [plan, setPlan] = useState<DayPlan | null | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)

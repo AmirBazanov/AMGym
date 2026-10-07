@@ -2,7 +2,17 @@
 // Shapes mirror the future server models (Workout -> exercises -> sets) so the swap is mechanical.
 import { useSyncExternalStore } from 'react'
 import { getDay, getProgram, isDropset } from './program'
-import { api, ApiError, EMPTY_PROFILE, EMPTY_TARGETS, inTelegram, type DayPlan, type Profile, type Targets } from './api'
+import {
+  api,
+  ApiError,
+  EMPTY_PROFILE,
+  EMPTY_TARGETS,
+  inTelegram,
+  timeoutSignal,
+  type DayPlan,
+  type Profile,
+  type Targets,
+} from './api'
 import { buildDemoHistory, demoStartDate } from './mock'
 import {
   applyPlan,
@@ -16,7 +26,21 @@ import {
   type PreparedSuggestions,
 } from './plan'
 import { findOverride, lastSameSession, mergeOverrides, normalizeBaselines } from './progression'
-import { activePayload, isStarted, isUnsupported, shouldPushActive } from './activeSync'
+import {
+  activeFingerprint,
+  activePayload,
+  afterDelete,
+  fitsKeepalive,
+  isStarted,
+  isUnsupported,
+  needsPut,
+  endWorkoutId,
+  queueDelete,
+  restoreActive,
+  shouldPushActive,
+  type ActiveSent,
+} from './activeSync'
+import { onBackground } from './telegram'
 
 export { isStarted }
 
@@ -87,6 +111,12 @@ export interface State {
   activeSuggested: PreparedSuggestions
   // Weights the owner set for a day in the chat (server data; none in the demo). Only today's count.
   weightOverrides: WeightOverride[]
+  // The workout in progress as the server last accepted it (PUT /api/workouts/active); null: none sent.
+  activeSent: ActiveSent | null
+  // Workouts whose server copy must still be deleted (cancelled offline); retried on every sync.
+  pendingActiveDeletes: string[]
+  // Ids of workouts finished or cancelled here, so a stale server snapshot never restores them.
+  endedActive: string[]
 }
 
 interface ServerState {
@@ -98,6 +128,8 @@ interface ServerState {
   profile?: Partial<Profile> // absent on servers older than the profile API
   baselines?: Baseline[] // absent on servers older than the baselines
   weightOverrides?: WeightOverride[] // absent on servers older than the weight overrides
+  // The workout in progress as last PUT from any device (fresh and unfinished only); absent on older servers.
+  activeWorkout?: (Workout & { updatedAt?: string }) | null
 }
 
 type SettingsPatch = Partial<Pick<State, 'programId' | 'startDate' | 'restSeconds' | 'targets'>> & {
@@ -128,6 +160,9 @@ function initialState(): State {
     baselines: [],
     activeSuggested: {},
     weightOverrides: [],
+    activeSent: null,
+    pendingActiveDeletes: [],
+    endedActive: [],
   }
 }
 
@@ -147,6 +182,9 @@ function load(): State {
         delete saved.baselines
         delete saved.activeSuggested
         delete saved.weightOverrides
+        delete saved.activeSent
+        delete saved.pendingActiveDeletes
+        delete saved.endedActive
       }
       // Nested merge: storage written before the profile existed (or with fewer keys) still loads.
       return { ...initialState(), ...saved, profile: { ...EMPTY_PROFILE, ...saved.profile } }
@@ -364,10 +402,11 @@ export const actions = {
       .map((ex) => ({ ...ex, sets: ex.sets.filter((s) => s.done) }))
       .filter((ex) => ex.sets.length)
     cancelActivePush()
+    const endedActive = endWorkoutId(state.endedActive, a.id)
     if (!exercises.length) {
-      commit({ ...state, active: null, activeSuggested: {} })
+      commit({ ...state, active: null, activeSuggested: {}, endedActive })
       // Everything was unticked: the server may still hold an earlier PUT of this workout.
-      if (state.mode === 'server') deleteActive(a.id)
+      if (state.mode === 'server') requestActiveDelete(a.id)
       return
     }
     const done: Workout = { ...a, exercises, finishedAt: new Date().toISOString() }
@@ -376,6 +415,7 @@ export const actions = {
       ...state,
       active: null,
       activeSuggested: {},
+      endedActive,
       history: [...state.history, done],
       pending: server ? [...state.pending, done] : state.pending,
     })
@@ -385,8 +425,14 @@ export const actions = {
   cancelWorkout() {
     const id = state.active?.id
     cancelActivePush()
-    commit({ ...state, active: null, activeSuggested: {}, skipAutoStart: localDate() })
-    if (state.mode === 'server' && id) deleteActive(id)
+    commit({
+      ...state,
+      active: null,
+      activeSuggested: {},
+      skipAutoStart: localDate(),
+      endedActive: id ? endWorkoutId(state.endedActive, id) : state.endedActive,
+    })
+    if (state.mode === 'server' && id) requestActiveDelete(id)
   },
 
   deleteWorkout(id: string) {
@@ -473,6 +519,21 @@ function applyServer(server: ServerState) {
     baselines,
     weightOverrides: mergeOverrides(server.weightOverrides, state.weightOverrides),
   }
+  // The app lost the workout in progress (storage wiped, another device) or prepared a fresh empty one:
+  // take the server's copy back with its ticked sets. Its weights stay; the refill below fills only empty ones.
+  const finished = new Set(next.history.flatMap((w) => (w.clientId ? [w.id, w.clientId] : [w.id])))
+  const restored = restoreActive(next.active, server.activeWorkout, {
+    deletes: next.pendingActiveDeletes,
+    ended: next.endedActive,
+    finished,
+  })
+  if (restored) {
+    next.active = restored
+    next.activeSuggested = {}
+    next.activePlanKey = null
+    // The server holds exactly this: no PUT until something changes.
+    next.activeSent = { id: restored.id, fp: activeFingerprint(restored) }
+  }
   // New baselines reach the prepared workout, and today's overrides also a started one, in place (empty
   // or app-suggested weights of sets not done only), whether or not the day plan request succeeds.
   // Idempotent, so every sync may run it.
@@ -499,7 +560,8 @@ export async function flushPending(): Promise<void> {
   flushing = true
   try {
     // A PUT of the workout in progress still on its way must not land after the POST that clears it.
-    await activeInflight
+    // Each request times out by itself; the race only guards against a chain that never settles.
+    await Promise.race([activeInflight, new Promise((r) => setTimeout(r, ACTIVE_TIMEOUT_MS))])
     for (const w of [...state.pending]) {
       try {
         const saved = await api<Workout>('/workouts', { method: 'POST', body: JSON.stringify(w) })
@@ -512,6 +574,8 @@ export async function flushPending(): Promise<void> {
         // The server looked at it and said no (bad values): retrying won't help, set it aside.
         if (e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 401 && e.status !== 403) {
           commit({ ...state, pending: state.pending.filter((p) => p.id !== w.id), rejected: [...state.rejected, w] })
+          // The refused POST did not clear the server's copy of the workout in progress: drop it.
+          requestActiveDelete(w.id)
           continue
         }
         throw e
@@ -544,7 +608,9 @@ export async function syncFromServer(): Promise<void> {
     while (flushing) await new Promise((r) => setTimeout(r, 100))
     await flushPending()
     applyServer(await api<ServerState>('/state'))
-    // Back in the foreground: send the workout in progress again in case an earlier PUT was lost.
+    // Deletes that failed earlier (cancelled offline), then the workout in progress if an earlier PUT
+    // was lost. An unchanged one is not sent again (needsPut), so live-update syncs do not loop.
+    retryActiveDeletes()
     if (activeOnServer(state)) void pushActive()
   } catch {
     if (!inTelegram && state.mode !== 'demo') commit({ ...state, mode: 'demo' })
@@ -556,14 +622,15 @@ export async function syncFromServer(): Promise<void> {
 // errors are dropped and the next change or foreground sync sends the latest again.
 
 const ACTIVE_DEBOUNCE_MS = 1500
+/** PUT/DELETE of the workout in progress give up after this, so a hung request never blocks a finish. */
+const ACTIVE_TIMEOUT_MS = 10_000
 let activeTimer: ReturnType<typeof setTimeout> | null = null
 let activeInflight: Promise<void> = Promise.resolve()
 let activeUnsupported = false // an older server without the endpoints: off for this session
-let activePushedId: string | null = null // the workout the server holds, to send its last untick too
 
 /** The active workout should be on the server: started, or already sent (then unticked). */
 function activeOnServer(s: State): boolean {
-  return s.mode === 'server' && !!s.active && (isStarted(s.active) || s.active.id === activePushedId)
+  return s.mode === 'server' && !!s.active && (isStarted(s.active) || s.active.id === s.activeSent?.id)
 }
 
 function scheduleActivePush() {
@@ -580,14 +647,25 @@ function cancelActivePush() {
   activeTimer = null
 }
 
-/** Requests are chained, so a DELETE or the finish POST never overtakes an earlier PUT. */
-function pushActive(): Promise<void> {
+/**
+ * Requests are chained, so a DELETE or the finish POST never overtakes an earlier PUT. A payload the
+ * server already accepted is not sent again. `keepalive`: the page is being hidden, let the request
+ * outlive it (bodies over the keepalive limit go as a normal request).
+ */
+function pushActive({ keepalive = false }: { keepalive?: boolean } = {}): Promise<void> {
   activeInflight = activeInflight.then(async () => {
     const a = state.active
-    if (activeUnsupported || !a || !activeOnServer(state)) return
+    if (activeUnsupported || !a || !activeOnServer(state) || !needsPut(a, state.activeSent)) return
+    const body = JSON.stringify(activePayload(a))
+    const fp = activeFingerprint(a)
     try {
-      await api<void>('/workouts/active', { method: 'PUT', body: JSON.stringify(activePayload(a)) })
-      activePushedId = a.id
+      await api<void>('/workouts/active', {
+        method: 'PUT',
+        body,
+        keepalive: keepalive && fitsKeepalive(body),
+        signal: timeoutSignal(ACTIVE_TIMEOUT_MS),
+      })
+      commit({ ...state, activeSent: { id: a.id, fp } })
     } catch (e) {
       if (e instanceof ApiError && isUnsupported(e.status)) activeUnsupported = true
     }
@@ -595,26 +673,52 @@ function pushActive(): Promise<void> {
   return activeInflight
 }
 
-/** `id`: the server deletes only its copy of this workout, so a late cancel never wipes a newer one. */
+/** Cancel or finish with nothing done: remember the delete until the server confirms it, then try it. */
+function requestActiveDelete(id: string) {
+  commit({ ...state, pendingActiveDeletes: queueDelete(state.pendingActiveDeletes, id) })
+  deleteActive(id)
+}
+
+/** Deletes still waiting from an earlier session or a failed attempt (offline cancel). */
+function retryActiveDeletes() {
+  if (state.mode !== 'server') return
+  state.pendingActiveDeletes.forEach(deleteActive)
+}
+
+/**
+ * `id`: the server deletes only its copy of this workout, so a late cancel never wipes a newer one.
+ * The id stays queued in `pendingActiveDeletes` until the server answers (see deleteOutcome).
+ */
 function deleteActive(id: string) {
   activeInflight = activeInflight.then(async () => {
-    if (activeUnsupported) return
-    try {
-      await api<void>(`/workouts/active?clientId=${encodeURIComponent(id)}`, { method: 'DELETE' })
-      activePushedId = null
-    } catch {
-      // Offline or a server that does not know it: the next PUT or POST replaces the server's copy.
+    if (!state.pendingActiveDeletes.includes(id)) return // done by an earlier attempt in the chain
+    let status: number | undefined
+    if (activeUnsupported) status = 404 // an older server never got a PUT: nothing to delete
+    else try {
+      await api<void>(`/workouts/active?clientId=${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        signal: timeoutSignal(ACTIVE_TIMEOUT_MS),
+      })
+      status = 204
+    } catch (e) {
+      status = e instanceof ApiError ? e.status : undefined
     }
+    const pendingActiveDeletes = afterDelete(state.pendingActiveDeletes, id, status)
+    if (pendingActiveDeletes.length === state.pendingActiveDeletes.length) return
+    commit({
+      ...state,
+      pendingActiveDeletes,
+      activeSent: state.activeSent?.id === id ? null : state.activeSent,
+    })
   })
 }
 
 // Telegram may suspend a minimized Mini App before the debounce fires; the owner then asks the bot
-// about the sets just done. Send a waiting change right away when the page is hidden.
+// about the sets just done. Send a waiting change right away when the page is hidden or minimized.
 if (typeof document !== 'undefined') {
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden' && activeTimer) {
-      cancelActivePush()
-      void pushActive()
-    }
+  onBackground(() => {
+    if (!activeTimer) return
+    cancelActivePush()
+    void pushActive({ keepalive: true })
   })
 }

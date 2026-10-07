@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -25,6 +26,7 @@ from gymbot.mcp_server import MCP_PATH, BearerGuard, mcp_http
 from gymbot.services import active_workout as aw
 from gymbot.services import baselines as bl
 from gymbot.services import facts as fx
+from gymbot.services import live
 from gymbot.services import nutrition as nut
 from gymbot.services import overrides as ov
 from gymbot.services import plan as day_plan
@@ -52,6 +54,14 @@ class StateOut(BaseModel):
     baselines: list[bl.BaselineOut]
     # Weights set from the chat for today (local TIMEZONE) only (gymbot.services.overrides).
     weightOverrides: list[ov.WeightOverrideOut]
+    # The workout in progress as last sent by PUT /api/workouts/active, while fresh and not finished
+    # (gymbot.services.active_workout): the Mini App restores it when it has no local one.
+    activeWorkout: aw.ActiveWorkoutOut | None = None
+
+
+class LiveTokenOut(BaseModel):
+    token: str
+    expiresIn: int
 
 
 class TargetsIn(BaseModel):
@@ -220,6 +230,7 @@ def create_app(
             history=history,
             baselines=await bl.current(session, user.id),
             weightOverrides=await ov.for_day(session, user.id, datetime.now(tz).date()),
+            activeWorkout=await aw.current_out(session, user.id, datetime.now(UTC), tz),
         )
 
     @app.get("/api/health")
@@ -251,6 +262,9 @@ def create_app(
                 raise HTTPException(404, "unknown program") from e
         out = await state_for(session, user, up)
         await session.commit()  # commit before answering, so the client never sees OK for a lost write
+        live.publish(user.id, "state")
+        if body.programId or body.startDate:
+            live.publish(user.id, "plan")  # another program day; the burst merges into one event
         return out
 
     @app.post("/api/workouts")
@@ -262,6 +276,7 @@ def create_app(
             raise HTTPException(422, str(e)) from e
         await aw.clear(session, user.id, body.id)  # finished: no longer in progress (retries included)
         await session.commit()
+        live.publish(user.id, "workouts", "state")
         w = await ws.get_workout(session, user, saved.id)
         assert w is not None
         weeks = len((await load_program(session, up.program_id)).weeks)
@@ -302,6 +317,7 @@ def create_app(
             raise HTTPException(404, "not found")
         await session.delete(w)
         await session.commit()
+        live.publish(user.id, "workouts", "state")
 
     def nutrition_date(value: date | None, name: str) -> date:
         """Default to today in TIMEZONE; reject dates whose day bounds would overflow datetime (500)."""
@@ -330,6 +346,7 @@ def create_app(
             raise HTTPException(404, "not found")
         await session.delete(entry)
         await session.commit()
+        live.publish(user.id, "nutrition")
 
     @app.get("/api/wellbeing")
     async def list_wellbeing(
@@ -347,6 +364,7 @@ def create_app(
             raise HTTPException(404, "not found")
         await session.delete(entry)
         await session.commit()
+        live.publish(user.id, "wellbeing", "plan")
 
     # 409 only for the active-facts limit: the Mini App shows its limit message on any 409.
     @app.get("/api/facts")
@@ -365,6 +383,7 @@ def create_app(
             raise HTTPException(409, f"at most {fx.MAX_ACTIVE} active facts")
         await session.commit()
         assert added.fact is not None
+        live.publish(user.id, "facts")
         schedule_baselines(added.fact.id)
         if added.status == "duplicate":
             response.status_code = 200  # the same active fact exists: return it, create nothing
@@ -393,6 +412,7 @@ def create_app(
         if changes.get("category") is not None:
             f.category = changes["category"]
         await session.commit()
+        live.publish(f.user_id, "facts", "state")  # a changed or deactivated fact moves working weights
         if f.active and f.baselines_at is None:
             schedule_baselines(f.id)
         return fx.fact_out(f)
@@ -402,6 +422,7 @@ def create_app(
         f = await own_fact(session, tg, fact_id)
         await session.delete(f)  # its baselines go too (ORM cascade)
         await session.commit()
+        live.publish(f.user_id, "facts", "state")
 
     async def today_plan(session: AsyncSession, tg: TelegramUser, force: bool) -> day_plan.DayPlanOut:
         now = day_plan.utcnow()
@@ -448,6 +469,7 @@ def create_app(
         )
         session.add(r)
         await session.commit()
+        live.publish(user.id, "reminders")
         return reminder_out(r)
 
     async def own_reminder(session: AsyncSession, tg: TelegramUser, reminder_id: int) -> Reminder:
@@ -480,6 +502,7 @@ def create_app(
             # Same rule as on create: a time already passed today waits for tomorrow.
             r.last_sent_on = rem.initial_last_sent(r.minute_of_day, datetime.now(UTC), tz)
         await session.commit()
+        live.publish(r.user_id, "reminders")
         return reminder_out(r)
 
     @app.delete("/api/reminders/{reminder_id}", status_code=204)
@@ -487,6 +510,30 @@ def create_app(
         r = await own_reminder(session, tg, reminder_id)
         await session.delete(r)
         await session.commit()
+        live.publish(r.user_id, "reminders")
+
+    live_key = live.signing_key(settings.bot_token)
+    live.install_log_redaction()  # the stream URL carries the token; uvicorn logs request paths
+
+    @app.post("/api/live/token")
+    async def live_token(session: Session, tg: TgUser) -> LiveTokenOut:
+        """A short-lived token for GET /api/live (EventSource cannot send the initData header)."""
+        user = await get_or_create_user(session, tg.id, tg.name)
+        await session.commit()
+        return LiveTokenOut(token=live.make_token(live_key, user.id), expiresIn=live.TOKEN_TTL)
+
+    @app.get("/api/live", response_class=StreamingResponse)
+    async def live_stream(token: Annotated[str, Query(max_length=200)] = "") -> StreamingResponse:
+        """Server-Sent Events: `hello`, then `change` with {"topics": [...]}, `: ping` every 20 s.
+        No session or initData dependency: the stream stays open for hours."""
+        user_id = live.verify_token(live_key, token)
+        if user_id is None:
+            raise HTTPException(401, "invalid or expired live token")
+        return StreamingResponse(
+            live.events(user_id),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.middleware("http")
     async def no_cache_index(request: Request, call_next):  # type: ignore[no-untyped-def]

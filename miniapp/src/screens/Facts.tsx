@@ -31,7 +31,7 @@ const LIMIT_TEXT = `Активных фактов уже ${FACTS_ACTIVE_MAX}. В
 
 /** "Бот помнит": long-lived facts from the chat that the bot mixes into parsing and advice. */
 export function Facts() {
-  const r = useRemote<Fact[]>('facts', getFacts)
+  const r = useRemote<Fact[]>('facts', getFacts, ['facts'])
   // Local copy so toggles and edits show at once; re-seeded whenever the server list arrives.
   const [items, setItems] = useState<Fact[] | null>(null)
   const [editing, setEditing] = useState<Fact | 'new' | null>(null)

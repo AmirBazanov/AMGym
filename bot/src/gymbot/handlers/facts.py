@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gymbot.db.models import UserFact
 from gymbot.db.session import Sessionmaker
-from gymbot.services import facts
+from gymbot.services import facts, live
 from gymbot.services.users import get_or_create_user
 
 router = Router(name="facts")
@@ -65,6 +65,7 @@ async def delete_fact(cb: CallbackQuery, sessionmaker: Sessionmaker) -> None:
     if not deleted:
         await cb.answer("Этого факта уже нет.", show_alert=True)
         return
+    live.publish(user.id, "facts", "state")  # its working weights are gone too
     if cb.message:
         await cb.message.edit_text(text, reply_markup=kb)  # type: ignore[union-attr]
     await cb.answer("Забыл.")

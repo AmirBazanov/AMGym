@@ -31,10 +31,13 @@ import { ABOUT_MAX, GOALS, profileErrors, profileLimits, profilePatch } from '..
 import { KIND_DEFAULTS, REMINDER_WEEKDAYS, reminderTitle, reminderWhen, repeatPhrase, weekdayShort } from '../reminders'
 import { actions, getState, useStore } from '../store'
 import { confirm, haptic } from '../telegram'
+import type { Topic } from '../liveCore'
 import { useRemote } from '../useRemote'
 import { Facts } from './Facts'
 
 // Food data and reminders are never cached in the offline store: every view loads them from the server when shown.
+// Targets come with /api/state, so a target set from the chat also reloads the day and week views.
+const NUTRITION_TOPICS: readonly Topic[] = ['nutrition', 'state']
 
 type View = 'day' | 'week' | 'settings'
 
@@ -214,7 +217,7 @@ function Day({
   onToday: (d: string) => void
   onSetTargets: () => void
 }) {
-  const r = useRemote<NutritionDay>(`day:${date ?? 'today'}`, () => getNutritionDay(date ?? undefined))
+  const r = useRemote<NutritionDay>(`day:${date ?? 'today'}`, () => getNutritionDay(date ?? undefined), NUTRITION_TOPICS)
   const [hidden, setHidden] = useState<Set<number>>(new Set())
   const [failed, setFailed] = useState(false)
 
@@ -426,7 +429,7 @@ function Week({
   onToday: (d: string) => void
   onOpenDay: (d: string) => void
 }) {
-  const r = useRemote<NutritionWeek>(`week:${end ?? 'today'}`, () => getNutritionWeek(end ?? undefined))
+  const r = useRemote<NutritionWeek>(`week:${end ?? 'today'}`, () => getNutritionWeek(end ?? undefined), NUTRITION_TOPICS)
   const days = r.data?.days ?? []
   const last = days[days.length - 1]?.date ?? end
 
@@ -786,7 +789,7 @@ const byTime = (a: Reminder, b: Reminder) =>
   a.time.localeCompare(b.time) || (a.weekday ?? -1) - (b.weekday ?? -1) || a.id - b.id
 
 function Reminders() {
-  const r = useRemote<Reminder[]>('reminders', getReminders)
+  const r = useRemote<Reminder[]>('reminders', getReminders, ['reminders'])
   // Local copy so toggles and edits show at once; re-seeded whenever the server list arrives.
   const [items, setItems] = useState<Reminder[] | null>(null)
   const [editing, setEditing] = useState<Reminder | 'new' | null>(null)

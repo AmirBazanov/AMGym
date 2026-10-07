@@ -25,7 +25,7 @@ from gymbot.db.migrate import upgrade_head
 from gymbot.db.session import make_engine
 from gymbot.handlers import advice, chat_settings, common, facts, log_text, plan, voice
 from gymbot.llm.openrouter import OpenRouterClient
-from gymbot.services import baselines
+from gymbot.services import baselines, live
 from gymbot.services.access import is_allowed
 from gymbot.services.programs import sync_programs
 from gymbot.services.reminders import reminder_loop
@@ -54,6 +54,15 @@ class AllowedUsers(BaseMiddleware):
             await get_or_create_user(session, user.id, user.full_name)
             await session.commit()
         return await handler(event, data)
+
+
+class Server(uvicorn.Server):
+    """uvicorn waits for open responses before the app's lifespan shutdown runs, and a Mini App event
+    stream never ends by itself: close the streams first, so a restart does not hang on them."""
+
+    async def shutdown(self, sockets: list[Any] | None = None) -> None:
+        live.close_all()
+        await super().shutdown(sockets)
 
 
 async def setup_bot_ui(bot: Bot, settings: Settings) -> None:
@@ -166,13 +175,14 @@ async def run() -> None:
             webhook = WebhookHandler(bot, dp, webhook_secret(settings))
             routers.append(webhook.router())
 
-    server = uvicorn.Server(
+    server = Server(
         uvicorn.Config(
             create_app(settings, sessionmaker, llm, routers, bot=bot),
             host=settings.api_host,
             port=settings.api_port,
             log_level="info",
             proxy_headers=True,  # trusts X-Forwarded-For only from 127.0.0.1 (the reverse proxy / tunnel)
+            timeout_graceful_shutdown=10,  # backstop: then uvicorn cancels whatever request still runs
         )
     )
 

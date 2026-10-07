@@ -65,17 +65,19 @@ from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from sqlalchemy import select
 
 from gymbot.config import Settings
-from gymbot.db.models import FoodEntry
+from gymbot.db.models import FoodEntry, User
 from gymbot.db.session import Sessionmaker
 from gymbot.handlers.chat_settings import send_staged, stage_settings
 from gymbot.handlers.plan import send_after_wellbeing
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.prompts import MINIAPP_SETUP_ANSWER
 from gymbot.llm.schemas import REMEMBER_MAX, ParsedFood, ParsedWellbeing, ParseResult
+from gymbot.services import active_workout as aw
 from gymbot.services import answer as qa
-from gymbot.services import baselines, facts, food_lookup
+from gymbot.services import baselines, facts, food_lookup, live
 from gymbot.services.programs import exercise_catalog, normalize
 from gymbot.services.users import get_or_create_user
 from gymbot.services.wellbeing import wellbeing_entry
@@ -370,8 +372,34 @@ def _names_an_exercise(norm: str, result: ParseResult) -> bool:
 
 
 def wants_diary(text: str) -> bool:
-    """Whether a question is worth the diary answer: not "привет", "спасибо", "ок" (two more model calls)."""
-    return "?" in text or len(text.split()) > SMALL_TALK_WORDS
+    """Whether a question is worth the diary answer: not "привет", "спасибо", "ок" (two more model calls).
+    Questions about what the bot sees in the Mini App ("видно?") always are, however short."""
+    return "?" in text or len(text.split()) > SMALL_TALK_WORDS or bool(ASKS_VISIBILITY.search(normalize(text)))
+
+
+# "тебе видно?", "видишь в мини-аппе?": only the diary answer knows the workout in progress.
+ASKS_VISIBILITY = re.compile(r"мини[\s-]?апп?|миниапп?|mini ?app|\b(?:видно|видишь|вижу)\b", re.IGNORECASE)
+# A reply that is not a record must never claim an action: the bot writes only after «Сохранить».
+# "ты записал …" (what the user did) is not a claim of the bot.
+ACTION_CLAIM = re.compile(
+    r"(?<!ты )(?<!вы )(?:записал|запис(?:ано|ала)|добав(?:ил|лен|ила)|сохран(?:ил|ено|ила)|обновил)", re.IGNORECASE
+)
+NO_ACTION = (
+    "Я не записываю сам — чтобы записать, нажми «Сохранить» под превью. "
+    "Отмеченные в мини-аппе подходы я вижу, только когда спросишь."
+)
+
+
+def claims_action(reply: str | None) -> bool:
+    return bool(reply) and reply != MINIAPP_SETUP_ANSWER and bool(ACTION_CLAIM.search(reply or ""))
+
+
+def honest(result: ParseResult) -> ParseResult:
+    """A question or unclear-message reply that claims a write gets NO_ACTION instead."""
+    if result.is_record() or not claims_action(result.clarification):
+        return result
+    log.info("a reply claimed an action it did not do: replaced")
+    return result.model_copy(update={"clarification": NO_ACTION})
 
 
 def _remember_answer(user_id: int, question: str, reply: str, at: datetime) -> None:
@@ -423,8 +451,25 @@ async def _diary_answer(
     except Exception:
         log.exception("answer from the diary failed")
         return result
+    if claims_action(reply):
+        log.info("the diary answer claimed an action it did not do: replaced")
+        reply = NO_ACTION
     _remember_answer(tg_user.id, text, reply, message.date)
     return result.model_copy(update={"clarification": reply})
+
+
+async def _active_overlap(tg_id: int, result: ParseResult, settings: Settings, sessionmaker: Sessionmaker) -> str:
+    """The note about sets already ticked in the Mini App for the previewed exercises; '' on any error."""
+    try:
+        async with sessionmaker() as session:
+            user_id = await session.scalar(select(User.id).where(User.telegram_id == tg_id))
+            if user_id is None:
+                return ""
+            names = [ex.exercise for ex in result.exercises]
+            return await aw.overlap_for(session, user_id, names, datetime.now(UTC), ZoneInfo(settings.timezone))
+    except Exception:
+        log.warning("active workout overlap check failed", exc_info=True)
+        return ""
 
 
 def _remember(user_id: int, ex: Exchange) -> None:
@@ -640,9 +685,14 @@ async def _reply_parsed(
         log.info("a Mini App setup request parsed as a workout: answered instead")
         result = ParseResult(kind="question", clarification=MINIAPP_SETUP_ANSWER)
     # A question about a pending preview ("а сколько в ней калорий?") is about data the diary does not have
-    # yet: the parser, who saw the preview, answers it.
-    if result.kind == "question" and not (prev and prev.token) and wants_diary(text):
+    # yet: the parser, who saw the preview, answers it. A parser reply claiming a write goes there too.
+    if (
+        result.kind == "question"
+        and not (prev and prev.token)
+        and (wants_diary(text) or claims_action(result.clarification))
+    ):
         result = await _diary_answer(message, text, result, settings, sessionmaker, llm)
+    result = honest(result)
     # The model tends to repeat facts it was given: offer only new ones.
     offer = result.remember
     if offer and facts.normalize(offer) in {facts.normalize(k) for k in known}:
@@ -722,6 +772,8 @@ async def _reply_parsed(
         markup = lookup_keyboard(token, lk, fact=fact is not None)
     else:
         markup = keyboard(token, record=True, fact=fact is not None)
+    if result.kind == "workout" and (note := await _active_overlap(user_id, result, settings, sessionmaker)):
+        preview += f"\n\n{note}"
     if fact is not None:
         preview += _offer_line(fact.text)
     await message.answer(preview, reply_markup=markup)
@@ -871,6 +923,7 @@ async def remember(cb: CallbackQuery, sessionmaker: Sessionmaker, llm: OpenRoute
         )
         return
     assert added.fact is not None
+    live.publish(user.id, "facts")
     baselines.schedule(sessionmaker, llm, added.fact.id)  # working weights in the background
     done = (
         f"Запомнил: «{offered.text}» ✅ Все факты: /facts"
@@ -896,13 +949,16 @@ async def remember(cb: CallbackQuery, sessionmaker: Sessionmaker, llm: OpenRoute
 async def _save(pending: Pending, cb: CallbackQuery, today: date, sessionmaker: Sessionmaker) -> str:
     async with sessionmaker() as session:
         user = await get_or_create_user(session, cb.from_user.id, cb.from_user.full_name)
+        topics: tuple[live.Topic, ...]
         if pending.result.kind == "workout":
             await save_from_chat(session, user, pending.result, pending.raw_text, today)
             note = "Сохранено ✅ Видно в дневнике, /undo — отменить."
+            topics = ("workouts", "state")
         elif pending.result.kind == "wellbeing":
             assert pending.result.wellbeing is not None  # is_record() was checked before the preview
             session.add(wellbeing_entry(user.id, pending.result.wellbeing, pending.raw_text, pending.sent_at))
             note = "Самочувствие сохранено ✅"
+            topics = ("wellbeing", "plan")
         else:
             for f in pending.result.foods:
                 session.add(
@@ -919,5 +975,7 @@ async def _save(pending: Pending, cb: CallbackQuery, today: date, sessionmaker: 
                     )
                 )
             note = "Еда сохранена ✅"
+            topics = ("nutrition",)
         await session.commit()
+    live.publish(user.id, *topics)
     return note

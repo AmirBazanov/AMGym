@@ -38,6 +38,7 @@ from gymbot.config import Settings
 from gymbot.db.models import DayPlan, Exercise, User, UserProgram, Workout, WorkoutSet
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.prompts import build_plan_messages, format_facts
+from gymbot.services import live
 from gymbot.services.facts import active_facts
 from gymbot.services.nutrition import _aware, day_summary
 from gymbot.services.programs import find_day, load_program, normalize, program_position
@@ -641,6 +642,7 @@ async def get_or_build(
         row.created_at = now_utc
         try:
             await session.commit()
+            live.publish(user_id, "plan")
         except IntegrityError:  # another process saved today's plan first: use theirs
             await session.rollback()
             row = await _stored(session, user_id, inputs.today)

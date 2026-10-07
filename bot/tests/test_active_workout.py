@@ -19,6 +19,11 @@ MSK = ZoneInfo("Europe/Moscow")
 OTHER = {"X-Telegram-Init-Data": init_data(43, "Other")}
 
 
+def now_iso(delta: timedelta = timedelta()) -> str:
+    """startedAt for a workout that really is in progress now (the API and the chat use the real clock)."""
+    return (datetime.now(UTC) + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def active(wid="w1", **over):
     """Mid-workout snapshot: 2 of 4 bench sets done, the pulldown untouched (sets without reps yet)."""
     w = {
@@ -257,7 +262,8 @@ def test_context_line_nothing_ticked_yet():
 def test_context_line_stale_or_missing():
     assert aw.context_line(None, UPDATED, MSK) == ""
     assert aw.context_line(snapshot(UPDATED), UPDATED + timedelta(hours=6, minutes=1), MSK) == ""
-    assert aw.context_line(snapshot(UPDATED), UPDATED + timedelta(hours=5, minutes=59), MSK) != ""
+    # 5 h 59 min later is past local midnight in MSK (see test_context_line_stale_after_local_midnight): UTC here.
+    assert aw.context_line(snapshot(UPDATED), UPDATED + timedelta(hours=5, minutes=59), ZoneInfo("UTC")) != ""
     broken = ActiveWorkout(user_id=1, client_id="w1", payload="{not json", updated_at=UPDATED)
     assert aw.context_line(broken, UPDATED, MSK) == ""
 
@@ -271,14 +277,17 @@ def test_context_line_is_capped():
     assert len(line) <= aw.LINE_MAX and line.endswith("…")
 
 
-def test_context_line_other_day_shows_date():
-    line = aw.context_line(snapshot(UPDATED), UPDATED + timedelta(hours=5), MSK)  # 00:10 MSK next day
-    assert "(начата 07.10 18:40, обновлена 07.10 19:10)" in line
+def test_context_line_survives_local_midnight():
+    # Started 18:40 MSK, updated 19:10; at 00:10 MSK the next day it is 5 h 30 min old: still in progress
+    # (a late workout must stay visible and restorable after midnight). Stale only after STALE_AFTER.
+    midnight = UPDATED + timedelta(hours=5)
+    assert aw.context_line(snapshot(UPDATED), midnight, MSK) != ""
+    assert aw.context_line(snapshot(UPDATED), UPDATED + timedelta(hours=6, minutes=1), MSK) == ""
 
 
 async def test_answer_context_has_the_workout_in_progress(client, auth, settings, db):
     await client.get("/api/state", headers=auth)
-    await client.put("/api/workouts/active", json=active(), headers=auth)
+    await client.put("/api/workouts/active", json=active(startedAt=now_iso()), headers=auth)
     tz = ZoneInfo(settings.timezone)
     now = datetime.now(UTC)
     async with db() as s:
@@ -287,6 +296,205 @@ async def test_answer_context_has_the_workout_in_progress(client, auth, settings
         assert "жим лёжа 82.5×8, 82.5×8 (2 из 4 подходов); тяга вертикального блока — ещё не начато." in ctx
         stale = await answer_service.build_context(s, user, settings, None, tz, now + timedelta(hours=7))
         assert "Сейчас идёт тренировка" not in stale
+
+
+# ---- fresh(): what counts as a workout in progress ----
+
+
+def test_fresh_returns_the_workout_while_in_progress():
+    data = aw.fresh(snapshot(UPDATED), UPDATED + timedelta(minutes=5), MSK)
+    assert data is not None and data.id == "w1" and data.exercises[0].name == "жим лёжа"
+
+
+def test_fresh_none_when_missing_stale_or_unreadable():
+    assert aw.fresh(None, UPDATED, MSK) is None
+    assert aw.fresh(snapshot(UPDATED), UPDATED + timedelta(hours=6, minutes=1), MSK) is None
+    assert aw.fresh(snapshot(UPDATED), UPDATED + timedelta(hours=5, minutes=59), MSK) is not None  # 01:09 MSK next day
+    assert aw.fresh(ActiveWorkout(user_id=1, client_id="w1", payload="{not json", updated_at=UPDATED), UPDATED, MSK) is None
+    assert aw.fresh(ActiveWorkout(user_id=1, client_id="w1", payload="{}", updated_at=UPDATED), UPDATED, MSK) is None
+
+
+def test_fresh_none_when_started_too_long_ago_even_if_just_updated():
+    now = datetime(2026, 10, 7, 20, 0, tzinfo=UTC)  # 23:00 MSK, same local day as the start below
+    started = "2026-10-07T05:30:00Z"  # 08:30 MSK: 14.5 h earlier, same local day
+    assert aw.fresh(snapshot(now, startedAt=started), now, MSK) is None
+    assert aw.fresh(snapshot(now, startedAt="2026-10-07T09:00:00Z"), now, MSK) is not None  # 11 h earlier
+
+
+def test_fresh_keeps_a_workout_that_crosses_local_midnight():
+    # Started 23:50 MSK on the 7th, updated at 00:20 on the 8th: a late workout still in progress.
+    now = datetime(2026, 10, 7, 21, 20, tzinfo=UTC)
+    assert aw.fresh(snapshot(now, startedAt="2026-10-07T20:50:00Z"), now, MSK) is not None
+
+
+def test_fresh_reads_naive_sqlite_times():
+    assert aw.fresh(snapshot(UPDATED.replace(tzinfo=None)), UPDATED, MSK) is not None
+    assert aw.fresh(snapshot(UPDATED.replace(tzinfo=None)), UPDATED + timedelta(hours=7), MSK) is None
+
+
+# ---- save(): an unchanged resend keeps updated_at ----
+
+
+async def test_save_unchanged_resend_keeps_updated_at_and_changed_body_bumps_it(client, auth, db):
+    await client.get("/api/state", headers=auth)
+    uid = (await user_obj(db)).id
+    data = WorkoutIn.model_validate(active())
+    first = datetime(2026, 10, 7, 16, 0, tzinfo=UTC)
+    async with db() as s:
+        assert await aw.save(s, uid, data, first) is True
+        await s.commit()
+    async with db() as s:  # the app reopened and sent the same body later
+        assert await aw.save(s, uid, WorkoutIn.model_validate(active()), first + timedelta(hours=2)) is True
+        await s.commit()
+    (row,) = await stored(db)
+    assert row.updated_at.replace(tzinfo=None) == first.replace(tzinfo=None)
+
+    changed = active()
+    changed["exercises"][0]["sets"][2] = {"weight": 82.5, "reps": 7, "done": True}
+    later = first + timedelta(hours=3)
+    async with db() as s:
+        await aw.save(s, uid, WorkoutIn.model_validate(changed), later)
+        await s.commit()
+    (row,) = await stored(db)
+    assert aw._aware(row.updated_at) == later
+
+    async with db() as s:  # another workout id with the very same body is a change too
+        await aw.save(s, uid, WorkoutIn.model_validate({**changed, "id": "w2"}), later + timedelta(hours=1))
+        await s.commit()
+    (row,) = await stored(db)
+    assert row.client_id == "w2" and aw._aware(row.updated_at) == later + timedelta(hours=1)
+
+
+async def test_idle_workout_still_goes_stale_after_identical_puts(client, auth, db):
+    """Resending the same body must not keep an idle workout alive."""
+    body = active(startedAt=now_iso())
+    assert (await client.put("/api/workouts/active", json=body, headers=auth)).status_code == 204
+    async with db() as s:
+        row = await s.get(ActiveWorkout, (await user_obj(db)).id)
+        row.updated_at = datetime.now(UTC) - timedelta(hours=7)
+        await s.commit()
+    assert (await client.put("/api/workouts/active", json=body, headers=auth)).status_code == 204
+    assert (await client.get("/api/state", headers=auth)).json()["activeWorkout"] is None
+
+
+# ---- overlap_note / overlap_for ----
+
+
+def workout_in(**over) -> WorkoutIn:
+    return WorkoutIn.model_validate(active(**over))
+
+
+def test_overlap_note_exact_text_and_merged_runs():
+    note = aw.overlap_note(workout_in(), ["Жим лёжа"])
+    assert note == (
+        "В мини-аппе уже отмечено: жим лёжа 82.5×8 ×2 — если это те же подходы, не сохраняй, "
+        "они попадут в историю по «Завершить»."
+    )
+
+
+def test_overlap_note_different_sets_comma_separated_and_bodyweight():
+    exercises = [
+        {"name": "Жим лёжа", "sets": [
+            {"weight": 80, "reps": 8, "done": True}, {"weight": 80, "reps": 8, "done": True},
+            {"weight": 85, "reps": 6, "done": True}, {"weight": 80, "reps": None, "done": False},
+        ]},
+        {"name": "Подтягивания", "sets": [{"weight": None, "reps": 10, "done": True}]},
+    ]
+    note = aw.overlap_note(workout_in(exercises=exercises), ["жим лёжа", "подтягивания"])
+    assert "жим лёжа 80×8 ×2, 85×6; подтягивания 10 повт. —" in note  # first letter lowercased, "; " between
+
+
+def test_overlap_note_matches_by_containment_only_for_long_names():
+    exercises = [{"name": "жим лёжа", "sets": [{"weight": 80, "reps": 8, "done": True}]}]
+    assert aw.overlap_note(workout_in(exercises=exercises), ["жим лёжа в тренажёре"]) != ""
+    short = [{"name": "жим", "sets": [{"weight": 80, "reps": 8, "done": True}]}]
+    assert aw.overlap_note(workout_in(exercises=short), ["жим лёжа"]) == ""  # "жим" is shorter than 5
+
+
+def test_overlap_note_empty_cases():
+    assert aw.overlap_note(None, ["жим лёжа"]) == ""
+    assert aw.overlap_note(workout_in(), ["присед"]) == ""  # no common exercise
+    assert aw.overlap_note(workout_in(), ["тяга вертикального блока"]) == ""  # in the workout, nothing done
+    assert aw.overlap_note(workout_in(), []) == ""
+
+
+async def test_overlap_for_uses_fresh_snapshot_only(client, auth, db):
+    await client.put("/api/workouts/active", json=active(startedAt=now_iso()), headers=auth)
+    uid = (await user_obj(db)).id
+    now = datetime.now(UTC)
+    async with db() as s:
+        assert "жим лёжа 82.5×8 ×2" in await aw.overlap_for(s, uid, ["жим лёжа"], now, MSK)
+        assert await aw.overlap_for(s, uid, ["жим лёжа"], now + timedelta(hours=7), MSK) == ""  # stale
+        assert await aw.overlap_for(s, uid + 100, ["жим лёжа"], now, MSK) == ""  # another user
+
+
+# ---- GET /api/state and PUT /api/settings carry activeWorkout ----
+
+
+async def test_state_has_no_active_workout_by_default(client, auth):
+    assert (await client.get("/api/state", headers=auth)).json()["activeWorkout"] is None
+
+
+async def test_state_returns_the_stored_snapshot_with_updated_at(client, auth):
+    body = active(startedAt=now_iso())
+    assert (await client.put("/api/workouts/active", json=body, headers=auth)).status_code == 204
+    out = (await client.get("/api/state", headers=auth)).json()["activeWorkout"]
+    assert out is not None
+    assert out["id"] == "w1" and out["exercises"] == WorkoutIn.model_validate(body).model_dump(mode="json")["exercises"]
+    updated = datetime.fromisoformat(out["updatedAt"])
+    assert abs(datetime.now(UTC) - updated) < timedelta(minutes=1)
+
+
+async def test_state_active_workout_gone_after_delete(client, auth):
+    await client.put("/api/workouts/active", json=active(startedAt=now_iso()), headers=auth)
+    await client.delete("/api/workouts/active", headers=auth)
+    assert (await client.get("/api/state", headers=auth)).json()["activeWorkout"] is None
+
+
+async def test_state_active_workout_is_per_user(tmp_path, make_client, auth):
+    async with make_client(make_settings(tmp_path, allowed_user_ids=[42, 43])) as client:
+        await client.put("/api/workouts/active", json=active(startedAt=now_iso()), headers=auth)
+        assert (await client.get("/api/state", headers=OTHER)).json()["activeWorkout"] is None
+        assert (await client.get("/api/state", headers=auth)).json()["activeWorkout"]["id"] == "w1"
+
+
+async def test_state_active_workout_null_when_not_updated_for_over_six_hours(client, auth, db):
+    await client.put("/api/workouts/active", json=active(startedAt=now_iso()), headers=auth)
+    async with db() as s:
+        row = await s.get(ActiveWorkout, (await user_obj(db)).id)
+        row.updated_at = datetime.now(UTC) - timedelta(hours=7)
+        await s.commit()
+    assert (await client.get("/api/state", headers=auth)).json()["activeWorkout"] is None
+
+
+async def test_state_active_workout_null_when_started_over_twelve_hours_ago(client, auth):
+    await client.put("/api/workouts/active", json=active(startedAt=now_iso(-timedelta(hours=13))), headers=auth)
+    assert (await client.get("/api/state", headers=auth)).json()["activeWorkout"] is None
+
+
+async def test_state_active_workout_null_when_that_workout_is_finished(client, auth, db):
+    st = (await client.get("/api/state", headers=auth)).json()
+    body = active(programId=st["programId"], startedAt=now_iso())
+    assert (await client.post("/api/workouts", json=body, headers=auth)).status_code == 200
+    async with db() as s:  # a snapshot of the finished workout that is still stored
+        uid = await s.scalar(select(User.id).where(User.telegram_id == 42))
+        s.add(ActiveWorkout(
+            user_id=uid, client_id="w1", payload=WorkoutIn.model_validate(body).model_dump_json(),
+            updated_at=datetime.now(UTC),
+        ))
+        await s.commit()
+    assert len(await stored(db)) == 1
+    assert (await client.get("/api/state", headers=auth)).json()["activeWorkout"] is None
+
+
+async def test_put_settings_response_carries_active_workout(client, auth):
+    await client.put("/api/workouts/active", json=active(startedAt=now_iso()), headers=auth)
+    r = await client.put("/api/settings", json={"restSeconds": 120}, headers=auth)
+    assert r.status_code == 200, r.text
+    assert r.json()["restSeconds"] == 120
+    assert r.json()["activeWorkout"]["id"] == "w1" and "updatedAt" in r.json()["activeWorkout"]
+    await client.delete("/api/workouts/active", headers=auth)
+    assert (await client.put("/api/settings", json={"restSeconds": 90}, headers=auth)).json()["activeWorkout"] is None
 
 
 # ---- migration 0010 ----

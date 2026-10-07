@@ -28,7 +28,7 @@ from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.llm.prompts import build_settings_messages
 from gymbot.llm.schemas import ParseResult
 from gymbot.services import chat_settings as cs
-from gymbot.services import overrides
+from gymbot.services import live, overrides
 from gymbot.services.programs import normalize
 from gymbot.services.users import get_or_create_user
 
@@ -175,6 +175,7 @@ async def apply_settings(cb: CallbackQuery, settings: Settings, sessionmaker: Se
     except Exception:
         SETTINGS[token] = pending  # let the user press again
         raise
+    live.publish(user.id, *pending.plan.live_topics())
     done = "Готово ✅\n" + _bullets(pending.plan.lines) + ("\n\n" + "\n".join(notes) if notes else "")
     if cb.message:
         markup = open_diary_kb(settings) if pending.plan.for_miniapp() else None

@@ -44,7 +44,7 @@ from gymbot.config import ROOT, Settings
 from gymbot.db.models import Exercise, Reminder, User, UserFact, UserProgram, Workout, WorkoutSet
 from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import OpenRouterClient, routes_from
-from gymbot.services import baselines
+from gymbot.services import baselines, live
 from gymbot.services import facts as fx
 from gymbot.services import nutrition as nut
 from gymbot.services import overrides as ov
@@ -463,6 +463,7 @@ def build_mcp(
         async with owner_session() as (session, user):
             nut.set_targets(user, changes)
             await session.commit()
+            live.publish(user.id, "state")
             return dumps({"targets": nut.user_targets(user).model_dump()})
 
     @tool(WRITE)
@@ -485,9 +486,11 @@ def build_mcp(
             if weight_kg is None:
                 removed = await ov.clear(session, user.id, ids[name], day)
                 await session.commit()
+                live.publish(user.id, "state")
                 return dumps({"exercise": name, "weight_kg": None, "date": day.isoformat(), "removed": removed})
             await ov.upsert(session, user.id, ids[name], day, weight_kg)
             await session.commit()
+            live.publish(user.id, "state")
             return dumps({"exercise": name, "weight_kg": round(weight_kg, 2), "date": day.isoformat()})
 
     async def save_fact(text: str, category: str | None, source: str, *, weights: bool = False) -> str:
@@ -502,6 +505,7 @@ def build_mcp(
             await session.commit()
             assert added.fact is not None
             f = added.fact
+            live.publish(user.id, "facts")
             if weights:  # working weights only: a fact from MCP never fills the profile (baselines.MCP_SOURCE)
                 baselines.schedule(sessionmaker, get_llm(), f.id)
             return dumps({"status": added.status, "fact": {"id": f.id, "text": f.text, "category": f.category}})
@@ -526,6 +530,7 @@ def build_mcp(
             was_active = f.active
             f.active = False
             await session.commit()
+            live.publish(user.id, "facts", "state")
             return dumps({"id": f.id, "text": f.text, "active": False, "was_active": was_active})
 
     @tool(WRITE)
@@ -564,6 +569,7 @@ def build_mcp(
             # Same rule as the API: a time already passed today waits for tomorrow.
             r.last_sent_on = rem.initial_last_sent(minute, datetime.now(UTC), tz)
             await session.commit()
+            live.publish(user.id, "reminders")
             return dumps({"id": r.id, "time": rem.minute_to_hhmm(minute), "kind": kind, "text": body,
                           "weekday": weekday, "enabled": enabled})
 
@@ -576,6 +582,7 @@ def build_mcp(
                 raise ToolError(f"Напоминания с id {id} нет.")
             await session.delete(r)
             await session.commit()
+            live.publish(user.id, "reminders")
         return dumps({"deleted": id})
 
     @tool(OUTSIDE)

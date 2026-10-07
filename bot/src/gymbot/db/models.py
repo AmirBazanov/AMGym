@@ -263,8 +263,9 @@ class WeightOverride(Base):
 class ActiveWorkout(Base):
     """The workout in progress in the Mini App, a snapshot sent on every change (PUT /api/workouts/active).
 
-    Only the diary answer reads it (gymbot.services.active_workout): it never becomes Workout/WorkoutSet
-    rows, so history, PRs and plan inputs ignore it. Finishing (POST /api/workouts) or cancelling removes it.
+    Read by the diary answer, chat workout previews and GET /api/state (gymbot.services.active_workout):
+    it never becomes Workout/WorkoutSet rows, so history, PRs and plan inputs ignore it. Finishing
+    (POST /api/workouts) or cancelling removes it.
     """
 
     __tablename__ = "active_workouts"

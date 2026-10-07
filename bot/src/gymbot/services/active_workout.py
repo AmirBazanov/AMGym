@@ -2,14 +2,17 @@
 
 The Mini App keeps the running workout on the phone until «Завершить» (POST /api/workouts). To let the
 diary answer see it ("я добавил подход, тебе видно?"), it also sends every change to
-PUT /api/workouts/active (`save`) and drops it on cancel (DELETE, `clear`). The snapshot is only read for
-`context_line`: it never becomes Workout/WorkoutSet/Exercise rows, so history, PRs and plan inputs ignore
-it. Finishing deletes it; a late PUT for an already finished workout is ignored.
+PUT /api/workouts/active (`save`) and drops it on cancel (DELETE, `clear`). The snapshot is read for
+`context_line` (the diary answer), `overlap_note` (a chat workout preview warns about sets already ticked)
+and `current_out` (GET /api/state, so a Mini App that lost its local copy can restore it). It never becomes
+Workout/WorkoutSet/Exercise rows, so history, PRs and plan inputs ignore it. Finishing deletes it; a late
+PUT for an already finished workout is ignored.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
@@ -18,10 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gymbot.db.models import ActiveWorkout, Workout
 from gymbot.services.overrides import kg
+from gymbot.services.programs import normalize
 from gymbot.services.workouts import WorkoutIn
 
 MAX_BYTES = 64 * 1024  # stored JSON; above it the API answers 422
-STALE_AFTER = timedelta(hours=6)  # an older snapshot is a forgotten workout, not one in progress
+STALE_AFTER = timedelta(hours=6)  # not updated for longer: a forgotten workout, not one in progress
+STARTED_MAX = timedelta(hours=12)  # started earlier (or on another local day): forgotten as well
 LINE_MAX = 800  # characters of the context line
 
 
@@ -58,7 +63,8 @@ async def save(session: AsyncSession, user_id: int, data: WorkoutIn, now_utc: da
     row = await session.get(ActiveWorkout, user_id)
     if row is None:
         session.add(ActiveWorkout(user_id=user_id, client_id=data.id, payload=payload, updated_at=now))
-    else:
+    elif row.client_id != data.id or row.payload != payload:
+        # An unchanged resend (app reopened, retry) keeps updated_at: an idle workout still goes stale.
         row.client_id, row.payload, row.updated_at = data.id, payload, now
     await session.flush()
     return True
@@ -82,19 +88,93 @@ def _clock(dt: datetime, now_local: datetime) -> str:
     return f"{dt:%H:%M}" if dt.date() == now_local.date() else f"{dt:%d.%m %H:%M}"
 
 
-def context_line(row: ActiveWorkout | None, now_utc: datetime, tz: ZoneInfo) -> str:
-    """'Сейчас идёт тренировка в мини-аппе (начата 18:40, обновлена 19:10): жим лёжа 82.5×8, 82.5×8
-    (2 из 4 подходов); тяга вертикального блока — ещё не начато.' Only done sets are listed.
-    '' without a snapshot, when it is older than STALE_AFTER or unreadable."""
-    if row is None:
-        return ""
-    updated = _aware(row.updated_at)
-    if now_utc - updated > STALE_AFTER:
-        return ""
+def fresh(row: ActiveWorkout | None, now_utc: datetime, tz: ZoneInfo) -> WorkoutIn | None:
+    """The snapshot's workout while it is in progress, else None: missing, unreadable, not updated for
+    STALE_AFTER or started more than STARTED_MAX ago. Not tied to the local day: a workout started at
+    23:30 and still going after midnight stays restorable."""
+    if row is None or now_utc - _aware(row.updated_at) > STALE_AFTER:
+        return None
     try:
         data = WorkoutIn.model_validate_json(row.payload)
     except ValidationError:
+        return None
+    started = _aware(data.startedAt)
+    if now_utc - started > STARTED_MAX:
+        return None
+    return data
+
+
+class ActiveWorkoutOut(WorkoutIn):
+    """GET /api/state: the stored workout in progress, for a Mini App that lost its local copy."""
+
+    updatedAt: datetime
+
+
+async def current_out(session: AsyncSession, user_id: int, now_utc: datetime, tz: ZoneInfo) -> ActiveWorkoutOut | None:
+    """The fresh snapshot (see `fresh`) unless that workout is already in the history."""
+    row = await session.get(ActiveWorkout, user_id)
+    data = fresh(row, now_utc, tz)
+    if row is None or data is None:
+        return None
+    finished = await session.scalar(
+        select(Workout.id).where(Workout.user_id == user_id, Workout.client_id == row.client_id)
+    )
+    if finished is not None:
+        return None
+    return ActiveWorkoutOut(**data.model_dump(), updatedAt=_aware(row.updated_at))
+
+
+def _same_exercise(a: str, b: str) -> bool:
+    na, nb = normalize(a), normalize(b)
+    return na == nb or (min(len(na), len(nb)) >= 5 and (na in nb or nb in na))
+
+
+def _grouped(sets: list[tuple[float | None, int | None]]) -> str:
+    """'82.5×8 ×2, 85×6': runs of equal sets merged."""
+    runs: list[list[Any]] = []
+    for s in sets:
+        if runs and runs[-1][0] == s:
+            runs[-1][1] += 1
+        else:
+            runs.append([s, 1])
+    parts = []
+    for (weight, reps), n in runs:
+        one = f"{kg(weight)}×{reps}" if weight is not None else f"{reps} повт."
+        parts.append(one + (f" ×{n}" if n > 1 else ""))
+    return ", ".join(parts)
+
+
+def overlap_note(data: WorkoutIn | None, exercises: list[str]) -> str:
+    """Under a chat workout preview: the sets already ticked in the Mini App for the same exercises, so the
+    user does not save them twice. '' when there is nothing in common."""
+    if data is None:
         return ""
+    found = []
+    for ex in data.exercises:
+        done = [(s.weight, s.reps) for s in ex.sets if s.done]
+        if done and any(_same_exercise(ex.name, name) for name in exercises):
+            name = ex.name.strip()
+            found.append(f"{name[:1].lower()}{name[1:]} {_grouped(done)}")
+    if not found:
+        return ""
+    return (
+        f"В мини-аппе уже отмечено: {'; '.join(found)} — если это те же подходы, не сохраняй, "
+        "они попадут в историю по «Завершить»."
+    )
+
+
+async def overlap_for(session: AsyncSession, user_id: int, exercises: list[str], now_utc: datetime, tz: ZoneInfo) -> str:
+    return overlap_note(fresh(await session.get(ActiveWorkout, user_id), now_utc, tz), exercises)
+
+
+def context_line(row: ActiveWorkout | None, now_utc: datetime, tz: ZoneInfo) -> str:
+    """'Сейчас идёт тренировка в мини-аппе (начата 18:40, обновлена 19:10): жим лёжа 82.5×8, 82.5×8
+    (2 из 4 подходов); тяга вертикального блока — ещё не начато.' Only done sets are listed.
+    '' without a fresh snapshot (see `fresh`)."""
+    data = fresh(row, now_utc, tz)
+    if row is None or data is None:
+        return ""
+    updated = _aware(row.updated_at)
     now_local = now_utc.astimezone(tz)
     parts: list[str] = []
     done_total = 0

@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { onRemoteRefresh, signalMatches, type Topic } from './liveCore'
 import { onForeground } from './telegram'
 
 // ---------- data loading for server-only screens (nutrition, reminders, wellbeing) ----------
@@ -10,10 +11,15 @@ export interface Remote<T> {
   reload: () => void
 }
 
-/** Loads `key` with `load`; keeps showing the last data of the same key while reloading. */
-export function useRemote<T>(key: string, load: () => Promise<T>): Remote<T> {
+/**
+ * Loads `key` with `load`; keeps showing the last data of the same key while reloading. Reloads on
+ * return to the app, and on live changes from the chat for any of `topics` (see live.ts).
+ */
+export function useRemote<T>(key: string, load: () => Promise<T>, topics?: readonly Topic[]): Remote<T> {
   const [res, setRes] = useState<{ key: string; data?: T; error?: unknown } | null>(null)
   const [nonce, setNonce] = useState(0)
+  const watched = useRef(topics)
+  watched.current = topics
 
   useEffect(() => {
     let alive = true
@@ -30,6 +36,13 @@ export function useRemote<T>(key: string, load: () => Promise<T>): Remote<T> {
 
   // The app may stay open across midnight or while food is logged in the chat: refresh on return.
   useEffect(() => onForeground(() => setNonce((n) => n + 1)), [])
+  useEffect(
+    () =>
+      onRemoteRefresh((signal) => {
+        if (signalMatches(watched.current, signal)) setNonce((n) => n + 1)
+      }),
+    [],
+  )
 
   const cur = res?.key === key ? res : null
   return { data: cur?.data, error: cur?.error, loading: !cur, reload: () => setNonce((n) => n + 1) }

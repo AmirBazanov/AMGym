@@ -47,6 +47,7 @@ from gymbot.db.models import Exercise, ExerciseBaseline, ProgramItem, UserFact
 from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.prompts import build_baseline_messages
+from gymbot.services import live
 from gymbot.services import profile as prof
 from gymbot.services.programs import normalize
 
@@ -264,6 +265,8 @@ async def _process(
         if not _DIGIT.search(text) or source.startswith(MCP_NOTE_SOURCE):
             marked = await _claim(session, fact_id, text, utcnow())
             await session.commit()
+            if marked:
+                live.publish(user_id, "facts")
             return FREE if marked else SKIPPED
         names = await catalog(session)
     # No session (and no SQLite write lock) while the model thinks.
@@ -296,6 +299,7 @@ async def _process(
         if found.profile and not source.startswith(MCP_SOURCE):
             changed = await prof.fill_from_fact(session, user_id, found.profile)
         await session.commit()
+    live.publish(user_id, "facts", "state")  # working weights and maybe the profile
     log.info(
         "baselines for fact %s: %s%s",
         fact_id,

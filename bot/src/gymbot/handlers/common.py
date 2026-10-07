@@ -7,6 +7,7 @@ from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKey
 
 from gymbot.config import Settings
 from gymbot.db.session import Sessionmaker
+from gymbot.services import live
 from gymbot.services.programs import find_day, format_item, load_program, program_position
 from gymbot.services.users import active_program, get_or_create_user
 from gymbot.services.workouts import delete_last_chat_sets
@@ -83,4 +84,6 @@ async def undo(message: Message, sessionmaker: Sessionmaker) -> None:
         user = await get_or_create_user(session, message.from_user.id)  # type: ignore[union-attr]
         removed = await delete_last_chat_sets(session, user)
         await session.commit()
+    if removed:
+        live.publish(user.id, "workouts", "state")
     await message.answer(f"Удалил подходов: {removed}." if removed else "Нечего удалять.")

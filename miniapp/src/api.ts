@@ -29,6 +29,18 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await apiWithStatus<T>(path, init)).data
 }
 
+/**
+ * A signal that aborts after `ms`, so a hung request fails instead of blocking what waits for it.
+ * AbortSignal.timeout is missing in old Telegram WebViews: fall back to AbortController + setTimeout.
+ * Pass it as `signal` in api()'s init; `keepalive: true` there survives the page being hidden.
+ */
+export function timeoutSignal(ms: number): AbortSignal {
+  if (typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(ms)
+  const c = new AbortController()
+  setTimeout(() => c.abort(), ms)
+  return c.signal
+}
+
 // ---- Nutrition (contract: docs/superpowers/specs/2026-10-06-nutrition-reminders-voice-design.md, section 1) ----
 
 export interface Macros {
