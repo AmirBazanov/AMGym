@@ -97,6 +97,15 @@ function load(): State {
     const raw = localStorage.getItem(KEY)
     if (raw) {
       const saved = JSON.parse(raw) as Partial<State>
+      // A browser preview (demo mode) may share this origin's storage with Telegram Web. Inside
+      // Telegram the history is the server's: never restore demo workouts or a demo session.
+      if (inTelegram && saved.mode === 'demo') {
+        delete saved.history
+        delete saved.pending
+        delete saved.rejected
+        delete saved.active
+        delete saved.mode
+      }
       // Nested merge: storage written before the profile existed (or with fewer keys) still loads.
       return { ...initialState(), ...saved, profile: { ...EMPTY_PROFILE, ...saved.profile } }
     }
