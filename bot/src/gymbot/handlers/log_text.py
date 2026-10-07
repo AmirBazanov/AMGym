@@ -79,7 +79,8 @@ from gymbot.llm.prompts import MINIAPP_SETUP_ANSWER
 from gymbot.llm.schemas import REMEMBER_MAX, ParsedFood, ParsedWellbeing, ParseResult
 from gymbot.services import active_workout as aw
 from gymbot.services import answer as qa
-from gymbot.services import baselines, facts, food_lookup, live
+from gymbot.services import baselines, facts, food_lookup, live, plausibility
+from gymbot.services import products as pr
 from gymbot.services.answer_intent import classify as classify_question
 from gymbot.services.body_weight import parse_chat as parse_body_weight
 from gymbot.services.programs import exercise_catalog, normalize
@@ -714,15 +715,23 @@ async def process_text(
     history = prev.history() if prev else _answers_history(user_id, message.date)
     await message.bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
     # Saved products the message names, with their exact numbers (only those: the prompt stays short).
-    mine = await product_cards.parser_context(sessionmaker, user_id, text)
+    products = await product_cards.parser_products(sessionmaker, user_id, text)
+    mine = pr.prompt_line(text, products)
+    known_all = [mine, *known] if mine else known
     try:
-        result = await llm.parse_message(text, catalog, history or None, [mine, *known] if mine else known)
+        result = await llm.parse_message(text, catalog, history or None, known_all)
     except LLMError:
         if staged is not None:
             await send_staged(message, staged, prefix=prefix)
             return
         await message.answer(prefix + "Нейросеть сейчас недоступна, попробуй ещё раз чуть позже.")
         return
+    # "2 самсы = 2116 ккал": one repair round on an implausible estimate, then the reference (services/plausibility)
+    result = await plausibility.review(
+        result,
+        plausibility.parser_reparse(llm, text, result, history or None, known_all),
+        exact=lambda f: product_cards.is_exact(f, products),
+    )
     if staged is not None:
         if result.is_record() and not staged.fake_workout(result, text):
             await _reply_parsed(message, text, raw, prefix, settings, sessionmaker, llm, prev, known, result)

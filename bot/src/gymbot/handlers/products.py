@@ -287,11 +287,21 @@ async def on_text(
     return True
 
 
-async def parser_context(sessionmaker: Sessionmaker, user_id: int, text: str) -> str:
-    """'Мои продукты: ...' for the parser when the message names saved products (else '')."""
+async def parser_products(sessionmaker: Sessionmaker, user_id: int, text: str) -> list[pr.ProductInfo]:
+    """The user's saved products the message names (their exact numbers go to the parser)."""
     async with sessionmaker() as session:
         saved = await pr.user_products(session, user_id)
-    return pr.prompt_line(text, saved)
+    return pr.mentioned(text, saved)
+
+
+async def parser_context(sessionmaker: Sessionmaker, user_id: int, text: str) -> str:
+    """'Мои продукты: ...' for the parser when the message names saved products (else '')."""
+    return pr.prompt_line(text, await parser_products(sessionmaker, user_id, text))
+
+
+def is_exact(food: ParsedFood, products: list[pr.ProductInfo]) -> bool:
+    """Whether a parsed food is one of `products` (its numbers are the label's, not an estimate)."""
+    return bool(products) and bool(pr.mentioned(food.description, products))
 
 
 # ---- Buttons ----

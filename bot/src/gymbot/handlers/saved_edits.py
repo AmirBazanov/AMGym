@@ -27,9 +27,10 @@ from sqlalchemy import select
 from gymbot.config import Settings
 from gymbot.db.models import User
 from gymbot.db.session import Sessionmaker
+from gymbot.handlers import products as product_cards
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.schemas import ParseResult
-from gymbot.services import facts, live
+from gymbot.services import facts, live, plausibility
 from gymbot.services import saved_edits as se
 from gymbot.services.programs import exercise_catalog
 from gymbot.services.users import get_or_create_user
@@ -216,7 +217,15 @@ async def _reestimate(
     async with sessionmaker() as session:
         catalog = await exercise_catalog(session)
         known = await facts.prompt_facts(session, tg_id)
-    result = await llm.parse_message(text, catalog, [se.history_turn(unit)], known)
+    history = [se.history_turn(unit)]
+    result = await llm.parse_message(text, catalog, history, known)
+    if result.kind == "food" and unit.kind == "food":  # an implausible estimate: a repair round, then the reference
+        products = await product_cards.parser_products(sessionmaker, tg_id, text)
+        result = await plausibility.review(
+            result,
+            plausibility.parser_reparse(llm, text, result, history, known),
+            exact=lambda f: product_cards.is_exact(f, products),
+        )
     return se.edited(unit, result)
 
 

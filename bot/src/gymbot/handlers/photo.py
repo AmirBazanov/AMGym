@@ -31,8 +31,8 @@ from gymbot.db.session import Sessionmaker
 from gymbot.handlers import products as product_cards
 from gymbot.handlers.log_text import reply_with_result
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
-from gymbot.llm.schemas import PhotoParse
-from gymbot.services import barcode, facts
+from gymbot.llm.schemas import ParseResult, PhotoParse
+from gymbot.services import barcode, facts, plausibility
 from gymbot.services import products as pr
 
 log = logging.getLogger(__name__)
@@ -119,8 +119,9 @@ async def log_photo(
         # A plate with a packaged product beside it (a yogurt): the plate estimate stays, the product is offered
         # as a separate card; the caption's amount is the plate's, so the card asks.
         assert seen is not None
+        plate_result = await _plausible(seen.result, caption, llm, known)
         await reply_with_result(
-            message, history_text(caption), seen.result, settings, sessionmaker, llm,
+            message, history_text(caption), plate_result, settings, sessionmaker, llm,
             raw_text=raw_text, prefix=PREFIX, known=known,
         )  # fmt: skip
         await product_cards.offer(
@@ -144,6 +145,7 @@ async def log_photo(
     if not result.foods and not result.unknown_terms:
         await message.answer(pr.NOT_FOUND.format(code=code) if code else NO_FOOD)
         return
+    result = await _plausible(result, caption, llm, known)
     await reply_with_result(
         message,
         history_text(caption),
@@ -155,6 +157,13 @@ async def log_photo(
         prefix=PREFIX,
         known=known,
     )
+
+
+async def _plausible(result: ParseResult, caption: str, llm: OpenRouterClient, known: list[str]) -> ParseResult:
+    """A plate estimate after the plausibility check (services/plausibility). The repair round goes over the text
+    parser with the photo as the previous turn: resending the image would cost ~2K tokens of the shared quota."""
+    reparse = plausibility.parser_reparse(llm, history_text(caption), result, None, known)
+    return await plausibility.review(result, reparse)
 
 
 async def _vision(llm: OpenRouterClient, image_b64: str, caption: str, known: list[str]) -> PhotoParse | None:
