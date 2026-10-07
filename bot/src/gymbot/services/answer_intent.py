@@ -35,6 +35,7 @@ class Question:
     day: str  # "today" | "yesterday" | "last"
     record: bool = False  # asks for a record / 1RM / max rather than the last time
     listing: bool = False  # "что я ел" (the entries), not only the totals
+    previous: bool = False  # "в прошлый раз", "на прошлой тренировке": a day before today
 
 
 def _rx(pattern: str) -> re.Pattern[str]:
@@ -76,6 +77,7 @@ _FOOD = [
 _FOOD_LIST = _rx(_W + r"что\s+" + _SLOT + r"(?:съел\w*|поел\w*|ел|ела)" + _E)
 _RECORD = _rx(_W + r"(?:рекорд\w*|1\s*-?\s*пм|пм|1\s*rm|одноповтор\w*|максимум\w*|макс|разов\w+\s+максимум\w*)" + _E)
 _LAST_TIME = _rx(_W + r"(?:в|на)\s+(?:прошл\w+|последн\w+)\s+(?:раз|тренировк\w*)" + _E)
+_PREVIOUS = _rx(_W + r"(?:прошл\w+|предыдущ\w+)\s+(?:раз|тренировк\w*)" + _E)
 _LIFTED = _rx(_W + r"(?:сколько|какой\s+вес|с\s+каким\s+весом)\s+" + _SLOT + r"(?:жал\w*|пожал\w*|выжал\w*|отжал\w*|присел\w*|"
               r"приседал\w*|тянул\w*|потянул\w*|поднимал\w*|поднял\w*|с?делал\w*|работал\w*)" + _E)
 
@@ -94,10 +96,11 @@ def classify(text: str) -> Question | None:
     if not t or _ADVICE.search(t):
         return None
     day = _day(t)
-    if _RECORD.search(t) or _LAST_TIME.search(t) and not any(p.search(t) for p in _WORKOUT) or _LIFTED.search(t):
-        return Question(Intent.EXERCISE, day, record=bool(_RECORD.search(t)))
+    previous = bool(_LAST_TIME.search(t) or _PREVIOUS.search(t))
+    if _RECORD.search(t) or (_LAST_TIME.search(t) and not any(p.search(t) for p in _WORKOUT)) or _LIFTED.search(t):
+        return Question(Intent.EXERCISE, day, record=bool(_RECORD.search(t)), previous=previous)
     if any(p.search(t) for p in _WORKOUT):
-        return Question(Intent.WORKOUT, day)
+        return Question(Intent.WORKOUT, day, previous=previous)
     if any(p.search(t) for p in _FOOD) or _FOOD_LIST.search(t):
         if _ABOUT_A_FOOD.search(t):
             return None
@@ -147,7 +150,8 @@ SYNONYMS: list[tuple[re.Pattern[str], str]] = [
      "жим лёжа"),
     (_rx(_W + r"(?:румынск\w*|румынк\w*|рдл)" + _E), "румынская тяга"),
     (_rx(_W + r"(?:станов\w*)" + _E), "становая тяга"),
-    (_rx(_W + r"(?:присед\w*)" + _E), "присед со штангой"),
+    # Not "гакк-приседания" / "хакк-присед": a machine, another exercise.
+    (_rx(_W + r"(?<!гакк[\s-])(?<!хакк[\s-])(?<!гак[\s-])(?<!хак[\s-])(?:присед\w*)" + _E), "присед со штангой"),
     (_rx(_W + r"(?:тяг\w*\s+(?:верхн\w*|вертикальн\w*)\s+блок\w*|верхн\w*\s+тяг\w*|вертикальн\w*\s+тяг\w*)"),
      "тяга вертикального блока"),
     (_rx(_W + r"(?:тяг\w*\s+(?:нижн\w*|горизонтальн\w*)\s+блок\w*|горизонтальн\w*\s+тяг\w*)"),
@@ -180,7 +184,9 @@ def _find(name_words: list[str], text_words: list[str], used: set[int]) -> list[
     return None
 
 
-def mentions(text: str, names: Iterable[str], aliases: dict[str, list[str]] | None = None) -> list[str]:
+def mentions(
+    text: str, names: Iterable[str], aliases: dict[str, list[str]] | None = None, synonyms: bool = True
+) -> list[str]:
     """Exercise names (from `names`) said in `text`, in the order of the text; see the module doc.
 
     `aliases` maps a name to other spellings of it. A synonym hit gives its catalog name even when that
@@ -204,7 +210,7 @@ def mentions(text: str, names: Iterable[str], aliases: dict[str, list[str]] | No
             found.append((pos[0], name))
     t = normalize(text)
     by_key = {normalize(n): n for n in names}
-    for pattern, target in SYNONYMS:
+    for pattern, target in SYNONYMS if synonyms else []:
         m = pattern.search(t)
         if m is None:
             continue
@@ -216,6 +222,30 @@ def mentions(text: str, names: Iterable[str], aliases: dict[str, list[str]] | No
         used.update(covered)
         found.append((first, by_key.get(normalize(target), target)))
     return list(dict.fromkeys(n for _, n in sorted(found)))
+
+
+def synonym_targets(text: str) -> list[str]:
+    """Catalog names of the main lifts said in `text` in any form ("в румынке" -> "румынская тяга")."""
+    t = normalize(text)
+    return [target for pattern, target in SYNONYMS if pattern.search(t)]
+
+
+def contains_all(name: str, other: str) -> bool:
+    """Whether every content word of `name` is in `other` ("присед со штангой" in "приседания со штангой")."""
+    ws, ow = words(name), words(other)
+    return bool(ws) and all(any(same(w, o) for o in ow) for w in ws)
+
+
+def variants(name: str, history: Iterable[str]) -> list[str]:
+    """History names of the same exercise as `name`: equal, a more specific name with all its words, or the
+    same main lift by SYNONYMS ("румынская тяга" -> "румынская тяга с гантелями", "присед со штангой" ->
+    "приседания со штангой", "жим лёжа" -> "жим штанги лёжа")."""
+    key = normalize(name)
+    patterns = [p for p, target in SYNONYMS if normalize(target) == key or p.search(key)]
+    return [
+        h for h in dict.fromkeys(history)
+        if normalize(h) == key or contains_all(name, h) or any(p.search(normalize(h)) for p in patterns)
+    ]
 
 
 def head_matches(text: str, names: Iterable[str], skip: Iterable[str] = ()) -> list[str]:

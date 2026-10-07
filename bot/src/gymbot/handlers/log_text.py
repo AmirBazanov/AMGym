@@ -474,6 +474,31 @@ async def _diary_answer(
     return result.model_copy(update={"clarification": reply})
 
 
+# A record in the same message ("съел курт, сколько белка осталось", "сделал жим 3 подхода по 8"): the
+# parser's clarification about it wins over the diary answer, or the record would be lost.
+_RECORD_VERB = re.compile(
+    r"(?<![а-яa-z])(?:съел\w*|поел\w*|выпил\w*|доел\w*|перекусил\w*|сделал\w*|пожал\w*|выжал\w*|отжал\w*|"
+    r"присел\w*|подтянул\w*|потянул\w*|пробежал\w*|прошел\w*|позанимал\w*)(?![а-яa-z])"
+)
+_RECORD_NUMBERS = re.compile(r"\d+\s*(?:на|x|х|×|\*|по|г|гр|грамм\w*|кг|шт\w*|мл)(?![а-яa-z])|\d+\s*подход")
+
+
+def _factual_question(text: str, result: ParseResult, prev: Exchange | None) -> bool:
+    """Whether a message the parser did not take as a question still gets the diary answer from the database
+    ("сколько белка осталось" without "?", "что я сегодня делал" called unclear). Never when the parser
+    found a record, an unknown dish to look up, or a pending preview; for "unknown" never when the text
+    reads like a record too (its clarification is about that record); numbers of sets or grams in the text
+    keep even a "question" with the parser. In doubt the parser's reply wins."""
+    if result.kind not in ("question", "unknown") or result.is_record() or result.unknown_terms:
+        return False
+    if prev and prev.token:
+        return False
+    t = normalize(text)
+    if _RECORD_NUMBERS.search(t) or (result.kind == "unknown" and _RECORD_VERB.search(t)):
+        return False
+    return classify_question(text) is not None
+
+
 async def _active_overlap(tg_id: int, result: ParseResult, settings: Settings, sessionmaker: Sessionmaker) -> str:
     """The note about sets already ticked in the Mini App for the previewed exercises; '' on any error."""
     try:
@@ -709,10 +734,9 @@ async def _reply_parsed(
         and not result.unknown_terms
         and prev is None
         and bool(recent_answers(user_id, message.date))
+        and not _RECORD_VERB.search(normalize(text))  # "поел курицу" + "Сколько грамм?": the parser asks on
     )
-    # A factual question about the diary ("сколько белка осталось", "как потренил") is answered from the
-    # database however short it is and whatever the parser called it, unless it parsed as a record.
-    factual = not result.is_record() and not (prev and prev.token) and classify_question(text) is not None
+    factual = _factual_question(text, result, prev)
     if follow_up or factual or (
         result.kind == "question"
         and not (prev and prev.token)

@@ -26,7 +26,7 @@ import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from gymbot.services.answer_intent import mentions
+from gymbot.services.answer_intent import mentions, variants
 from gymbot.services.programs import normalize
 
 _W = r"(?<![а-яa-z0-9])"
@@ -44,8 +44,12 @@ _FUTURE = re.compile(
     r"начать|добавь\w*|добавлять|добавить|прибавь\w*|прибавить|прибавлять|сделай\w*|делай\w*|сделать|делать|"
     r"можно|нужно|надо|стоит|цел[ьи]\w*|план(?:е|у|а|ом|ы)?|программ\w*|завтра|будет|будешь|буд[уе]м?|давай|"
     r"рекоменд\w*|лучше|возьми|бери|бер[её]шь|увелич\w*|сниз\w*|снижай|уменьш\w*|добер\w*|добрать|держи|оставь|"
-    r"оставляй|если|бы|целься|жми|присядь|подними|сможешь|получится|должн\w*|советую|предлагаю|дальше|потом)" + _E
+    r"оставляй|если|бы|целься|жми|присядь|подними|сможешь|получится|должн\w*|советую|предлагаю|дальше|потом|"
+    r"съешь|съесть|поешь|доешь|доесть|на\s+ужин|на\s+обед|на\s+завтрак|перекус\w*|примерно|рабоч\w*)" + _E
 )
+# "около 60 г", "≈ 6,5 т": a rounded figure, matched within HEDGE_TOLERANCE.
+_HEDGE = re.compile(r"(?:около|приблизительно|порядка|почти|где-то|≈|~)\s*$")
+HEDGE_TOLERANCE = 0.05
 
 _SENTENCE = re.compile(r"(?<!упр\.)(?<!подх\.)(?<!повт\.)(?<=[.!?…])\s+")
 _CLAUSE = re.compile(r",\s+|;\s*|\s+[—–-]\s+|:\s+|\s+(?:а|но|однако|поэтому|зато|так что)\s+")
@@ -102,11 +106,13 @@ def _unit_of(token: str, scale: int = 1) -> Decimal:
     return Decimal(scale)
 
 
-def supported(token: str, values: list[float], scale: int = 1) -> bool:
+def supported(token: str, values: list[float], scale: int = 1, hedged: bool = False) -> bool:
     """Whether the number `token` (times `scale`, 1000 for tonnes) is some evidence value rounded to the
-    precision it is written with."""
+    precision it is written with; `hedged` ("около 60") also takes values within HEDGE_TOLERANCE."""
     v = Decimal(str(_value(token))) * scale
     if v == 0:  # "0 подходов" says there is nothing
+        return True
+    if hedged and any(abs(float(v) - c) <= HEDGE_TOLERANCE * max(abs(float(v)), abs(c)) for c in values):
         return True
     unit = _unit_of(token, scale)
     for c in values:
@@ -161,9 +167,12 @@ def _skipped(clause: str, start: int, end: int) -> bool:
     )
 
 
-def _numbers(clause: str) -> list[tuple[str, list[tuple[str, int]]]]:
-    """(the claim as written, [(number, scale)]) for every number with a unit or pattern."""
-    claims: list[tuple[str, list[tuple[str, int]]]] = []
+def _numbers(clause: str) -> list[tuple[str, list[tuple[str, int]], bool]]:
+    """(the claim as written, [(number, scale)], hedged) for every number with a unit or pattern."""
+    claims: list[tuple[str, list[tuple[str, int]], bool]] = []
+
+    def hedged(start: int) -> bool:
+        return bool(_HEDGE.search(clause[max(0, start - 16):start]))
     taken: list[tuple[int, int]] = []
 
     def free(a: int, b: int) -> bool:
@@ -172,7 +181,7 @@ def _numbers(clause: str) -> list[tuple[str, list[tuple[str, int]]]]:
     for m in _PAIR.finditer(clause):
         taken.append((m.start(), m.end()))
         if not _skipped(clause, m.start(), m.end()):  # "4×8–10" (sets × a rep range) is a prescription
-            claims.append((m.group(0), [(m["a"], 1), (m["b"], 1)]))
+            claims.append((m.group(0), [(m["a"], 1), (m["b"], 1)], hedged(m.start())))
     for m in _WITH_UNIT.finditer(clause):
         if not free(m.start(), m.end()):
             continue
@@ -181,10 +190,10 @@ def _numbers(clause: str) -> list[tuple[str, list[tuple[str, int]]]]:
             continue
         unit = m["u"]
         scale = 1000 if unit == "т" or unit.startswith("тонн") else 1
-        claims.append((m.group(0), [(m["n"], scale)]))
+        claims.append((m.group(0), [(m["n"], scale)], hedged(m.start())))
     for m in _TONNAGE.finditer(clause):
         if free(m.start("n"), m.end("n")) and not _skipped(clause, m.start("n"), m.end("n")):
-            claims.append((m.group(0), [(m["n"], 1)]))
+            claims.append((m.group(0), [(m["n"], 1)], hedged(m.start("n"))))
     return claims
 
 
@@ -195,10 +204,10 @@ def violations(answer: str, ev: Evidence) -> list[str]:
     values = ev.values()
     for clause in past_clauses(answer):
         for name in [] if _NEGATED.search(clause) else mentions(clause, ev.names, ev.aliases):
-            if normalize(name) not in history:
+            if normalize(name) not in history and not variants(name, ev.history):
                 flags.append(name)
-        for written, numbers in _numbers(clause):
-            if not all(supported(n, values, scale) for n, scale in numbers):
+        for written, numbers, hedge in _numbers(clause):
+            if not all(supported(n, values, scale, hedge) for n, scale in numbers):
                 flags.append(written)
     return list(dict.fromkeys(flags))
 

@@ -152,7 +152,9 @@ class Reply:
 
 DIRECT, LLM, RETRIED, FALLBACK = "direct", "llm", "llm-retry", "fallback"
 FALLBACK_HEAD = "В дневнике этого нет. Вот что есть:"
-_FOOD_WORDS = re.compile(r"ккал|калор|бел[оке]|жир|углевод|бжу|\d\s*г(?![а-яa-z])|съел|поел|\bел\b|ед[аыу]|питани")
+_FOOD_WORDS = re.compile(
+    r"ккал|калор|бел[оке]|жир|углевод|бжу|\d\s*г(?![а-яa-z])|съел|поел|(?<![а-яa-z])(?:ел|ед[аыу])(?![а-яa-z])|питани"
+)
 
 
 def fallback(ctx: Context, question: str, flags: list[str]) -> str:
@@ -160,7 +162,7 @@ def fallback(ctx: Context, question: str, flags: list[str]) -> str:
     q = normalize(question)
     if _FOOD_WORDS.search(q) or any(_FOOD_WORDS.search(normalize(f)) for f in flags):
         block = ctx.food
-    elif asked := [n for n in mentions(question, [*ctx.history, *ctx.catalog], ctx.aliases) if n in ctx.history]:
+    elif asked := (direct.resolve(question, list(ctx.history), ctx.catalog, ctx.aliases) or ([], []))[0]:
         block = "\n".join(direct.exercise_line(ctx.history[n]) for n in asked[: direct.MAX_EXERCISES_IN_REPLY])
     else:
         block = ctx.done

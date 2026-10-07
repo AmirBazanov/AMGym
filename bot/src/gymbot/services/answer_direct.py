@@ -6,6 +6,11 @@ returns None when the question cannot be answered for sure (an exercise it does 
 answers, checked by gymbot.services.answer_check. The same numbers go to the model's summary as blocks
 (`food_block`, `records_block`, gymbot.services.answer.done_block), so both paths say the same.
 
+Drop sets are folded into their main set ("80×8 → 60×6") and are not counted as sets; their weight×reps
+still counts in the tonnage, as in the advice summary (gymbot.services.advice) and the MCP history.
+"Last time" for an exercise is the last day BEFORE today when there is one (mid-workout today's sets are
+not "last time"), like the day plan (gymbot.services.plan).
+
 Only reads. Days are local dates in TIMEZONE (Workout.performed_on is one already), weights in kg.
 """
 
@@ -13,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
@@ -29,10 +34,10 @@ from gymbot.services.answer_intent import (
     head_matches,
     mentions,
     same,
+    synonym_targets,
+    variants,
     words,
 )
-
-Sets = list[tuple[Decimal | None, int]]
 
 MAX_EXERCISES_IN_REPLY = 4  # "в жиме" with several presses in the history
 RECORDS_IN_REPLY = 8  # "какой мой рекорд?" without an exercise
@@ -41,7 +46,23 @@ RECORDS_MAX = 1000  # characters of the records block in the model's summary
 FOOD_LIST_MAX = 12
 
 
+@dataclass(frozen=True)
+class Set:
+    """A main set with its drops (weight None = bodyweight)."""
+
+    weight: Decimal | None
+    reps: int
+    drops: tuple[tuple[Decimal | None, int], ...] = ()
+
+
+Sets = list[Set]
+
+
 # ---- formatting ----
+
+
+def _half_up(x: float | Decimal, digits: int = 0) -> Decimal:
+    return Decimal(str(x)).quantize(Decimal(1).scaleb(-digits), rounding=ROUND_HALF_UP)
 
 
 def kg(x: Decimal | float) -> str:
@@ -51,11 +72,19 @@ def kg(x: Decimal | float) -> str:
 
 
 def num(x: float, digits: int = 1) -> str:
-    """Food and 1RM numbers: whole from 10 up, else one decimal, decimal comma."""
+    """Food and 1RM numbers: whole from 10 up, else one decimal, decimal comma; halves round up."""
     if abs(x) >= 10 or digits == 0:
-        return str(round(x))
-    v = round(x, digits)
-    return kg(v)
+        return str(int(_half_up(x)))
+    return kg(_half_up(x, digits))
+
+
+def _one(weight: Decimal | None, reps: int) -> str:
+    return f"{kg(weight)}×{reps}" if weight is not None else f"{reps} повт."
+
+
+def set_text(s: Set) -> str:
+    """'80×8', '80×8 → 60×6 → 6 повт.' (drops after arrows), '12 повт.' for bodyweight."""
+    return " → ".join([_one(s.weight, s.reps), *(_one(w, r) for w, r in s.drops)])
 
 
 def runs(sets: Sets) -> str:
@@ -66,15 +95,13 @@ def runs(sets: Sets) -> str:
             merged[-1][1] += 1
         else:
             merged.append([s, 1])
-    out = []
-    for (w, r), n in merged:
-        one = f"{kg(w)}×{r}" if w is not None else f"{r} повт."
-        out.append(one + (f" ×{n}" if n > 1 else ""))
-    return ", ".join(out)
+    return ", ".join(set_text(s) + (f" ×{n}" if n > 1 else "") for s, n in merged)
 
 
 def tonnage(sets: Sets) -> Decimal:
-    return sum((Decimal(w) * r for w, r in sets if w is not None), Decimal(0))
+    """Weight × reps of every set and drop with a weight."""
+    pairs = [(s.weight, s.reps) for s in sets] + [d for s in sets for d in s.drops]
+    return sum((Decimal(w) * r for w, r in pairs if w is not None), Decimal(0))
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -89,31 +116,52 @@ def _cap(text: str) -> str:
     return text[:1].upper() + text[1:]
 
 
+def _sentence(text: str) -> str:
+    """`text` ending with one period ("… 12 повт." stays as is, no "повт..")."""
+    return text if text.endswith((".", "…")) else text + "."
+
+
+def _tail(sets: Sets) -> str:
+    """' (880 кг)'; nothing for bodyweight-only sets ("(0 кг)" says nothing)."""
+    t = tonnage(sets)
+    return f" ({kg(t)} кг)" if t else ""
+
+
+def _fold(rows) -> dict[str, Sets]:  # type: ignore[no-untyped-def]
+    """(name, weight, reps, drop_index) rows in order -> sets by exercise, drops folded into their set."""
+    by_ex: dict[str, Sets] = {}
+    for name, weight, reps, drop_index in rows:
+        sets = by_ex.setdefault(name, [])
+        if drop_index and sets:
+            last = sets[-1]
+            sets[-1] = Set(last.weight, last.reps, (*last.drops, (weight, reps)))
+        else:
+            sets.append(Set(weight, reps))
+    return by_ex
+
+
 # ---- workouts ----
 
 
-async def last_training_day(session: AsyncSession, user_id: int, upto: date) -> date | None:
-    return await session.scalar(
-        select(func.max(Workout.performed_on)).where(Workout.user_id == user_id, Workout.performed_on <= upto)
-    )
+async def last_training_day(session: AsyncSession, user_id: int, upto: date, before: bool = False) -> date | None:
+    """The last day with a workout up to `upto` (strictly before it if `before`)."""
+    bound = Workout.performed_on < upto if before else Workout.performed_on <= upto
+    return await session.scalar(select(func.max(Workout.performed_on)).where(Workout.user_id == user_id, bound))
 
 
 async def day_sets(session: AsyncSession, user_id: int, day: date) -> dict[str, Sets]:
     """Sets of the local day `day` by exercise, in the order they were done (all workouts of the day)."""
     rows = (
         await session.execute(
-            select(Exercise.name, WorkoutSet.weight_kg, WorkoutSet.reps)
+            select(Exercise.name, WorkoutSet.weight_kg, WorkoutSet.reps, WorkoutSet.drop_index)
             .select_from(Workout)
             .join(WorkoutSet, WorkoutSet.workout_id == Workout.id)
             .join(Exercise, Exercise.id == WorkoutSet.exercise_id)
             .where(Workout.user_id == user_id, Workout.performed_on == day)
-            .order_by(Workout.started_at, Workout.id, WorkoutSet.set_index)
+            .order_by(Workout.started_at, Workout.id, WorkoutSet.set_index, WorkoutSet.drop_index)
         )
     ).all()
-    by_ex: dict[str, Sets] = {}
-    for name, weight, reps in rows:
-        by_ex.setdefault(name, []).append((weight, reps))
-    return by_ex
+    return _fold(rows)
 
 
 def day_head(by_ex: dict[str, Sets]) -> str:
@@ -126,14 +174,14 @@ def day_head(by_ex: dict[str, Sets]) -> str:
 
 
 def day_lines(by_ex: dict[str, Sets]) -> list[str]:
-    return [f"- {name}: {runs(sets)} ({kg(tonnage(sets))} кг)" for name, sets in by_ex.items()]
+    return [f"- {name}: {runs(sets)}{_tail(sets)}" for name, sets in by_ex.items()]
 
 
 async def workout_reply(
-    session: AsyncSession, user_id: int, which: str, today: date, in_progress: str = ""
+    session: AsyncSession, user_id: int, which: str, today: date, in_progress: str = "", previous: bool = False
 ) -> str:
-    """The workout of today / yesterday / the last training day, counted here; `in_progress` is the Mini
-    App line (gymbot.services.active_workout), added for today and the last day."""
+    """The workout of today / yesterday / the last training day (the one before today if `previous`, "на
+    прошлой тренировке"), counted here; `in_progress` is the Mini App line, added for today."""
     wanted = {"today": today, "yesterday": today - timedelta(days=1)}.get(which)
     lines: list[str] = []
     if wanted is not None:
@@ -151,14 +199,18 @@ async def workout_reply(
             else:
                 lines.append("Тренировок в истории пока нет.")
     else:
-        last = await last_training_day(session, user_id, today)
+        last = await last_training_day(session, user_id, today, before=previous)
+        if last is None and previous:
+            last = await last_training_day(session, user_id, today)
         if last is None:
             lines.append("Тренировок в истории пока нет.")
         else:
             by_ex = await day_sets(session, user_id, last)
             label = "Сегодня" if last == today else f"Последняя тренировка — {last:%d.%m}"
+            if previous and last != today:
+                label = f"Прошлая тренировка — {last:%d.%m}"
             lines += [f"{label}: {day_head(by_ex)}.", *day_lines(by_ex)]
-    if in_progress and which != "yesterday":
+    if in_progress and which != "yesterday" and not previous:
         lines.append(in_progress)
     return "\n".join(lines)
 
@@ -169,61 +221,89 @@ async def workout_reply(
 @dataclass
 class ExerciseHistory:
     name: str
-    last_day: date = date.min
-    last_sets: Sets = field(default_factory=list)
+    days: dict[date, Sets] = field(default_factory=dict)  # oldest first
     best: tuple[float, Decimal, int, date] | None = None  # (e1RM, weight, reps, day)
     heaviest: Decimal | None = None
+    most_reps: tuple[int, date] | None = None  # bodyweight: the most reps in one set
+
+    @property
+    def last_day(self) -> date:
+        return max(self.days) if self.days else date.min
+
+    def session(self, today: date, which: str = "last") -> tuple[date, Sets] | None:
+        """The sets of today / yesterday, or of "last time": the last day before today, else today."""
+        if which in ("today", "yesterday"):
+            day = today if which == "today" else today - timedelta(days=1)
+            return (day, self.days[day]) if day in self.days else None
+        before = [d for d in self.days if d < today]
+        day = max(before) if before else (today if today in self.days else None)
+        return (day, self.days[day]) if day is not None else None
 
 
 async def exercise_history(session: AsyncSession, user_id: int, upto: date) -> dict[str, ExerciseHistory]:
-    """Every exercise with logged sets up to `upto`: its last day's sets and its best set (1RM by Epley,
-    as in the advice summary), most recently done first."""
+    """Every exercise with logged sets up to `upto`: its sets by day and its best set (1RM by Epley, drops
+    included as in the advice summary), most recently done first."""
     rows = (
         await session.execute(
-            select(Exercise.name, Workout.performed_on, WorkoutSet.weight_kg, WorkoutSet.reps)
+            select(Exercise.name, Workout.performed_on, WorkoutSet.weight_kg, WorkoutSet.reps, WorkoutSet.drop_index)
             .select_from(Workout)
             .join(WorkoutSet, WorkoutSet.workout_id == Workout.id)
             .join(Exercise, Exercise.id == WorkoutSet.exercise_id)
             .where(Workout.user_id == user_id, Workout.performed_on <= upto)
-            .order_by(Workout.performed_on, Workout.started_at, Workout.id, WorkoutSet.set_index)
+            .order_by(Workout.performed_on, Workout.started_at, Workout.id, WorkoutSet.set_index,
+                      WorkoutSet.drop_index)
         )
     ).all()
     out: dict[str, ExerciseHistory] = {}
-    for name, day, weight, reps in rows:
+    by_day: dict[tuple[str, date], list] = {}
+    for name, day, weight, reps, drop_index in rows:
         h = out.setdefault(name, ExerciseHistory(name))
-        if day > h.last_day:
-            h.last_day, h.last_sets = day, []
-        h.last_sets.append((weight, reps))
+        by_day.setdefault((name, day), []).append((name, weight, reps, drop_index))
         if weight is not None and reps:
             e1rm = epley(float(weight), reps)
             if h.best is None or e1rm > h.best[0]:
                 h.best = (e1rm, weight, reps, day)
             h.heaviest = weight if h.heaviest is None else max(h.heaviest, weight)
+        elif weight is None and not drop_index and (h.most_reps is None or reps > h.most_reps[0]):
+            h.most_reps = (reps, day)
+    for (name, day), day_rows in by_day.items():
+        out[name].days[day] = _fold(day_rows)[name]
     return dict(sorted(out.items(), key=lambda p: p[1].last_day, reverse=True))
 
 
-def last_time(h: ExerciseHistory) -> str:
-    sets = h.last_sets
-    weighted = tonnage(sets)
-    tail = f" ({kg(weighted)} кг)" if weighted else ""
-    return f"последний раз {h.last_day:%d.%m}: {runs(sets)}{tail}"
+def last_time(h: ExerciseHistory, today: date | None = None, which: str = "last") -> str:
+    """'последний раз 07.10: 60×10 ×3 (1800 кг)' (the latest day if `today` is None)."""
+    found = h.session(today, which) if today is not None else (h.last_day, h.days[h.last_day])
+    if found is None:
+        return "в этот день подходов нет"
+    day, sets = found
+    return f"последний раз {day:%d.%m}: {runs(sets)}{_tail(sets)}"
 
 
 def record(h: ExerciseHistory) -> str | None:
     if h.best is None:
-        return None
+        if h.most_reps is None:
+            return None
+        reps, day = h.most_reps
+        return f"больше всего {reps} {plural(reps, 'повтор', 'повтора', 'повторов')} в подходе ({day:%d.%m})"
     e1rm, w, r, day = h.best
-    text = f"1ПМ по Эпли {kg(round(e1rm, 1))} кг ({kg(w)}×{r}, {day:%d.%m})"
+    text = f"1ПМ по Эпли {kg(_half_up(e1rm, 1))} кг ({kg(w)}×{r}, {day:%d.%m})"
     if h.heaviest is not None and h.heaviest != w:
         text += f", самый большой вес {kg(h.heaviest)} кг"
     return text
 
 
-def exercise_line(h: ExerciseHistory, record_first: bool = False) -> str:
+def exercise_line(h: ExerciseHistory, record_first: bool = False, today: date | None = None,
+                  which: str = "last") -> str:
     rec = record(h)
+    if today is not None and which in ("today", "yesterday") and h.session(today, which) is None:
+        label = "сегодня" if which == "today" else "вчера"
+        last = f"{label} подходов нет; {last_time(h)}"
+    else:
+        last = last_time(h, today, which)
     if record_first and rec:
-        return f"{_cap(h.name)}: рекорд — {rec}; {last_time(h)}."
-    return f"{_cap(h.name)}: {last_time(h)}." + (f" Рекорд: {rec}." if rec else "")
+        return _sentence(f"{_cap(h.name)}: рекорд — {rec}; {last}")
+    return _sentence(f"{_cap(h.name)}: {last}") + (f" Рекорд: {rec}." if rec else "")
 
 
 def records_block(history: dict[str, ExerciseHistory]) -> str:
@@ -249,35 +329,55 @@ async def known_exercises(session: AsyncSession) -> tuple[list[str], dict[str, l
     return [n for n, _ in rows], {n: list(a or []) for n, a in rows}
 
 
+def resolve(
+    question: str, history: list[str], catalog: list[str], aliases: dict[str, list[str]]
+) -> tuple[list[str], list[str]] | None:
+    """(history names asked about, asked names without sets), or None when the question names something
+    it does not know. History names win over the catalog and the synonyms: "в румынке" with "румынская тяга
+    с гантелями" in the history is that exercise, never "румынская тяга: подходов нет". ([], []) = no
+    exercise in the question at all."""
+    said = mentions(question, history, aliases, synonyms=False)
+    if said:
+        return said, []
+    asked = [*mentions(question, [n for n in catalog if n not in history], aliases, synonyms=False),
+             *synonym_targets(question)]
+    asked = list(dict.fromkeys(asked))
+    if asked:
+        found = list(dict.fromkeys(v for name in asked for v in variants(name, history)))
+        if found:
+            return found, []
+        return [], asked
+    found = head_matches(question, history, skip=QUESTION_WORDS)
+    said_words = [w for w in words(question) if w not in QUESTION_WORDS and len(w) >= 3]
+    named = {w for n in found for w in words(n)}
+    if any(not any(same(w, x) for x in named) for w in said_words):
+        return None  # names something it does not know as an exercise ("в жиме ногами")
+    return found, []
+
+
 async def exercise_reply(
     session: AsyncSession, user_id: int, question: str, q: Question, today: date, in_progress: str = ""
 ) -> str | None:
     """The asked exercise's last time and record; None for an exercise it cannot tell (the model's turn)."""
     history = await exercise_history(session, user_id, today)
     catalog, aliases = await known_exercises(session)
-    found = mentions(question, [*history, *catalog], aliases)
-    if not found:
-        said = [w for w in words(question) if w not in QUESTION_WORDS and len(w) >= 3]
-        found = head_matches(question, history, skip=QUESTION_WORDS)
-        named = {w for n in found for w in words(n)}
-        if any(not any(same(w, x) for x in named) for w in said):
-            return None  # names something it does not know as an exercise ("в жиме ногами")
-    if not found:  # no exercise in the question
+    resolved = resolve(question, list(history), catalog, aliases)
+    if resolved is None:
+        return None
+    found, missing = resolved
+    if not found and not missing:  # no exercise in the question
         if not q.record:
-            return await workout_reply(session, user_id, q.day, today, in_progress)
-        if not history:
-            return "Рекордов нет: в истории нет подходов с весом."
-        best = [h for h in history.values() if h.best is not None][:RECORDS_IN_REPLY]
+            return await workout_reply(session, user_id, q.day, today, in_progress, previous=q.previous)
+        best = [h for h in history.values() if record(h) is not None][:RECORDS_IN_REPLY]
         if not best:
-            return "Рекордов нет: в истории нет подходов с весом."
+            return "Рекордов нет: в истории нет подходов."
         return "Рекорды из истории (1ПМ по Эпли):\n" + "\n".join(f"- {h.name}: {record(h)}" for h in best)
-    lines = []
-    for name in found[:MAX_EXERCISES_IN_REPLY]:
-        h = history.get(name)
-        lines.append(exercise_line(h, q.record) if h else f"{_cap(name)}: в истории подходов нет.")
+    which = q.day if q.day in ("today", "yesterday") else "last"
+    lines = [exercise_line(history[n], q.record, today, which) for n in found[:MAX_EXERCISES_IN_REPLY]]
+    lines += [f"{_cap(name)}: в истории подходов нет." for name in missing[:MAX_EXERCISES_IN_REPLY]]
     if len(found) > MAX_EXERCISES_IN_REPLY:
         lines.append(f"И ещё подходящих упражнений: {len(found) - MAX_EXERCISES_IN_REPLY}.")
-    if not any(name in history for name in found):
+    if missing:
         lines.append("Подходы можно записать, просто написав их в чат.")
     return "\n".join(lines)
 
@@ -384,5 +484,5 @@ async def reply(
         return food_reply(await nutrition.day_summary(session, user, day, tz), question, q, today)
     in_progress = await active_workout.context_for(session, user.id, now_utc, tz)
     if q.intent is Intent.WORKOUT:
-        return await workout_reply(session, user.id, q.day, today, in_progress)
+        return await workout_reply(session, user.id, q.day, today, in_progress, previous=q.previous)
     return await exercise_reply(session, user.id, question, q, today, in_progress)
