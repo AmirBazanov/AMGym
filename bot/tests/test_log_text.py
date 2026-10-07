@@ -1675,13 +1675,22 @@ def test_bot_claims_are_caught(reply):
 
 
 async def test_objection_after_a_diary_answer_goes_to_the_diary(llm, settings, db, diary):
+    # The first question is factual: answered from the database (an empty one here), no model call.
     llm.answers = [
-        {"kind": "question", "clarification": "-"}, "Сегодня жим 60×10 ×3.",
+        {"kind": "question", "clarification": "-"},
         {"kind": "unknown", "clarification": "Уточни название упражнения."}, "Да, 6 упражнений и 24 подхода, 6530 кг.",
     ]
-    await send("сколько сегодня по тоннажу?", llm, settings, db)
+    first = await send("сколько сегодня по тоннажу?", llm, settings, db)
+    assert first.answer.await_args.args[0] == "Сегодня в истории тренировки нет.\nТренировок в истории пока нет."
+    assert len(llm.bodies) == 1  # only the parser
     msg = await send("там должно быть 6 упражнений всего 24 подхода", llm, settings, db, T0 + timedelta(minutes=1))
     assert msg.answer.await_args.args[0] == "Да, 6 упражнений и 24 подхода, 6530 кг."
+    assert len(llm.bodies) == 3  # the parser, the parser, the model's answer to the objection
+    turns = [(m["role"], m["content"]) for m in llm.bodies[-1]["messages"][1:]]
+    assert turns[:2] == [
+        ("user", "сколько сегодня по тоннажу?"),
+        ("assistant", "Сегодня в истории тренировки нет.\nТренировок в истории пока нет."),
+    ]
 
 
 async def test_unclear_message_without_a_recent_answer_stays_unclear(llm, settings, db, diary):

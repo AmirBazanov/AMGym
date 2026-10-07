@@ -78,6 +78,7 @@ from gymbot.llm.schemas import REMEMBER_MAX, ParsedFood, ParsedWellbeing, ParseR
 from gymbot.services import active_workout as aw
 from gymbot.services import answer as qa
 from gymbot.services import baselines, facts, food_lookup, live
+from gymbot.services.answer_intent import classify as classify_question
 from gymbot.services.programs import exercise_catalog, normalize
 from gymbot.services.users import get_or_create_user
 from gymbot.services.wellbeing import wellbeing_entry
@@ -448,24 +449,24 @@ async def _diary_answer(
     message: Message, text: str, result: ParseResult, settings: Settings, sessionmaker: Sessionmaker,
     llm: OpenRouterClient,
 ) -> ParseResult:
-    """The question answered from the user's diary (gymbot.services.answer) instead of the parser's
-    one-liner without data; that one stays on any failure."""
+    """The question answered from the user's diary (gymbot.services.answer: from the database for a factual
+    question, else the model's checked answer) instead of the parser's one-liner without data; that one
+    stays on any failure."""
     tg_user = message.from_user
     assert tg_user is not None
-    tz = ZoneInfo(settings.timezone)
-    try:  # the plan and the answer may take two model calls
+    try:  # the plan and the answer may take a few model calls
         async with _typing(message):
-            async with sessionmaker() as session:
-                user = await get_or_create_user(session, tg_user.id, tg_user.full_name)
-                await session.commit()  # no write lock while the model thinks
-                context = await qa.build_context(session, user, settings, llm, tz, datetime.now(UTC))
-            reply = await qa.answer(llm, context, text, recent_answers(tg_user.id, message.date))
+            answered = await qa.respond(
+                sessionmaker, tg_user.id, tg_user.full_name, text, recent_answers(tg_user.id, message.date),
+                settings, llm, datetime.now(UTC),
+            )
     except LLMError as e:
         log.warning("answer from the diary: no model answered (%s)", e)
         return result
     except Exception:
         log.exception("answer from the diary failed")
         return result
+    reply = answered.text
     if claims_action(reply):
         log.info("the diary answer claimed an action it did not do: replaced")
         reply = NO_ACTION
@@ -709,12 +710,15 @@ async def _reply_parsed(
         and prev is None
         and bool(recent_answers(user_id, message.date))
     )
-    if follow_up or (
+    # A factual question about the diary ("сколько белка осталось", "как потренил") is answered from the
+    # database however short it is and whatever the parser called it, unless it parsed as a record.
+    factual = not result.is_record() and not (prev and prev.token) and classify_question(text) is not None
+    if follow_up or factual or (
         result.kind == "question"
         and not (prev and prev.token)
         and (wants_diary(text) or claims_action(result.clarification))
     ):
-        asked = result.model_copy(update={"kind": "question"}) if follow_up else result
+        asked = result.model_copy(update={"kind": "question"}) if follow_up or factual else result
         answered = await _diary_answer(message, text, asked, settings, sessionmaker, llm)
         result = result if answered is asked else answered  # failed: an unclear message stays unclear
     result = honest(result)
