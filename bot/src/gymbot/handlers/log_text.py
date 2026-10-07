@@ -53,11 +53,13 @@ for voice ones. So the marker is on every voice line of a chain and only there
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import secrets
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -70,6 +72,7 @@ from gymbot.db.session import Sessionmaker
 from gymbot.handlers.plan import send_after_wellbeing
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.schemas import REMEMBER_MAX, ParsedFood, ParsedWellbeing, ParseResult
+from gymbot.services import answer as qa
 from gymbot.services import facts, food_lookup
 from gymbot.services.programs import exercise_catalog
 from gymbot.services.users import get_or_create_user
@@ -168,7 +171,10 @@ MAX_PENDING = 200
 
 # Last exchange per Telegram user id, see the module docstring.
 CONTEXT: dict[int, Exchange] = {}
+QA: dict[int, list[tuple[str, str, datetime]]] = {}  # user -> (question, answer, sent at), see recent_answers
 CONTEXT_TTL = timedelta(minutes=15)
+QA_TURNS = 3  # earlier questions and answers sent with a new question
+SMALL_TALK_WORDS = 3  # a question without "?" this short gets the parser's reply, not the diary answer
 MAX_CHAIN = 3  # messages of a chain sent to the model as one turn; raw_text keeps them all
 
 # Offered facts by preview token; a record preview shares its token with PENDING.
@@ -290,6 +296,78 @@ def recent_exchange(user_id: int, now: datetime) -> Exchange | None:
         del CONTEXT[user_id]
         return None
     return ex
+
+
+def recent_answers(user_id: int, now: datetime) -> list[tuple[str, str]]:
+    """The user's last questions and the answers from the diary (QA_TURNS, within CONTEXT_TTL)."""
+    turns = [t for t in QA.get(user_id, []) if now - t[2] <= CONTEXT_TTL]
+    return [(q, a) for q, a, _ in turns]
+
+
+def _answers_history(user_id: int, now: datetime) -> list[tuple[str, str]]:
+    """recent_answers as parser turns: (question, the answer as a kind="question" result)."""
+    return [
+        (q, ParseResult.model_validate({"kind": "question", "clarification": a}).model_dump_json())
+        for q, a in recent_answers(user_id, now)
+    ]
+
+
+def wants_diary(text: str) -> bool:
+    """Whether a question is worth the diary answer: not "привет", "спасибо", "ок" (two more model calls)."""
+    return "?" in text or len(text.split()) > SMALL_TALK_WORDS
+
+
+def _remember_answer(user_id: int, question: str, reply: str, at: datetime) -> None:
+    turns = [t for t in QA.pop(user_id, []) if at - t[2] <= CONTEXT_TTL]
+    if len(QA) >= MAX_PENDING:
+        QA.pop(next(iter(QA)))
+    QA[user_id] = [*turns, (question, reply, at)][-QA_TURNS:]
+
+
+TYPING_EVERY = 4.5  # seconds; Telegram shows a chat action for about 5
+
+
+@contextlib.asynccontextmanager
+async def _typing(message: Message) -> AsyncIterator[None]:
+    """Keep "typing" on while the block runs; a failed chat action never fails the reply."""
+
+    async def loop() -> None:
+        while True:
+            with contextlib.suppress(Exception):
+                await message.bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
+            await asyncio.sleep(TYPING_EVERY)
+
+    task = asyncio.create_task(loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+async def _diary_answer(
+    message: Message, text: str, result: ParseResult, settings: Settings, sessionmaker: Sessionmaker,
+    llm: OpenRouterClient,
+) -> ParseResult:
+    """The question answered from the user's diary (gymbot.services.answer) instead of the parser's
+    one-liner without data; that one stays on any failure."""
+    tg_user = message.from_user
+    assert tg_user is not None
+    tz = ZoneInfo(settings.timezone)
+    try:  # the plan and the answer may take two model calls
+        async with _typing(message):
+            async with sessionmaker() as session:
+                user = await get_or_create_user(session, tg_user.id, tg_user.full_name)
+                await session.commit()  # no write lock while the model thinks
+                context = await qa.build_context(session, user, settings, llm, tz, datetime.now(UTC))
+            reply = await qa.answer(llm, context, text, recent_answers(tg_user.id, message.date))
+    except LLMError as e:
+        log.warning("answer from the diary: no model answered (%s)", e)
+        return result
+    except Exception:
+        log.exception("answer from the diary failed")
+        return result
+    _remember_answer(tg_user.id, text, reply, message.date)
+    return result.model_copy(update={"clarification": reply})
 
 
 def _remember(user_id: int, ex: Exchange) -> None:
@@ -459,12 +537,18 @@ async def process_text(
         catalog = await exercise_catalog(session)
         known = await facts.prompt_facts(session, user_id)
     prev = recent_exchange(user_id, message.date)
+    # Without a record in the dialog the parser sees the recent questions, so "а по жиму?" stays a question.
+    history = prev.history() if prev else _answers_history(user_id, message.date)
     await message.bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
     try:
-        result = await llm.parse_message(text, catalog, prev.history() if prev else None, known)
+        result = await llm.parse_message(text, catalog, history or None, known)
     except LLMError:
         await message.answer(prefix + "Нейросеть сейчас недоступна, попробуй ещё раз чуть позже.")
         return
+    # A question about a pending preview ("а сколько в ней калорий?") is about data the diary does not have
+    # yet: the parser, who saw the preview, answers it.
+    if result.kind == "question" and not (prev and prev.token) and wants_diary(text):
+        result = await _diary_answer(message, text, result, settings, sessionmaker, llm)
     # The model tends to repeat facts it was given: offer only new ones.
     offer = result.remember
     if offer and facts.normalize(offer) in {facts.normalize(k) for k in known}:

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { onForeground } from './telegram'
 
 // ---------- data loading for server-only screens (nutrition, reminders, wellbeing) ----------
 
@@ -28,11 +29,7 @@ export function useRemote<T>(key: string, load: () => Promise<T>): Remote<T> {
   }, [key, nonce])
 
   // The app may stay open across midnight or while food is logged in the chat: refresh on return.
-  useEffect(() => {
-    const onVisible = () => document.visibilityState === 'visible' && setNonce((n) => n + 1)
-    document.addEventListener('visibilitychange', onVisible)
-    return () => document.removeEventListener('visibilitychange', onVisible)
-  }, [])
+  useEffect(() => onForeground(() => setNonce((n) => n + 1)), [])
 
   const cur = res?.key === key ? res : null
   return { data: cur?.data, error: cur?.error, loading: !cur, reload: () => setNonce((n) => n + 1) }

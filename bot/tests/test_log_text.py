@@ -44,7 +44,8 @@ class FakeLLM:
 
     async def _handle(self, req: httpx.Request) -> httpx.Response:
         self.bodies.append(json.loads(req.content))
-        content = json.dumps(self.answers.pop(0), ensure_ascii=False)
+        answer = self.answers.pop(0)
+        content = answer if isinstance(answer, str) else json.dumps(answer, ensure_ascii=False)
         gate = self.gates.get(len(self.bodies) - 1)
         if gate is not None:
             async with asyncio.timeout(2):
@@ -96,6 +97,25 @@ def clean_state():
     yield
     for store in (log_text.PENDING, log_text.CONTEXT, log_text.FACTS):
         store.clear()
+
+
+@pytest.fixture(autouse=True)
+def no_diary_answer(request, monkeypatch):
+    """Tests here are about the parser's dialog; the diary answer to questions has its own tests (`diary`)."""
+    if "diary" in request.fixturenames:
+        return
+
+    async def parser_answer(message, text, result, *args):
+        return result
+
+    monkeypatch.setattr(log_text, "_diary_answer", parser_answer)
+
+
+@pytest.fixture
+def diary():
+    log_text.QA.clear()
+    yield
+    log_text.QA.clear()
 
 
 @pytest.fixture
@@ -1240,3 +1260,75 @@ async def test_remember_tap_keeps_the_open_variants(llm, settings, db, find):
     assert rows[0] == [f"save:{token}", f"drop:{token}"]
     assert [f"lookup:{token}:0"] in rows and [f"lookup:{token}:other"] in rows
     assert [f"remember:{token}"] not in rows
+
+
+# ---- questions answered from the diary (gymbot.services.answer) ----
+
+
+async def test_question_is_answered_from_the_diary(llm, settings, db, diary):
+    llm.answers = [{"kind": "question", "clarification": "Не знаю."}, "Сегодня жим лёжа 3×8–12, начни с 40 кг."]
+    msg = await send("что у меня сегодня и с каким весом?", llm, settings, db)
+    assert msg.answer.await_args.args[0] == "Сегодня жим лёжа 3×8–12, начни с 40 кг."
+    system, *rest = llm.bodies[-1]["messages"]
+    assert "Сводка:" in system["content"] and "План на сегодня" in system["content"]
+    assert "response_format" not in llm.bodies[-1]
+    assert [m["content"] for m in rest] == ["что у меня сегодня и с каким весом?"]
+
+
+async def test_next_question_sees_previous_answers(llm, settings, db, diary):
+    llm.answers = [
+        {"kind": "question", "clarification": "-"}, "Нужен вес и повторы.",
+        {"kind": "question", "clarification": "-"}, "Ок.",
+    ]
+    await send("какая тебе нужна информация?", llm, settings, db)
+    await send("а по жиму?", llm, settings, db, T0 + timedelta(minutes=1))
+    turns = [(m["role"], m["content"]) for m in llm.bodies[-1]["messages"][1:]]
+    assert turns == [
+        ("user", "какая тебе нужна информация?"), ("assistant", "Нужен вес и повторы."), ("user", "а по жиму?"),
+    ]
+    parser = [m["content"] for m in llm.bodies[-2]["messages"]]  # the parser saw the question too
+    assert parser[-3] == "какая тебе нужна информация?" and "Нужен вес и повторы." in parser[-2]
+
+
+async def test_old_answers_are_forgotten(llm, settings, db, diary):
+    llm.answers = [{"kind": "question", "clarification": "-"}, "Раз.", {"kind": "question", "clarification": "-"}, "Два."]
+    await send("первый вопрос?", llm, settings, db)
+    await send("второй вопрос?", llm, settings, db, T0 + log_text.CONTEXT_TTL + timedelta(minutes=1))
+    assert len(llm.bodies[-1]["messages"]) == 2  # system + the question
+
+
+async def test_diary_answer_failure_keeps_the_parsers_answer(llm, settings, db, diary):
+    llm.answers = [{"kind": "question", "clarification": "Около 250 ккал на 100 г."}, "", "", ""]  # no route answers
+    msg = await send("сколько калорий в шашлыке?", llm, settings, db)
+    assert msg.answer.await_args.args[0] == "Около 250 ккал на 100 г."
+    assert log_text.QA == {}
+
+
+async def test_records_do_not_go_to_the_diary_answer(llm, settings, db, diary):
+    llm.answers = [food(1)]
+    await send("самса", llm, settings, db)
+    assert len(llm.bodies) == 1
+
+
+async def test_question_about_a_pending_preview_keeps_the_parsers_answer(llm, settings, db, diary):
+    llm.answers = [food(1), {"kind": "question", "clarification": "Около 300 ккал."}]
+    await send("самса", llm, settings, db)
+    msg = await send("а сколько в ней калорий?", llm, settings, db, T0 + timedelta(minutes=1))
+    assert len(llm.bodies) == 2 and msg.answer.await_args.args[0] == "Около 300 ккал."
+
+
+async def test_small_talk_gets_no_diary_answer(llm, settings, db, diary):
+    llm.answers = [{"kind": "question", "clarification": "Привет! Пиши, что съел или сделал."}]
+    msg = await send("привет", llm, settings, db)
+    assert len(llm.bodies) == 1 and msg.answer.await_args.args[0].startswith("Привет!")
+
+
+async def test_diary_answer_starts_the_program_and_shows_todays_plan(llm, settings, db, diary):
+    from gymbot.db.models import UserProgram
+
+    llm.answers = [{"kind": "question", "clarification": "-"}, "План: см. выше."]
+    await send("что у меня сегодня по тренировке?", llm, settings, db)
+    async with db() as s:
+        assert await s.scalar(select(UserProgram)) is not None  # like /plan on first use
+    system = llm.bodies[-1]["messages"][0]["content"]
+    assert "Программа «" in system and "План на сегодня" in system

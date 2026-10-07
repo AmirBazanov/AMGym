@@ -11,6 +11,7 @@ interface TgWebApp {
   setHeaderColor?(color: string): void
   setBackgroundColor?(color: string): void
   onEvent?(event: string, cb: () => void): void
+  offEvent?(event: string, cb: () => void): void
   HapticFeedback?: {
     impactOccurred(style: HapticStyle): void
     notificationOccurred(type: 'success' | 'warning' | 'error'): void
@@ -41,6 +42,31 @@ export function initTelegram() {
   tg?.onEvent?.('themeChanged', applyScheme)
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyScheme)
 }
+
+/**
+ * Calls `cb` when the app comes back to the foreground: the page becomes visible or Telegram reports
+ * `activated` (a minimized Mini App reopened; there `visibilitychange` may not fire). Not window `focus`:
+ * it also fires after native dialogs, and a reload then could bring back an item being deleted.
+ * Signals within FOREGROUND_GAP_MS of each other count once. Returns the unsubscribe function.
+ */
+export function onForeground(cb: () => void): () => void {
+  let last = 0
+  const fire = () => {
+    if (document.visibilityState === 'hidden') return
+    const now = Date.now()
+    if (now - last < FOREGROUND_GAP_MS) return
+    last = now
+    cb()
+  }
+  document.addEventListener('visibilitychange', fire)
+  tg?.onEvent?.('activated', fire)
+  return () => {
+    document.removeEventListener('visibilitychange', fire)
+    tg?.offEvent?.('activated', fire)
+  }
+}
+
+const FOREGROUND_GAP_MS = 1000
 
 export const haptic = {
   tap: () => tg?.HapticFeedback?.impactOccurred('light'),
