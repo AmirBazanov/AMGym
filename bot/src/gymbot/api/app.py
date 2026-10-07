@@ -1,12 +1,12 @@
 """HTTP API for the Mini App, plus the built Mini App itself (miniapp/dist) on the same port."""
 
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -131,8 +131,17 @@ def normalize_reminder_text(kind: str, text: str | None) -> str | None:
     return text
 
 
-def create_app(settings: Settings, sessionmaker: Sessionmaker, llm: OpenRouterClient | None = None) -> FastAPI:
-    """`llm` is the process-wide client (main.py shares it with the bot); without it one is made on first use."""
+def create_app(
+    settings: Settings,
+    sessionmaker: Sessionmaker,
+    llm: OpenRouterClient | None = None,
+    routers: Sequence[APIRouter] = (),
+) -> FastAPI:
+    """`llm` is the process-wide client (main.py shares it with the bot); without it one is made on first use.
+
+    `routers` are extra routes (the Telegram webhook); they go before the Mini App mount at "/",
+    which would otherwise swallow them.
+    """
     app = FastAPI(title="GymAPP API", docs_url="/api/docs", openapi_url="/api/openapi.json")
     tz = ZoneInfo(settings.timezone)
     clients: list[OpenRouterClient] = [llm] if llm is not None else []
@@ -425,7 +434,10 @@ def create_app(settings: Settings, sessionmaker: Sessionmaker, llm: OpenRouterCl
             response.headers["Cache-Control"] = "no-cache"
         return response
 
-    if settings.miniapp_dist.is_dir():
+    for router in routers:
+        app.include_router(router)
+
+    if settings.miniapp_dist.is_dir():  # last: the mount at "/" catches every path
         app.mount("/", StaticFiles(directory=settings.miniapp_dist, html=True), name="miniapp")
 
     return app

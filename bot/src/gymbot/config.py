@@ -1,7 +1,9 @@
 """Settings loaded from environment / .env. Never hardcode secrets."""
 
 from pathlib import Path
+from typing import Literal
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[3]  # repo root: bot/src/gymbot/config.py -> ../../..
@@ -40,6 +42,17 @@ class Settings(BaseSettings):
     stt_model: str = "whisper-large-v3-turbo"
     stt_max_seconds: int = 120
 
+    # How updates arrive: "polling" (local, behind a tunnel) or "webhook" (server with a fixed HTTPS address).
+    bot_mode: Literal["polling", "webhook"] = "polling"
+    # Fixed public HTTPS address of this server, e.g. https://gym.algex.ru (the reverse proxy ends TLS).
+    # Webhook mode needs it; it is also the Mini App address when MINIAPP_URL is empty.
+    public_url: str = ""
+    # What serves HTTPS for PUBLIC_URL; only deploy/setup-ec2.sh reads it, the app does not care.
+    # tunnel = a named Cloudflare tunnel (cloudflared service from the Cloudflare dashboard),
+    # caddy = Caddy on this box (ports 80/443, an A record to the server IP).
+    edge: Literal["tunnel", "caddy"] = "tunnel"
+    # X-Telegram-Bot-Api-Secret-Token for the webhook. Empty = a random one on every start.
+    webhook_secret: str = Field(default="", pattern=r"^[A-Za-z0-9_-]{0,256}$")
     miniapp_url: str = ""  # public HTTPS URL of the Mini App (Telegram requires HTTPS)
     timezone: str = "Europe/Moscow"
 
@@ -55,6 +68,12 @@ class Settings(BaseSettings):
     # false = only the HTTP server (Mini App + API), handy for UI work without Telegram access.
     run_bot: bool = True
 
+    @model_validator(mode="after")
+    def _derive_urls(self) -> "Settings":
+        self.public_url = self.public_url.strip().rstrip("/")
+        if not self.miniapp_url:
+            self.miniapp_url = self.public_url
+        return self
 
     @property
     def groq_key(self) -> str:

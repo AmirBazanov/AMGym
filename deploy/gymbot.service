@@ -7,8 +7,10 @@ Wants=network-online.target
 User=__USER__
 WorkingDirectory=__HOME__/amgym
 Environment=PATH=__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
-# gymbot.dev builds the Mini App when needed, opens a Cloudflare quick tunnel, runs migrations, bot and HTTP.
-ExecStart=__HOME__/.local/bin/uv run --project bot python -m gymbot.dev
+# setup-ec2.sh fills __MODULE__:
+#   gymbot.main - PUBLIC_URL is set (fixed domain behind Caddy): migrations, program import, bot, HTTP;
+#   gymbot.dev  - no PUBLIC_URL: the same plus a Cloudflare quick tunnel for the Mini App.
+ExecStart=__HOME__/.local/bin/uv run --project bot python -m __MODULE__
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
