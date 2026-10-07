@@ -12,7 +12,7 @@ SERVICE=gymbot
 if command -v dnf >/dev/null; then PM=dnf; else PM=apt; fi
 echo "== system packages ($PM)"
 if [ "$PM" = dnf ]; then
-  sudo dnf install -y -q git curl ca-certificates gcc make sqlite >/dev/null
+  sudo dnf install -y -q git ca-certificates gcc make sqlite >/dev/null  # curl-minimal is preinstalled; full curl conflicts with it
 else
   sudo apt-get update -qq
   sudo apt-get install -y -qq git curl ca-certificates build-essential sqlite3 >/dev/null
