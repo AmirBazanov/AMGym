@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# One-shot setup of GymAPP on a fresh Ubuntu 22.04/24.04 box (AWS EC2 t2/t3.micro is enough).
-# Usage (as the default user, e.g. ubuntu):  bash setup-ec2.sh [branch]
+# One-shot setup of GymAPP on a fresh Ubuntu 22.04/24.04 or Amazon Linux 2023 box (EC2 t2/t3.micro is enough).
+# Usage (as the default user: ubuntu or ec2-user):  bash setup-ec2.sh [branch]
 # Idempotent: re-run to update the checkout and restart the service.
 set -euo pipefail
 
@@ -9,9 +9,14 @@ REPO="https://github.com/AmirBazanov/AMGym.git"
 APP_DIR="$HOME/amgym"
 SERVICE=gymbot
 
-echo "== system packages"
-sudo apt-get update -qq
-sudo apt-get install -y -qq git curl ca-certificates build-essential sqlite3 >/dev/null
+if command -v dnf >/dev/null; then PM=dnf; else PM=apt; fi
+echo "== system packages ($PM)"
+if [ "$PM" = dnf ]; then
+  sudo dnf install -y -q git curl ca-certificates gcc make sqlite >/dev/null
+else
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq git curl ca-certificates build-essential sqlite3 >/dev/null
+fi
 
 echo "== swap (1 GB) so npm/uv don't get OOM-killed on a 1 GB box"
 if ! sudo swapon --show | grep -q '/swapfile'; then
@@ -21,8 +26,12 @@ fi
 
 echo "== node 22"
 if ! command -v node >/dev/null || [ "$(node -v | cut -c2-3)" -lt 20 ]; then
-  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - >/dev/null
-  sudo apt-get install -y -qq nodejs >/dev/null
+  if [ "$PM" = dnf ]; then
+    sudo dnf install -y -q nodejs22 >/dev/null
+  else
+    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - >/dev/null
+    sudo apt-get install -y -qq nodejs >/dev/null
+  fi
 fi
 
 echo "== uv"
@@ -30,8 +39,13 @@ command -v "$HOME/.local/bin/uv" >/dev/null || curl -LsSf https://astral.sh/uv/i
 
 echo "== cloudflared"
 if ! command -v cloudflared >/dev/null; then
-  curl -fsSL -o /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(dpkg --print-architecture).deb
-  sudo dpkg -i /tmp/cloudflared.deb >/dev/null
+  if [ "$PM" = dnf ]; then
+    curl -fsSL -o /tmp/cloudflared.rpm "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(uname -m).rpm"
+    sudo dnf install -y -q /tmp/cloudflared.rpm >/dev/null
+  else
+    curl -fsSL -o /tmp/cloudflared.deb "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(dpkg --print-architecture).deb"
+    sudo dpkg -i /tmp/cloudflared.deb >/dev/null
+  fi
 fi
 
 echo "== checkout $BRANCH"
