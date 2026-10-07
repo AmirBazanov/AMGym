@@ -69,6 +69,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from gymbot.config import Settings
 from gymbot.db.models import FoodEntry
 from gymbot.db.session import Sessionmaker
+from gymbot.handlers.chat_settings import send_staged, stage_settings
 from gymbot.handlers.plan import send_after_wellbeing
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.prompts import MINIAPP_SETUP_ANSWER
@@ -297,6 +298,12 @@ def recent_exchange(user_id: int, now: datetime) -> Exchange | None:
         del CONTEXT[user_id]
         return None
     return ex
+
+
+def _dialog_open(user_id: int, now: datetime) -> bool:
+    """Whether the user's last exchange still waits: an unsaved preview, or the model's question."""
+    ex = recent_exchange(user_id, now)
+    return ex is not None and (ex.token is None or ex.token in PENDING or ex.question is not None)
 
 
 def recent_answers(user_id: int, now: datetime) -> list[tuple[str, str]]:
@@ -583,6 +590,12 @@ async def process_text(
     if m := REMEMBER_CMD.match(text):
         await _offer_command(message, m["fact"], raw, prefix)
         return
+    # Settings commands ("норма 2800 ккал", "поставь сегодня жим 85") are staged first, but the parser still
+    # gets the text: a record in it is never lost (handlers/chat_settings.py). Not while a preview or the
+    # model's question is open: "белок 20 жиры 8" then answers it, it is not a norm.
+    staged = None
+    if not _dialog_open(user_id, message.date):
+        staged = await stage_settings(message, text, settings, sessionmaker, llm)
     async with sessionmaker() as session:
         catalog = await exercise_catalog(session)
         known = await facts.prompt_facts(session, user_id)
@@ -593,8 +606,36 @@ async def process_text(
     try:
         result = await llm.parse_message(text, catalog, history or None, known)
     except LLMError:
+        if staged is not None:
+            await send_staged(message, staged, prefix=prefix)
+            return
         await message.answer(prefix + "Нейросеть сейчас недоступна, попробуй ещё раз чуть позже.")
         return
+    if staged is not None:
+        if result.is_record() and not staged.fake_workout(result, text):
+            await _reply_parsed(message, text, raw, prefix, settings, sessionmaker, llm, prev, known, result)
+            if staged.ready():  # both previews: the record and the settings, each with its own buttons
+                await send_staged(message, staged)
+        else:  # a question, small talk, or the command's own weights parsed as sets: the settings answer
+            await send_staged(message, staged, prefix=prefix)
+        return
+    await _reply_parsed(message, text, raw, prefix, settings, sessionmaker, llm, prev, known, result)
+
+
+async def _reply_parsed(
+    message: Message,
+    text: str,
+    raw: str,
+    prefix: str,
+    settings: Settings,
+    sessionmaker: Sessionmaker,
+    llm: OpenRouterClient,
+    prev: Exchange | None,
+    known: list[str],
+    result: ParseResult,
+) -> None:
+    """The reply to a parsed message: a record preview, the model's question or answer (see process_text)."""
+    user_id = message.from_user.id  # type: ignore[union-attr]
     if is_setup_request(text, result) and not (prev and prev.token):
         log.info("a Mini App setup request parsed as a workout: answered instead")
         result = ParseResult(kind="question", clarification=MINIAPP_SETUP_ANSWER)

@@ -1,19 +1,24 @@
 // Local-only state until the stage 2 API exists: everything lives in localStorage.
 // Shapes mirror the future server models (Workout -> exercises -> sets) so the swap is mechanical.
 import { useSyncExternalStore } from 'react'
-import { getDay, getProgram, isDropset, programPosition } from './program'
+import { getDay, getProgram, isDropset } from './program'
 import { api, ApiError, EMPTY_PROFILE, EMPTY_TARGETS, inTelegram, type DayPlan, type Profile, type Targets } from './api'
 import { buildDemoHistory, demoStartDate } from './mock'
 import {
   applyPlan,
+  overridesForWorkout,
   planKey,
-  refillFromBaselines,
+  todaysProgramDay,
+  refillSuggestions,
   suggestionsOf,
   type AdjustedExercise,
   type PlanMode,
   type PreparedSuggestions,
 } from './plan'
-import { lastSameSession, normalizeBaselines } from './progression'
+import { findOverride, lastSameSession, mergeOverrides, normalizeBaselines } from './progression'
+import { activePayload, isStarted, isUnsupported, shouldPushActive } from './activeSync'
+
+export { isStarted }
 
 export interface SetEntry {
   weight: number | null // kg
@@ -27,6 +32,13 @@ export interface Baseline {
   weightKg: number
   reps: number | null // null: weight without reps ("~100 смогу"), counted as the max
   factId: number
+}
+
+/** Today's working weight the owner set in the bot chat («поставь сегодня жим 85»); from GET /api/state. */
+export interface WeightOverride {
+  exercise: string // exact program exercise name
+  weightKg: number
+  date: string // YYYY-MM-DD, the server's local day (server TIMEZONE = phone time zone, as for the day plan)
 }
 
 export interface ExerciseLog {
@@ -71,8 +83,10 @@ export interface State {
   activePlanKey: string | null
   // Starting weights from the owner's words (server data; none in the demo).
   baselines: Baseline[]
-  // What the app filled into the not-yet-started active workout, so new baselines refill it in place.
+  // What the app filled into the active workout, so new baselines and overrides refill it in place.
   activeSuggested: PreparedSuggestions
+  // Weights the owner set for a day in the chat (server data; none in the demo). Only today's count.
+  weightOverrides: WeightOverride[]
 }
 
 interface ServerState {
@@ -83,6 +97,7 @@ interface ServerState {
   targets?: Targets // absent on servers older than the nutrition API
   profile?: Partial<Profile> // absent on servers older than the profile API
   baselines?: Baseline[] // absent on servers older than the baselines
+  weightOverrides?: WeightOverride[] // absent on servers older than the weight overrides
 }
 
 type SettingsPatch = Partial<Pick<State, 'programId' | 'startDate' | 'restSeconds' | 'targets'>> & {
@@ -112,6 +127,7 @@ function initialState(): State {
     activePlanKey: null,
     baselines: [],
     activeSuggested: {},
+    weightOverrides: [],
   }
 }
 
@@ -130,6 +146,7 @@ function load(): State {
         delete saved.mode
         delete saved.baselines
         delete saved.activeSuggested
+        delete saved.weightOverrides
       }
       // Nested merge: storage written before the profile existed (or with fewer keys) still loads.
       return { ...initialState(), ...saved, profile: { ...EMPTY_PROFILE, ...saved.profile } }
@@ -144,7 +161,9 @@ let state: State = load()
 const listeners = new Set<() => void>()
 
 function commit(next: State) {
+  const prev = state
   state = next
+  if (next.mode === 'server' && shouldPushActive(prev.active, next.active)) scheduleActivePush()
   try {
     localStorage.setItem(KEY, JSON.stringify(state))
   } catch {
@@ -205,9 +224,9 @@ function localDate(d = new Date()): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-/** True once at least one set of the workout is ticked, i.e. the user really started training. */
-export function isStarted(w: Workout): boolean {
-  return w.exercises.some((e) => e.sets.some((s) => s.done))
+/** Today's overrides for the active workout (plan.overridesForWorkout); Today uses it for the hints. */
+export function overridesFor(w: Workout, s: State = state): readonly WeightOverride[] {
+  return overridesForWorkout(s.weightOverrides, w)
 }
 
 export const actions = {
@@ -220,21 +239,16 @@ export const actions = {
     if (state.active) return
     const today = localDate()
     if (state.skipAutoStart === today) return
-    const program = getProgram(state.programId)
-    const pos = programPosition(program, state.startDate)
-    if (pos.finished || pos.notStarted) return
-    const run = currentRun()
-    if (run.some((w) => localDate(new Date(w.startedAt)) === today)) return
-    const days = program.weeks.find((w) => w.number === pos.week)?.days ?? []
-    const next = days.find((d) => !run.some((w) => w.week === pos.week && w.weekday === d.weekday))
-    if (next) actions.startWorkout(pos.week, next.weekday)
+    const next = todaysProgramDay(getProgram(state.programId), state.startDate, currentRun())
+    if (next) actions.startWorkout(next.week, next.weekday)
   },
 
   startWorkout(week: number, weekday: number) {
     const program = getProgram(state.programId)
     const day = getDay(program, week, weekday)
     if (!day) return
-    const res = applyPlan(day, null, state.history, localDate(), week, state.baselines)
+    // Started now, so trained today: today's overrides count whatever program day it is.
+    const res = applyPlan(day, null, state.history, localDate(), week, state.baselines, state.weightOverrides)
     commit({
       ...state,
       active: {
@@ -259,14 +273,23 @@ export const actions = {
    * Rebuilds the prepared workout from the adaptive plan (or back from the program) while no set is
    * ticked. prepareToday runs before the plan is fetched, so Today calls this whenever the plan or the
    * mode changes. Idempotent on the plan's content: a refetch of the same plan keeps weight edits.
-   * A started workout is never touched. New baselines do not rebuild it: applyServer refills it in place.
+   * A started workout is never touched. New baselines and overrides do not rebuild it: applyServer
+   * refills it in place.
    */
   applyDayPlan(plan: DayPlan | null) {
     const a = state.active
     if (!a || isStarted(a)) return
     const day = getDay(getProgram(a.programId), a.week, a.weekday)
     if (!day) return
-    const res = applyPlan(day, planMode() === 'adjusted' ? plan : null, state.history, localDate(), a.week, state.baselines)
+    const res = applyPlan(
+      day,
+      planMode() === 'adjusted' ? plan : null,
+      state.history,
+      localDate(),
+      a.week,
+      state.baselines,
+      overridesFor(a),
+    )
     const key = res.applied ? planKey(plan) : 'program'
     if ((state.activePlanKey ?? 'program') === key) return
     commit({
@@ -304,8 +327,10 @@ export const actions = {
   addExercise(name: string) {
     const a = state.active
     if (!a) return
+    // The owner's number for today first, else last time's top weight.
     const last = lastSetsFor(name)
-    const weight = last ? Math.max(...last.map((s) => s.weight ?? 0)) : null
+    const override = findOverride(overridesFor(a), name, localDate())
+    const weight = override ? override.weightKg : last ? Math.max(...last.map((s) => s.weight ?? 0)) : null
     const log: ExerciseLog = {
       name,
       target: '',
@@ -338,8 +363,11 @@ export const actions = {
     const exercises = a.exercises
       .map((ex) => ({ ...ex, sets: ex.sets.filter((s) => s.done) }))
       .filter((ex) => ex.sets.length)
+    cancelActivePush()
     if (!exercises.length) {
       commit({ ...state, active: null, activeSuggested: {} })
+      // Everything was unticked: the server may still hold an earlier PUT of this workout.
+      if (state.mode === 'server') deleteActive(a.id)
       return
     }
     const done: Workout = { ...a, exercises, finishedAt: new Date().toISOString() }
@@ -355,7 +383,10 @@ export const actions = {
   },
 
   cancelWorkout() {
+    const id = state.active?.id
+    cancelActivePush()
     commit({ ...state, active: null, activeSuggested: {}, skipAutoStart: localDate() })
+    if (state.mode === 'server' && id) deleteActive(id)
   },
 
   deleteWorkout(id: string) {
@@ -440,12 +471,22 @@ function applyServer(server: ServerState) {
     history: [...server.history, ...pending, ...state.rejected].sort((a, b) => a.startedAt.localeCompare(b.startedAt)),
     pending,
     baselines,
+    weightOverrides: mergeOverrides(server.weightOverrides, state.weightOverrides),
   }
-  // New baselines reach the prepared workout in place (empty or app-suggested weights only), whether or
-  // not the day plan request succeeds. Idempotent, so every sync may run it.
+  // New baselines reach the prepared workout, and today's overrides also a started one, in place (empty
+  // or app-suggested weights of sets not done only), whether or not the day plan request succeeds.
+  // Idempotent, so every sync may run it.
   const a = next.active
   const refill = a
-    ? refillFromBaselines(a, next.activeSuggested, getDay(getProgram(a.programId), a.week, a.weekday), next.history, baselines)
+    ? refillSuggestions(
+        a,
+        next.activeSuggested,
+        getDay(getProgram(a.programId), a.week, a.weekday),
+        next.history,
+        baselines,
+        overridesFor(a, next),
+        localDate(),
+      )
     : null
   commit(refill ? { ...next, active: refill.workout, activeSuggested: refill.suggested } : next)
 }
@@ -457,6 +498,8 @@ export async function flushPending(): Promise<void> {
   if (flushing) return
   flushing = true
   try {
+    // A PUT of the workout in progress still on its way must not land after the POST that clears it.
+    await activeInflight
     for (const w of [...state.pending]) {
       try {
         const saved = await api<Workout>('/workouts', { method: 'POST', body: JSON.stringify(w) })
@@ -501,7 +544,77 @@ export async function syncFromServer(): Promise<void> {
     while (flushing) await new Promise((r) => setTimeout(r, 100))
     await flushPending()
     applyServer(await api<ServerState>('/state'))
+    // Back in the foreground: send the workout in progress again in case an earlier PUT was lost.
+    if (activeOnServer(state)) void pushActive()
   } catch {
     if (!inTelegram && state.mode !== 'demo') commit({ ...state, mode: 'demo' })
   }
+}
+
+// ---- Workout in progress on the server (PUT/DELETE /api/workouts/active), so the bot sees it ----
+// Fire-and-forget and last-write-wins: the timer sends whatever `state.active` is when it fires,
+// errors are dropped and the next change or foreground sync sends the latest again.
+
+const ACTIVE_DEBOUNCE_MS = 1500
+let activeTimer: ReturnType<typeof setTimeout> | null = null
+let activeInflight: Promise<void> = Promise.resolve()
+let activeUnsupported = false // an older server without the endpoints: off for this session
+let activePushedId: string | null = null // the workout the server holds, to send its last untick too
+
+/** The active workout should be on the server: started, or already sent (then unticked). */
+function activeOnServer(s: State): boolean {
+  return s.mode === 'server' && !!s.active && (isStarted(s.active) || s.active.id === activePushedId)
+}
+
+function scheduleActivePush() {
+  if (activeUnsupported) return
+  if (activeTimer) clearTimeout(activeTimer)
+  activeTimer = setTimeout(() => {
+    activeTimer = null
+    void pushActive()
+  }, ACTIVE_DEBOUNCE_MS)
+}
+
+function cancelActivePush() {
+  if (activeTimer) clearTimeout(activeTimer)
+  activeTimer = null
+}
+
+/** Requests are chained, so a DELETE or the finish POST never overtakes an earlier PUT. */
+function pushActive(): Promise<void> {
+  activeInflight = activeInflight.then(async () => {
+    const a = state.active
+    if (activeUnsupported || !a || !activeOnServer(state)) return
+    try {
+      await api<void>('/workouts/active', { method: 'PUT', body: JSON.stringify(activePayload(a)) })
+      activePushedId = a.id
+    } catch (e) {
+      if (e instanceof ApiError && isUnsupported(e.status)) activeUnsupported = true
+    }
+  })
+  return activeInflight
+}
+
+/** `id`: the server deletes only its copy of this workout, so a late cancel never wipes a newer one. */
+function deleteActive(id: string) {
+  activeInflight = activeInflight.then(async () => {
+    if (activeUnsupported) return
+    try {
+      await api<void>(`/workouts/active?clientId=${encodeURIComponent(id)}`, { method: 'DELETE' })
+      activePushedId = null
+    } catch {
+      // Offline or a server that does not know it: the next PUT or POST replaces the server's copy.
+    }
+  })
+}
+
+// Telegram may suspend a minimized Mini App before the debounce fires; the owner then asks the bot
+// about the sets just done. Send a waiting change right away when the page is hidden.
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && activeTimer) {
+      cancelActivePush()
+      void pushActive()
+    }
+  })
 }

@@ -4,7 +4,7 @@
 // History sets of a dropset are already the first set of each dropset: the server folds the drops
 // (drop_index > 0) into their main set, so every SetEntry here is a working set.
 import type { Intensity, Prescription, ProgramExercise } from './program'
-import type { Baseline, SetEntry, Workout } from './store'
+import type { Baseline, SetEntry, WeightOverride, Workout } from './store'
 import { e1rm, formatKg } from './stats'
 
 export interface Record1rm {
@@ -17,6 +17,8 @@ export interface Record1rm {
 export interface Suggestion {
   weight: number
   reason: string
+  /** The owner set this weight for today himself: used as is, no plan factor, no rounding. */
+  override?: WeightOverride
 }
 
 /** Genitive after "для": для 1 повтора, для 8 повторов. */
@@ -128,6 +130,47 @@ export function findBaseline(baselines: readonly Baseline[], name: string): Base
   return best
 }
 
+/** Hint for a weight the owner set for today: «ты поставил на сегодня 85 кг». */
+export function overrideReason(kg: number): string {
+  return `ты поставил на сегодня ${formatKg(kg)} кг`
+}
+
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/
+
+/**
+ * Server weight overrides made safe: absent or not a list -> [], entries without a name, a positive
+ * weight or a YYYY-MM-DD date dropped.
+ */
+export function normalizeOverrides(raw: unknown): WeightOverride[] {
+  if (!Array.isArray(raw)) return []
+  const out: WeightOverride[] = []
+  for (const o of raw as Partial<WeightOverride>[]) {
+    if (!o || typeof o.exercise !== 'string' || !o.exercise.trim()) continue
+    if (typeof o.weightKg !== 'number' || !Number.isFinite(o.weightKg) || o.weightKg <= 0) continue
+    if (typeof o.date !== 'string' || !ISO_DAY.test(o.date)) continue
+    out.push({ exercise: o.exercise, weightKg: o.weightKg, date: o.date })
+  }
+  return out
+}
+
+/** Overrides from a server answer: an absent field (older server) keeps what the app has, like baselines. */
+export function mergeOverrides(raw: unknown, current: WeightOverride[]): WeightOverride[] {
+  return raw === undefined ? current : normalizeOverrides(raw)
+}
+
+/**
+ * The weight the owner set for this exercise on `today` (the app's local YYYY-MM-DD, the same key the day
+ * plan uses). Names match like baselines (case, spaces, ё/е). Several for the same day: the last one wins.
+ */
+export function findOverride(overrides: readonly WeightOverride[], name: string, today: string): WeightOverride | null {
+  const key = normName(name)
+  let hit: WeightOverride | null = null
+  for (const o of overrides) {
+    if (o.date === today && normName(o.exercise) === key) hit = o
+  }
+  return hit
+}
+
 /** Reps the working weight must allow: the first drop for dropsets, else the top of the range. */
 function targetReps(p: Prescription): number | null {
   return p.drop_reps?.[0] ?? p.reps_max ?? p.reps_min ?? null
@@ -158,15 +201,20 @@ export function hasHistory(history: Workout[], name: string): boolean {
 }
 
 /**
- * Weight for today's plan: max of the record-based weight and double progression, with a reason in
- * Russian. Baselines count only while the history has nothing for the exercise.
+ * Weight for today's plan, in priority order: the owner's override for `today` (as is), else the max of
+ * the record-based weight and double progression, else the baseline (only while the history has nothing
+ * for the exercise). The reason is in Russian. Without `today` overrides are not looked at.
  */
 export function suggestWeight(
   history: Workout[],
   exercise: ProgramExercise,
   baselines: readonly Baseline[] = [],
+  overrides: readonly WeightOverride[] = [],
+  today?: string,
 ): Suggestion | null {
   const { name, prescription: p, intensity } = exercise
+  const o = today ? findOverride(overrides, name, today) : null
+  if (o) return { weight: o.weightKg, reason: overrideReason(o.weightKg), override: o }
   const last = lastSameSession(history, name)
   const record = bestE1rm(history, name)
   const step = equipmentStep(name)

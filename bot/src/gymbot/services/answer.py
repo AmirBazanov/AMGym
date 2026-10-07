@@ -2,8 +2,10 @@
 
 The parser answers a question in one short line without any data. For kind="question" the chat handler
 asks again here with the advice summary (gymbot.services.advice: profile, facts, food, training with the
-last sets and 1RM, wellbeing, program) plus today's adjusted plan (gymbot.services.plan) and the last
-questions and answers of the dialog. Only reads, except that the plan service stores today's plan.
+last sets and 1RM, wellbeing, program) plus today's adjusted plan (gymbot.services.plan), the weights set
+for today from the chat (gymbot.services.overrides), the workout in progress in the Mini App
+(gymbot.services.active_workout) and the last questions and answers of the dialog. Only reads, except that
+the plan service stores today's plan.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from gymbot.config import Settings
 from gymbot.db.models import User
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.llm.prompts import build_answer_messages
-from gymbot.services import advice, plan
+from gymbot.services import active_workout, advice, overrides, plan
 from gymbot.services.users import active_program
 
 ANSWER_MAX = 1500  # characters sent to the chat; the prompt asks for far less
@@ -38,7 +40,10 @@ async def build_context(
     summary = await advice.build_context(session, user, settings, tz, now_utc)
     built = await plan.get_or_build(session, user, settings, llm, tz, now_utc)
     today = plan.plan_text(built) if built is not None else NO_TRAINING
-    return f"{summary}\nПлан на сегодня ({now_utc.astimezone(tz):%d.%m}):\n{today}"
+    weights = overrides.context_line(await overrides.for_day(session, user.id, now_utc.astimezone(tz).date()))
+    in_progress = await active_workout.context_for(session, user.id, now_utc, tz)
+    tail = "".join(f"\n{line}" for line in (weights, in_progress) if line)
+    return f"{summary}\nПлан на сегодня ({now_utc.astimezone(tz):%d.%m}):\n{today}{tail}"
 
 
 async def answer(

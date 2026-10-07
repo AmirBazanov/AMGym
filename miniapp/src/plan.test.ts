@@ -6,7 +6,7 @@ import {
   planKey,
   planNote,
   planTitle,
-  refillFromBaselines,
+  refillSuggestions,
   safeFactor,
   scaleWeight,
   suggestionsOf,
@@ -433,7 +433,7 @@ describe('applyPlan with baselines', () => {
   })
 })
 
-describe('refillFromBaselines', () => {
+describe('refillSuggestions', () => {
   const B90 = [{ exercise: BENCH, weightKg: 90, reps: 8, factId: 1 }] // heavy 12 reps -> 82.5
   const B100 = [{ exercise: BENCH, weightKg: 100, reps: 8, factId: 2 }] // 126.7 / 1.4 = 90.5 -> 90
 
@@ -465,7 +465,7 @@ describe('refillFromBaselines', () => {
     const { w, suggested } = prepared(null, [])
     expect(weights(w, 0)).toEqual([null, null, null, null])
     const edited = setWeight(w, 0, 0, 60)
-    const r = refillFromBaselines(edited, suggested, DAY, [], B90)
+    const r = refillSuggestions(edited, suggested, DAY, [], B90)
     expect(weights(r!.workout, 0)).toEqual([60, 82.5, 82.5, 82.5])
     expect(r!.suggested[BENCH].weight).toBe(82.5)
     // Other exercises have no baseline: still empty.
@@ -476,14 +476,14 @@ describe('refillFromBaselines', () => {
     const { w, suggested } = prepared(null, B90)
     expect(weights(w, 0)).toEqual([82.5, 82.5, 82.5, 82.5])
     const edited = setWeight(w, 0, 1, 70)
-    const r = refillFromBaselines(edited, suggested, DAY, [], B100)
+    const r = refillSuggestions(edited, suggested, DAY, [], B100)
     expect(weights(r!.workout, 0)).toEqual([90, 70, 90, 90])
   })
 
   it('a baseline for an exercise not in the workout changes nothing', () => {
     const { w, suggested } = prepared(null, B90)
     const more = [...B90, { exercise: 'присед', weightKg: 140, reps: 1, factId: 5 }]
-    expect(refillFromBaselines(w, suggested, DAY, [], more)).toBeNull()
+    expect(refillSuggestions(w, suggested, DAY, [], more)).toBeNull()
   })
 
   it('never touches a started workout', () => {
@@ -492,21 +492,21 @@ describe('refillFromBaselines', () => {
       ...w,
       exercises: w.exercises.map((e, i) => (i === 2 ? { ...e, sets: [{ weight: 20, reps: 10, done: true }, ...e.sets.slice(1)] } : e)),
     }
-    expect(refillFromBaselines(started, suggested, DAY, [], B90)).toBeNull()
+    expect(refillSuggestions(started, suggested, DAY, [], B90)).toBeNull()
   })
 
   it('leaves exercises with history alone, even with a baseline', () => {
     const h = [workout('2026-10-01T10:00:00Z', BENCH, [[50, 10]])]
     const { w, suggested } = prepared(null, [], h)
     const edited = setWeight(w, 0, 0, null)
-    expect(refillFromBaselines(edited, suggested, DAY, h, B90)).toBeNull()
+    expect(refillSuggestions(edited, suggested, DAY, h, B90)).toBeNull()
   })
 
   it('keeps added and removed exercises; a user-added one is not filled', () => {
     const { w, suggested } = prepared(null, [])
     const custom: ExerciseLog = { name: 'присед', target: '', dropset: false, sets: [{ weight: null, reps: null, done: false }] }
     const changed: Workout = { ...w, exercises: [w.exercises[0], custom] } // CURL and the French press removed
-    const r = refillFromBaselines(changed, suggested, DAY, [], [...B90, { exercise: 'присед', weightKg: 140, reps: 1, factId: 5 }])
+    const r = refillSuggestions(changed, suggested, DAY, [], [...B90, { exercise: 'присед', weightKg: 140, reps: 1, factId: 5 }])
     expect(r!.workout.exercises.map((e) => e.name)).toEqual([BENCH, 'присед'])
     expect(weights(r!.workout, 0)).toEqual([82.5, 82.5, 82.5, 82.5])
     expect(weights(r!.workout, 1)).toEqual([null])
@@ -514,27 +514,27 @@ describe('refillFromBaselines', () => {
 
   it('applies the plan factor the workout was built with', () => {
     const { w, suggested } = prepared(plan([pe(BENCH, { weightFactor: 0.9 })]), [])
-    const r = refillFromBaselines(w, suggested, DAY, [], B90)
+    const r = refillSuggestions(w, suggested, DAY, [], B90)
     expect(weights(r!.workout, 0)).toEqual([75, 75, 75, 75]) // 82.5 × 0.9 on 2.5 kg steps
   })
 
   it('a deactivated fact clears the weights it had suggested, not the edited ones', () => {
     const { w, suggested } = prepared(null, B90)
     const edited = setWeight(w, 0, 3, 80)
-    const r = refillFromBaselines(edited, suggested, DAY, [], [])
+    const r = refillSuggestions(edited, suggested, DAY, [], [])
     expect(weights(r!.workout, 0)).toEqual([null, null, null, 80])
   })
 
   it('without a snapshot (prepared by an older version) fills empty weights from the day', () => {
     const { w } = prepared(null, [])
-    const r = refillFromBaselines(setWeight(w, 0, 2, 50), {} satisfies PreparedSuggestions, DAY, [], B90)
+    const r = refillSuggestions(setWeight(w, 0, 2, 50), {} satisfies PreparedSuggestions, DAY, [], B90)
     expect(weights(r!.workout, 0)).toEqual([82.5, 82.5, 50, 82.5])
   })
 
   it('is idempotent: a second sync with the same list changes nothing', () => {
     const { w, suggested } = prepared(null, [])
-    const r = refillFromBaselines(w, suggested, DAY, [], B90)!
-    expect(refillFromBaselines(r.workout, r.suggested, DAY, [], B90)).toBeNull()
+    const r = refillSuggestions(w, suggested, DAY, [], B90)!
+    expect(refillSuggestions(r.workout, r.suggested, DAY, [], B90)).toBeNull()
   })
 })
 

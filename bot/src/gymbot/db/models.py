@@ -242,6 +242,38 @@ class ExerciseBaseline(Base):
     exercise: Mapped[Exercise] = relationship()
 
 
+class WeightOverride(Base):
+    """A weight the user set for one exercise on one local day from the chat ("поставь сегодня жим 85").
+
+    The Mini App starts that exercise with it on that day instead of the progression or baseline weight
+    (gymbot.services.overrides). One row per user, exercise and day: a new command replaces the weight.
+    """
+
+    __tablename__ = "weight_overrides"
+    __table_args__ = (UniqueConstraint("user_id", "exercise_id", "day"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    exercise_id: Mapped[int] = mapped_column(ForeignKey("exercises.id"))
+    day: Mapped[date] = mapped_column(Date)  # local date in TIMEZONE
+    weight_kg: Mapped[Decimal] = mapped_column(Numeric(6, 2))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    exercise: Mapped[Exercise] = relationship()
+
+
+class ActiveWorkout(Base):
+    """The workout in progress in the Mini App, a snapshot sent on every change (PUT /api/workouts/active).
+
+    Only the diary answer reads it (gymbot.services.active_workout): it never becomes Workout/WorkoutSet
+    rows, so history, PRs and plan inputs ignore it. Finishing (POST /api/workouts) or cancelling removes it.
+    """
+
+    __tablename__ = "active_workouts"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    client_id: Mapped[str] = mapped_column(String(64))  # the Mini App's workout id
+    payload: Mapped[str] = mapped_column(Text)  # JSON of gymbot.services.workouts.WorkoutIn, done flags included
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 # --- Adaptive day plan (gymbot.services.plan): today's program day adjusted to wellbeing, food, recovery ---
 
 class DayPlan(Base):

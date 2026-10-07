@@ -4,7 +4,8 @@ Mounted by api/app.py only when MCP_TOKEN is set (see docs/reference/mcp-python-
 added with `routes.extend`, why the session manager runs in the app lifespan and why Host is checked).
 The app is personal, so every tool acts as the owner (gymbot.services.access.owner_user); the token
 identifies the client, not a person. Read tools never create rows. Write tools are narrow: targets,
-facts, reminders, today's plan and notes; no shell, no arbitrary SQL writes.
+facts, reminders, today's weights (set_weight_override), today's plan and notes; no shell, no arbitrary
+SQL writes.
 
 Tool docstrings are in Russian: they are the descriptions the model reads. Answers are compact JSON text.
 """
@@ -46,6 +47,7 @@ from gymbot.llm.openrouter import OpenRouterClient, routes_from
 from gymbot.services import baselines
 from gymbot.services import facts as fx
 from gymbot.services import nutrition as nut
+from gymbot.services import overrides as ov
 from gymbot.services import plan as day_plan
 from gymbot.services import profile as prof
 from gymbot.services import readonly_sql as rsql
@@ -462,6 +464,31 @@ def build_mcp(
             nut.set_targets(user, changes)
             await session.commit()
             return dumps({"targets": nut.user_targets(user).model_dump()})
+
+    @tool(WRITE)
+    async def set_weight_override(
+        exercise: Annotated[str, Field(max_length=200, description="точное название из программы")],
+        weight_kg: Annotated[
+            float | None, Field(ge=ov.WEIGHT_RANGE[0], le=ov.WEIGHT_RANGE[1], description="null = убрать")
+        ] = None,
+    ) -> str:
+        """Рабочий вес упражнения на сегодня (местная дата): мини-апп начнёт упражнение с него. Упражнение —
+        название из программы (program_status); повтор для того же упражнения заменяет вес, weight_kg=null
+        убирает выставленный на сегодня вес."""
+        async with owner_session() as (session, user):
+            catalog = await baselines.catalog(session)
+            name = baselines.match_exercise(exercise, catalog)
+            if name is None:
+                raise ToolError(f"Упражнения «{exercise}» нет в программе. Есть: {', '.join(catalog)}.")
+            ids = await ov.exercise_ids(session, [name])
+            day = today()
+            if weight_kg is None:
+                removed = await ov.clear(session, user.id, ids[name], day)
+                await session.commit()
+                return dumps({"exercise": name, "weight_kg": None, "date": day.isoformat(), "removed": removed})
+            await ov.upsert(session, user.id, ids[name], day, weight_kg)
+            await session.commit()
+            return dumps({"exercise": name, "weight_kg": round(weight_kg, 2), "date": day.isoformat()})
 
     async def save_fact(text: str, category: str | None, source: str, *, weights: bool = False) -> str:
         try:

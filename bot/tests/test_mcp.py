@@ -19,7 +19,16 @@ from mcp.client.streamable_http import streamable_http_client
 from sqlalchemy import select
 
 from gymbot.api.app import create_app
-from gymbot.db.models import FoodEntry, Reminder, User, UserFact, Workout, WorkoutSet
+from gymbot.db.models import (
+    Exercise,
+    FoodEntry,
+    Reminder,
+    User,
+    UserFact,
+    WeightOverride,
+    Workout,
+    WorkoutSet,
+)
 from gymbot.services.programs import get_or_create_exercise
 from gymbot.services.users import get_or_create_user
 
@@ -41,7 +50,7 @@ TZ = "Europe/Moscow"
 TOOLS = {
     "nutrition_summary", "training_summary", "wellbeing_summary", "program_status", "profile_and_facts",
     "query", "schema", "set_targets", "add_fact", "deactivate_fact", "set_reminder", "delete_reminder",
-    "regenerate_plan", "log_note", "send_message", "service_status",
+    "regenerate_plan", "log_note", "send_message", "service_status", "set_weight_override",
 }
 
 
@@ -149,10 +158,11 @@ async def test_list_tools_and_annotations(tmp_path, db):
     async with running(tmp_path, db) as (app, _), mcp_client(app) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}
     assert set(tools) == TOOLS
-    assert len(tools) == 16
+    assert len(tools) == 17
     assert tools["nutrition_summary"].annotations.read_only_hint is True
     assert tools["query"].annotations.read_only_hint is True
     assert tools["set_targets"].annotations.read_only_hint is False
+    assert tools["set_weight_override"].annotations.read_only_hint is False
 
 
 # ---- read tools ----
@@ -358,3 +368,52 @@ async def test_send_message_html_and_fallback(tmp_path, db):
         out = data(await call(client, "send_message", text="<b>битая", html=True))
         assert out["sent"] and out["html"] is False and "разметка" in out["note"]
         assert bot.calls[-1][2].get("parse_mode") is None
+
+
+async def test_set_weight_override_writes_today_and_repeat_updates(tmp_path, db):
+    uid = await make_owner(db)
+    today = local_today()
+    async with running(tmp_path, db) as (app, _), mcp_client(app) as client:
+        out = data(await call(client, "set_weight_override", exercise="жим лёжа", weight_kg=85))
+        assert out == {"exercise": "жим лёжа", "weight_kg": 85, "date": today.isoformat()}
+        again = data(await call(client, "set_weight_override", exercise="Жим лёжа", weight_kg=87.5))
+        assert again["weight_kg"] == 87.5 and again["exercise"] == "жим лёжа"
+        ambiguous = await call(client, "set_weight_override", exercise="жим", weight_kg=90)
+        assert ambiguous.is_error  # exact names and known synonyms only: the chat-only short names are not here
+        last = data(await call(client, "set_weight_override", exercise="жим лёжа", weight_kg=90))
+        assert last["weight_kg"] == 90
+    async with db() as session:
+        rows = (await session.execute(select(WeightOverride, Exercise.name).join(Exercise))).all()
+    assert [(o.user_id, name, o.day, float(o.weight_kg)) for o, name in rows] == [
+        (uid, "жим лёжа", today, 90.0)
+    ]
+
+
+async def test_set_weight_override_null_clears_today(tmp_path, db):
+    await make_owner(db)
+    today = local_today()
+    async with running(tmp_path, db) as (app, _), mcp_client(app) as client:
+        await call(client, "set_weight_override", exercise="жим лёжа", weight_kg=85)
+        out = data(await call(client, "set_weight_override", exercise="жим лёжа", weight_kg=None))
+        assert out == {"exercise": "жим лёжа", "weight_kg": None, "date": today.isoformat(), "removed": True}
+        again = data(await call(client, "set_weight_override", exercise="жим лёжа"))
+        assert again["removed"] is False
+    async with db() as session:
+        assert (await session.scalars(select(WeightOverride))).all() == []
+
+
+async def test_set_weight_override_unknown_exercise_or_weight_is_an_error(tmp_path, db):
+    await make_owner(db)
+    async with running(tmp_path, db) as (app, _), mcp_client(app) as client:
+        unknown = await call(client, "set_weight_override", exercise="подъём на носки", weight_kg=50)
+        assert unknown.is_error and "нет в программе" in unknown.content[0].text
+        assert (await call(client, "set_weight_override", exercise="жим лёжа", weight_kg=0)).is_error
+        assert (await call(client, "set_weight_override", exercise="жим лёжа", weight_kg=501)).is_error
+    async with db() as session:
+        assert (await session.scalars(select(WeightOverride))).all() == []
+
+
+async def test_set_weight_override_without_owner_is_an_error(tmp_path, db):
+    async with running(tmp_path, db) as (app, _), mcp_client(app) as client:
+        res = await call(client, "set_weight_override", exercise="жим лёжа", weight_kg=85)
+    assert res.is_error

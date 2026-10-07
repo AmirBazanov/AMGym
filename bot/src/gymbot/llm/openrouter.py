@@ -35,8 +35,9 @@ class LLMError(RuntimeError):
     pass
 
 
-def extract_json(content: str) -> dict:
-    """First JSON object in the text that looks like a ParseResult (models may add prose or reasoning)."""
+def extract_json(content: str, prefer: str = "kind") -> dict:
+    """First JSON object in the text that has the key `prefer` (a ParseResult by default), else the first
+    object at all (models may add prose or reasoning)."""
     decoder = json.JSONDecoder()
     first: dict | None = None
     for m in re.finditer(r"\{", content):
@@ -45,7 +46,7 @@ def extract_json(content: str) -> dict:
         except json.JSONDecodeError:
             continue
         if isinstance(obj, dict):
-            if "kind" in obj:
+            if prefer in obj:
                 return obj
             first = first or obj
     if first is None:
@@ -218,15 +219,16 @@ class OpenRouterClient:
         return await self._over_routes(call, json_mode=True)
 
 
-    async def complete_json(self, messages: list[dict[str, str]]) -> dict:
+    async def complete_json(self, messages: list[dict[str, str]], prefer: str = "kind") -> dict:
         """A JSON object from the model (json mode where supported), with the same route fallback.
 
         Only "is it a JSON object" is checked here; the caller validates the content itself, so a wrong
-        but well-formed answer costs one request, not a retry on every route.
+        but well-formed answer costs one request, not a retry on every route. `prefer`: the top-level key of
+        the expected answer, so an inner object with a "kind" key is not taken for it (see extract_json).
         """
 
         async def call(route: Route, json_mode: bool) -> dict:
-            return extract_json(_THINK.sub("", await self._complete(route, messages, json_mode)))
+            return extract_json(_THINK.sub("", await self._complete(route, messages, json_mode)), prefer)
 
         return await self._over_routes(call, json_mode=True)
 

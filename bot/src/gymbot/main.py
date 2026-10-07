@@ -23,7 +23,7 @@ from gymbot.api.webhook import WEBHOOK_PATH, WebhookHandler
 from gymbot.config import Settings, get_settings
 from gymbot.db.migrate import upgrade_head
 from gymbot.db.session import make_engine
-from gymbot.handlers import advice, common, facts, log_text, plan, voice
+from gymbot.handlers import advice, chat_settings, common, facts, log_text, plan, voice
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services import baselines
 from gymbot.services.access import is_allowed
@@ -159,7 +159,9 @@ async def run() -> None:
         dp = Dispatcher(settings=settings, sessionmaker=sessionmaker, llm=llm)
         dp.update.outer_middleware(AllowedUsers())
         # voice before log_text: the filters do not overlap, but the order is kept explicit.
-        dp.include_routers(common.router, advice.router, facts.router, plan.router, voice.router, log_text.router)  # log_text last: it catches all text
+        dp.include_routers(
+            common.router, advice.router, facts.router, plan.router, chat_settings.router, voice.router, log_text.router
+        )  # log_text last: it catches all text
         if settings.bot_mode == "webhook":
             webhook = WebhookHandler(bot, dp, webhook_secret(settings))
             routers.append(webhook.router())

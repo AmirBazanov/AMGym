@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, R
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.routing import BaseRoute
 
@@ -21,9 +22,11 @@ from gymbot.db.models import FoodEntry, Reminder, User, UserFact, UserProgram, W
 from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.mcp_server import MCP_PATH, BearerGuard, mcp_http
+from gymbot.services import active_workout as aw
 from gymbot.services import baselines as bl
 from gymbot.services import facts as fx
 from gymbot.services import nutrition as nut
+from gymbot.services import overrides as ov
 from gymbot.services import plan as day_plan
 from gymbot.services import profile as prof
 from gymbot.services import reminders as rem
@@ -47,6 +50,8 @@ class StateOut(BaseModel):
     history: list[ws.WorkoutOut]
     # Working weights from the user's words in active facts, newest per exercise (gymbot.services.baselines).
     baselines: list[bl.BaselineOut]
+    # Weights set from the chat for today (local TIMEZONE) only (gymbot.services.overrides).
+    weightOverrides: list[ov.WeightOverrideOut]
 
 
 class TargetsIn(BaseModel):
@@ -214,6 +219,7 @@ def create_app(
             profile=prof.user_profile(user),
             history=history,
             baselines=await bl.current(session, user.id),
+            weightOverrides=await ov.for_day(session, user.id, datetime.now(tz).date()),
         )
 
     @app.get("/api/health")
@@ -254,11 +260,39 @@ def create_app(
             saved = await ws.save_from_miniapp(session, user, up, body, tz)
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
+        await aw.clear(session, user.id, body.id)  # finished: no longer in progress (retries included)
         await session.commit()
         w = await ws.get_workout(session, user, saved.id)
         assert w is not None
         weeks = len((await load_program(session, up.program_id)).weeks)
         return ws.serialize(w, up, weeks, tz)
+
+    # Registered before /api/workouts/{workout_id}, which would take "active" for an id.
+    @app.put("/api/workouts/active", status_code=204)
+    async def put_active_workout(body: ws.WorkoutIn, session: Session, tg: TgUser) -> None:
+        """Snapshot of the workout in progress for the diary answer; never touches the history."""
+        user_id = (await get_or_create_user(session, tg.id, tg.name)).id
+        await session.commit()  # the user row exists before the snapshot, also on a retry below
+        for attempt in range(2):
+            try:
+                await aw.save(session, user_id, body)
+                await session.commit()
+                return
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            except IntegrityError:  # a concurrent first PUT inserted the row: update it instead
+                await session.rollback()
+                if attempt:
+                    raise
+
+    @app.delete("/api/workouts/active", status_code=204)
+    async def delete_active_workout(
+        session: Session, tg: TgUser, clientId: Annotated[str | None, Query(max_length=64)] = None
+    ) -> None:
+        """Idempotent. With clientId only that workout's snapshot goes (a late cancel keeps a newer one)."""
+        user = await get_or_create_user(session, tg.id, tg.name)
+        await aw.clear(session, user.id, clientId)
+        await session.commit()
 
     @app.delete("/api/workouts/{workout_id}", status_code=204)
     async def delete_workout(workout_id: int, session: Session, tg: TgUser) -> None:

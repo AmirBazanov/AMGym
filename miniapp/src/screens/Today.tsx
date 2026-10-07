@@ -23,9 +23,18 @@ import {
   type ProgramDay,
   type ProgramExercise,
 } from '../program'
-import { applyPlan, planKey, planNote, planTitle, type AdjustedExercise, type AppliedPlan, type PlanMode } from '../plan'
-import { suggestWeight } from '../progression'
-import { actions, currentRun, isStarted, lastSetsFor, planMode, useStore, type Workout } from '../store'
+import {
+  applyPlan,
+  planKey,
+  planNote,
+  planTitle,
+  todaysProgramDay,
+  type AdjustedExercise,
+  type AppliedPlan,
+  type PlanMode,
+} from '../plan'
+import { overrideReason, suggestWeight } from '../progression'
+import { actions, currentRun, isStarted, lastSetsFor, overridesFor, planMode, useStore, type Workout } from '../store'
 import { formatKg } from '../stats'
 import { useRemote } from '../useRemote'
 import { confirm, haptic } from '../telegram'
@@ -56,12 +65,17 @@ function PlanTarget({ adj }: { adj: AdjustedExercise }) {
   )
 }
 
-/** Weight hint for a day exercise; with a plan factor it explains the corrected weight instead. */
+/**
+ * Weight hint for a day exercise: the owner's own number for today, else with a plan factor the
+ * corrected weight, else why the suggestion is what it is.
+ */
 function PlanHint({ history, adj }: { history: Workout[]; adj: AdjustedExercise }) {
   const note = planNote(adj)
   return (
     <>
-      {adj.factor !== 1 && adj.weight != null && adj.baseWeight != null ? (
+      {adj.override && adj.weight != null ? (
+        <div className="ex-suggest num">{overrideReason(adj.weight)}</div>
+      ) : adj.factor !== 1 && adj.weight != null && adj.baseWeight != null ? (
         <div className="ex-suggest num">
           предложено {formatKg(adj.weight)} кг: {Math.round(adj.factor * 100)} % от {formatKg(adj.baseWeight)} кг
         </div>
@@ -197,7 +211,12 @@ export function Today() {
           телефоне.
         </div>
       )}
-      {state.active ? <ActiveWorkout workout={state.active} dp={dp} /> : <DayPreview dp={dp} />}
+      {state.active ? (
+        <ActiveWorkout workout={state.active} dp={dp} />
+      ) : (
+        // Remount on a program or start date change (also from the chat), so the picked week/day follows.
+        <DayPreview key={`${state.programId}:${state.startDate}`} dp={dp} />
+      )}
     </>
   )
 }
@@ -215,13 +234,15 @@ function DayPreview({ dp }: { dp: DayPlanState }) {
   const [sheet, setSheet] = useState<string | null>(null)
   const day = getDay(program, week, weekday)
   const mode = planMode(state)
+  const isToday = !pos.finished && !pos.notStarted && week === pos.week && weekday === pos.weekday
+  // Today's overrides show on the day today's workout would be (what prepareToday picks), not on others.
+  const pick = todaysProgramDay(program, startDate, run)
+  const overrides = pick && pick.week === week && pick.weekday === weekday ? state.weightOverrides : []
   const applied = day
-    ? applyPlan(day, mode === 'adjusted' ? visiblePlan(dp) : null, history, localISODate(), week, baselines)
+    ? applyPlan(day, mode === 'adjusted' ? visiblePlan(dp) : null, history, localISODate(), week, baselines, overrides)
     : null
   const weekDays = program.weeks.find((w) => w.number === week)?.days ?? []
   const doneHere = run.some((w) => w.week === week && w.weekday === weekday)
-
-  const isToday = !pos.finished && !pos.notStarted && week === pos.week && weekday === pos.weekday
   const label = pos.finished
     ? 'Программа завершена'
     : pos.notStarted
@@ -385,7 +406,18 @@ function lookupExercise(built: AppliedPlan | null, day: ProgramDay | undefined, 
   const e = day?.exercises.find((x) => x.name === name)
   if (!e) return undefined
   const target = formatPrescription(e.prescription)
-  return { exercise: e, original: e, replaced: false, weight: null, baseWeight: null, factor: 1, reason: null, target, changed: false }
+  return {
+    exercise: e,
+    original: e,
+    replaced: false,
+    weight: null,
+    baseWeight: null,
+    factor: 1,
+    override: null,
+    reason: null,
+    target,
+    changed: false,
+  }
 }
 
 function useNow(active: boolean) {
@@ -406,6 +438,7 @@ function mmss(sec: number) {
 function ActiveWorkout({ workout, dp }: { workout: Workout; dp: DayPlanState }) {
   const state = useStore()
   const { restSeconds, restEnd, history, baselines } = state
+  const weightOverrides = overridesFor(workout, state)
   const setRestEnd = actions.setRestEnd
   const [sheet, setSheet] = useState<string | null>(null)
   const now = useNow(true)
@@ -415,9 +448,12 @@ function ActiveWorkout({ workout, dp }: { workout: Workout; dp: DayPlanState }) 
   const plan = visiblePlan(dp)
   // Look exercises up in what the workout was built from, so replaced ones keep their prescription.
   const builtFromPlan = plan != null && state.activePlanKey === planKey(plan)
-  const built = day ? applyPlan(day, builtFromPlan ? plan : null, history, localISODate(), workout.week, baselines) : null
+  const today = localISODate()
+  const built = day
+    ? applyPlan(day, builtFromPlan ? plan : null, history, today, workout.week, baselines, weightOverrides)
+    : null
   const shown = day
-    ? applyPlan(day, mode === 'adjusted' ? plan : null, history, localISODate(), workout.week, baselines)
+    ? applyPlan(day, mode === 'adjusted' ? plan : null, history, today, workout.week, baselines, weightOverrides)
     : null
   const lookup = (name: string) => lookupExercise(built, day, name)
 

@@ -1,9 +1,17 @@
 // Adaptive day plan: applies the server's corrections to a program day.
 // Pure and node-safe: type-only imports from api/store (api.ts reads window), the rest comes in as arguments.
 import type { DayPlan, DayPlanExercise } from './api'
-import { formatPrescription, isDropset, type Prescription, type ProgramDay, type ProgramExercise } from './program'
-import { equipmentStep, hasHistory, roundToStep, suggestWeight } from './progression'
-import type { Baseline, ExerciseLog, Workout } from './store'
+import {
+  formatPrescription,
+  isDropset,
+  programPosition,
+  type Prescription,
+  type Program,
+  type ProgramDay,
+  type ProgramExercise,
+} from './program'
+import { equipmentStep, findOverride, hasHistory, roundToStep, suggestWeight } from './progression'
+import type { Baseline, ExerciseLog, WeightOverride, Workout } from './store'
 
 export type PlanMode = 'adjusted' | 'program'
 
@@ -13,11 +21,14 @@ export interface AdjustedExercise {
   /** The program's exercise as written. */
   original: ProgramExercise
   replaced: boolean
-  /** Suggested weight × factor, on the equipment step; null without history and baselines. */
+  /** Suggested weight × factor, on the equipment step; the override as is; null without any source. */
   weight: number | null
-  /** Suggested weight before the factor. */
+  /** Suggested weight before the factor (the override when there is one). */
   baseWeight: number | null
+  /** The plan's weight factor; not applied when `override` is set. */
   factor: number
+  /** The owner's weight for today from the chat, when `weight` is it. */
+  override: WeightOverride | null
   reason: string | null
   /** "3 × 8–12 (по плану 4 × 8–12)" when sets or reps differ, otherwise the usual prescription. */
   target: string
@@ -47,6 +58,44 @@ export function planFitsDay(
   if (plan.weekday != null && plan.weekday !== day.weekday) return false
   if (plan.week != null && week != null && plan.week !== week) return false
   return plan.exercises.every((p) => day.exercises.some((e) => e.name === p.name))
+}
+
+function dayKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/**
+ * The program day today's workout is (what store.prepareToday prepares): the first day of the current
+ * program week not logged yet in this run, so a missed day is trained later. Null when the program is
+ * not running or something of the run is already logged today. `run`: workouts of the current run.
+ */
+export function todaysProgramDay(
+  program: Program,
+  startDate: string,
+  run: readonly Workout[],
+  now = new Date(),
+): { week: number; weekday: number } | null {
+  const pos = programPosition(program, startDate, now)
+  if (pos.finished || pos.notStarted) return null
+  const today = dayKey(now)
+  if (run.some((w) => dayKey(new Date(w.startedAt)) === today)) return null
+  const days = program.weeks.find((w) => w.number === pos.week)?.days ?? []
+  const next = days.find((d) => !run.some((w) => w.week === pos.week && w.weekday === d.weekday))
+  return next ? { week: pos.week, weekday: next.weekday } : null
+}
+
+/**
+ * «Поставь сегодня жим 85» means the workout trained today, whatever program day it is: overrides count
+ * for a workout not started yet (it is trained today) or started today by the calendar. A session started
+ * yesterday gets none (its sets keep yesterday's numbers, see refillSuggestions).
+ */
+export function overridesForWorkout(
+  overrides: readonly WeightOverride[],
+  w: Pick<Workout, 'startedAt' | 'exercises'>,
+  now = new Date(),
+): readonly WeightOverride[] {
+  const started = w.exercises.some((e) => e.sets.some((s) => s.done))
+  return started && dayKey(new Date(w.startedAt)) !== dayKey(now) ? [] : overrides
 }
 
 /** Same content, same key: refetches return new objects, so identity cannot tell a real change. */
@@ -99,10 +148,28 @@ function adjustPrescription(p: Prescription, a: DayPlanExercise | undefined): Pr
   return { ...p, sets, reps_min: repsMin, reps_max: repsMax }
 }
 
-function unchanged(e: ProgramExercise, history: Workout[], baselines: readonly Baseline[]): AdjustedExercise {
-  const weight = suggestWeight(history, e, baselines)?.weight ?? null
+function unchanged(
+  e: ProgramExercise,
+  history: Workout[],
+  baselines: readonly Baseline[],
+  overrides: readonly WeightOverride[],
+  today: string,
+): AdjustedExercise {
+  const s = suggestWeight(history, e, baselines, overrides, today)
+  const weight = s?.weight ?? null
   const target = formatPrescription(e.prescription)
-  return { exercise: e, original: e, replaced: false, weight, baseWeight: weight, factor: 1, reason: null, target, changed: false }
+  return {
+    exercise: e,
+    original: e,
+    replaced: false,
+    weight,
+    baseWeight: weight,
+    factor: 1,
+    override: s?.override ?? null,
+    reason: null,
+    target,
+    changed: false,
+  }
 }
 
 /**
@@ -110,6 +177,9 @@ function unchanged(e: ProgramExercise, history: Workout[], baselines: readonly B
  * factor, skip, replacement). Without a fitting plan, or when it would skip everything, the program
  * day as written (`applied` false), so the user always has something to train.
  * Weights come from history, else from the owner's baselines; the plan factor applies on top of either.
+ * An override for `today` (the owner's own number from the chat) wins over both and is used as is: he
+ * chose it knowing how he feels, so the plan's factor is not applied to it. It is looked up by the name
+ * actually trained, so a replacement does not inherit the barbell number of the exercise it replaces.
  */
 export function applyPlan(
   day: ProgramDay,
@@ -118,9 +188,10 @@ export function applyPlan(
   today: string,
   week?: number,
   baselines: readonly Baseline[] = [],
+  overrides: readonly WeightOverride[] = [],
 ): AppliedPlan {
   const plain = (): AppliedPlan => ({
-    exercises: day.exercises.map((e) => unchanged(e, history, baselines)),
+    exercises: day.exercises.map((e) => unchanged(e, history, baselines, overrides, today)),
     skipped: [],
     applied: false,
   })
@@ -146,9 +217,11 @@ export function applyPlan(
       prescription: { ...prescription, raw: target },
     }
     // A replacement has its own history and baseline: its base weight and step come from its own name.
-    const baseWeight = suggestWeight(history, { ...exercise, prescription }, baselines)?.weight ?? null
+    const s = suggestWeight(history, { ...exercise, prescription }, baselines, overrides, today)
+    const baseWeight = s?.weight ?? null
     const factor = safeFactor(a?.weightFactor)
-    const weight = scaleWeight(baseWeight, factor, equipmentStep(exercise.name))
+    const override = s?.override ?? null
+    const weight = override ? baseWeight : scaleWeight(baseWeight, factor, equipmentStep(exercise.name))
     exercises.push({
       exercise,
       original,
@@ -156,9 +229,10 @@ export function applyPlan(
       weight,
       baseWeight,
       factor,
+      override,
       reason: a?.reason?.trim() || null,
       target,
-      changed: replaced || target !== programTarget || factor !== 1,
+      changed: replaced || target !== programTarget || (factor !== 1 && !override),
     })
   }
   if (!exercises.length) return plain()
@@ -170,7 +244,7 @@ export function planNote(a: AdjustedExercise): string | null {
   if (!a.changed && !a.reason) return null
   const parts: string[] = []
   if (a.reason) parts.push(a.reason)
-  if (a.factor !== 1) {
+  if (a.factor !== 1 && !a.override) {
     const pct = Math.round((a.factor - 1) * 100)
     if (pct) parts.push(`вес ${pct < 0 ? '−' : '+'}${Math.abs(pct)} %`)
   }
@@ -192,6 +266,8 @@ export interface PreparedSuggestion {
   factor: number
   /** The weight the app filled in (after the factor); null when it had none. */
   weight: number | null
+  /** Day of the owner's override `weight` came from; null/absent when the app computed it. */
+  overrideDate?: string | null
 }
 
 /** By exercise name; the first one wins when a day repeats an exercise. */
@@ -201,39 +277,58 @@ export type PreparedSuggestions = Record<string, PreparedSuggestion>
 export function suggestionsOf(exercises: readonly AdjustedExercise[]): PreparedSuggestions {
   const out: PreparedSuggestions = {}
   for (const a of exercises) {
-    if (!out[a.exercise.name]) out[a.exercise.name] = { exercise: a.exercise, factor: a.factor, weight: a.weight }
+    if (!out[a.exercise.name]) {
+      const overrideDate = a.override?.date ?? null
+      out[a.exercise.name] = { exercise: a.exercise, factor: a.factor, weight: a.weight, overrideDate }
+    }
   }
   return out
 }
 
 /**
- * New baselines applied to the prepared workout in place, without rebuilding it: added and removed
- * exercises and the user's own weights stay. Only exercises without any history are touched, and in them
- * only sets whose weight is empty or still the one the app suggested; the plan factor applies on top.
+ * New baselines and the owner's weight overrides applied to the active workout in place, without
+ * rebuilding it: added and removed exercises and the user's own weights stay. In a touched exercise only
+ * sets that are not done and whose weight is empty or still the one the app suggested change, so a
+ * user edit (and updateSet carries an edit to the following sets) is never overwritten.
+ * - Override for `today`: its weight as is (no plan factor), also in a started workout, so a number set
+ *   in the chat mid-workout reaches the remaining sets. Exercises with history are included.
+ * - The override gone: back to the computed weight. Mid-workout only when it was for `today` (removed in
+ *   the chat); one from an earlier day stays, so a session past midnight is not reverted (the server
+ *   sends today's overrides only).
+ * - Otherwise only in a workout that is not started, and only exercises without any history: the
+ *   baseline weight × the plan factor the workout was built with.
  * An exercise missing from `suggested` (workout prepared before the snapshot existed) falls back to the
  * day's exercise with factor 1, so only its empty weights are filled. User-added exercises (in neither)
- * are left alone. A started workout is never touched. Returns null when nothing changes.
+ * are left alone. `today` is the app's local day (the store's localDate). Null when nothing changes.
  */
-export function refillFromBaselines(
+export function refillSuggestions(
   workout: Workout,
   suggested: PreparedSuggestions,
   day: ProgramDay | undefined,
   history: Workout[],
   baselines: readonly Baseline[],
+  overrides: readonly WeightOverride[] = [],
+  today = '',
 ): { workout: Workout; suggested: PreparedSuggestions } | null {
-  if (workout.exercises.some((e) => e.sets.some((s) => s.done))) return null
+  const started = workout.exercises.some((e) => e.sets.some((s) => s.done))
   const nextSuggested: PreparedSuggestions = { ...suggested }
   let changed = false
   const exercises = workout.exercises.map((log): ExerciseLog => {
-    if (hasHistory(history, log.name)) return log
     const known = suggested[log.name]
     const fromDay = day?.exercises.find((e) => e.name === log.name)
     const prev: PreparedSuggestion | null = known ?? (fromDay ? { exercise: fromDay, factor: 1, weight: null } : null)
     if (!prev) return log
-    const base = suggestWeight([], prev.exercise, baselines)?.weight ?? null
-    const next = scaleWeight(base, prev.factor, equipmentStep(log.name))
-    if (!known || next !== prev.weight) {
-      nextSuggested[log.name] = { ...prev, weight: next }
+    const o = today ? findOverride(overrides, log.name, today) : null
+    const was = prev.overrideDate ?? null
+    let next: number | null
+    if (o) next = o.weightKg
+    else if (was != null ? !started || was === today : !started && !hasHistory(history, log.name)) {
+      const base = suggestWeight(history, prev.exercise, baselines)?.weight ?? null
+      next = scaleWeight(base, prev.factor, equipmentStep(log.name))
+    } else return log
+    const overrideDate = o?.date ?? null
+    if (!known || next !== prev.weight || was !== overrideDate) {
+      nextSuggested[log.name] = { ...prev, weight: next, overrideDate }
       changed = true
     }
     let setsChanged = false

@@ -7,7 +7,7 @@ import pytest
 from conftest import init_data, make_settings
 from sqlalchemy import select
 
-from gymbot.db.models import Exercise, Reminder, Workout, WorkoutSet
+from gymbot.db.models import Exercise, Reminder, User, WeightOverride, Workout, WorkoutSet
 
 
 def workout(wid="abc", **over):
@@ -1191,3 +1191,34 @@ async def test_fact_delete_unknown_id_404(client, auth, db):
     fid = await _fact(db, uid)
     assert (await client.delete("/api/facts/9999", headers=auth)).status_code == 404
     assert await _fact_exists(db, fid)
+
+
+async def test_state_weight_overrides_default_empty(client, auth, db):
+    assert (await client.get("/api/state", headers=auth)).json()["weightOverrides"] == []
+
+
+async def test_state_weight_overrides_only_today_local(client, auth, db, settings):
+    await client.get("/api/state", headers=auth)  # creates the user (telegram id 42)
+    today = datetime.now(ZoneInfo(settings.timezone)).date()
+    async with db() as s:
+        uid = await s.scalar(select(User.id).where(User.telegram_id == 42))
+        ex = await s.scalar(select(Exercise.id).where(Exercise.name == "жим лёжа"))
+        row = await s.scalar(select(Exercise.id).where(Exercise.name == "присед со штангой"))
+        s.add(WeightOverride(user_id=uid, exercise_id=ex, day=today, weight_kg=Decimal(85)))
+        s.add(WeightOverride(user_id=uid, exercise_id=row, day=today - timedelta(days=1), weight_kg=Decimal(100)))
+        await s.commit()
+    st = (await client.get("/api/state", headers=auth)).json()
+    assert st["weightOverrides"] == [{"exercise": "жим лёжа", "weightKg": 85.0, "date": today.isoformat()}]
+
+
+async def test_state_weight_overrides_are_per_user(client, auth, db, settings):
+    await client.get("/api/state", headers=auth)
+    today = datetime.now(ZoneInfo(settings.timezone)).date()
+    async with db() as s:
+        other = User(telegram_id=7)
+        s.add(other)
+        await s.flush()
+        ex = await s.scalar(select(Exercise.id).where(Exercise.name == "жим лёжа"))
+        s.add(WeightOverride(user_id=other.id, exercise_id=ex, day=today, weight_kg=Decimal(70)))
+        await s.commit()
+    assert (await client.get("/api/state", headers=auth)).json()["weightOverrides"] == []
