@@ -124,7 +124,7 @@ async def test_put_size_limit(client, auth, db):
 
 
 async def test_put_with_nothing_done_yet(client, auth, db):
-    fresh = active()
+    fresh = active(startedAt=now_iso(-timedelta(minutes=5)))
     for ex in fresh["exercises"]:
         ex["sets"] = [{"weight": None, "reps": None, "done": False} for _ in ex["sets"]]
     r = await client.put("/api/workouts/active", json=fresh, headers=auth)
@@ -202,12 +202,12 @@ async def test_auth_and_other_users(tmp_path, make_client, auth, db):
     async with make_client(make_settings(tmp_path, allowed_user_ids=[42, 43])) as client:
         assert (await client.put("/api/workouts/active", json=active())).status_code == 401
         assert (await client.delete("/api/workouts/active")).status_code == 401
-        await client.put("/api/workouts/active", json=active(), headers=auth)
+        await client.put("/api/workouts/active", json=active(startedAt=now_iso()), headers=auth)
         # Another user's DELETE does not touch the owner's snapshot, and their own PUT is a separate row.
         assert (await client.delete("/api/workouts/active", headers=OTHER)).status_code == 204
         assert (await client.delete("/api/workouts/active?clientId=w1", headers=OTHER)).status_code == 204
         assert [r.client_id for r in await stored(db)] == ["w1"]
-        assert (await client.put("/api/workouts/active", json=active("theirs"), headers=OTHER)).status_code == 204
+        assert (await client.put("/api/workouts/active", json=active("theirs", startedAt=now_iso()), headers=OTHER)).status_code == 204
         assert sorted(r.client_id for r in await stored(db)) == ["theirs", "w1"]
         assert (await client.delete("/api/workouts/active", headers=OTHER)).status_code == 204
         assert [r.client_id for r in await stored(db)] == ["w1"]

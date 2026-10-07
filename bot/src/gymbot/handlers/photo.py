@@ -13,6 +13,7 @@ Packaged products: the largest size is downloaded (barcodes need resolution) and
 model reads a package label instead of estimating (PhotoParse.label). services.products.combine picks OFF,
 else the label; then handlers/products.py asks «Сколько съел?» (a caption like "50 г" answers it at once).
 One vision call per photo either way: the label is the fallback for products OFF lacks and the cross-check.
+A plate with a barcoded product beside it keeps the plate estimate; the product gets its own card after it.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ ALBUM = "Пришли по одной фотографии: разбираю т�
 MAX_ALBUMS = 200
 _ALBUMS: dict[str, None] = {}  # media_group_ids already answered, oldest first (a bounded set)
 PREFIX = "Оценка по фото, граммы можно поправить словами.\n\n"
+ALSO_PACKAGE = "На фото ещё упаковка со штрихкодом. Если ел и её:\n\n"
 
 
 def largest(sizes: list[PhotoSize]) -> PhotoSize:
@@ -112,6 +114,19 @@ async def log_photo(
     )
     raw_text = f"[photo] {caption}".rstrip()
     decision = pr.combine(off, seen.label if seen else None, code)
+    plate = seen is not None and seen.label is None and bool(seen.result.foods or seen.result.unknown_terms)
+    if decision.product is not None and plate:
+        # A plate with a packaged product beside it (a yogurt): the plate estimate stays, the product is offered
+        # as a separate card; the caption's amount is the plate's, so the card asks.
+        assert seen is not None
+        await reply_with_result(
+            message, history_text(caption), seen.result, settings, sessionmaker, llm,
+            raw_text=raw_text, prefix=PREFIX, known=known,
+        )  # fmt: skip
+        await product_cards.offer(
+            message, decision.product, raw_text=raw_text, note=decision.note, prefix=ALSO_PACKAGE, listen=False
+        )  # "250 г" typed next corrects the plate, not this card
+        return
     if decision.product is not None:
         amount, alias = caption_hints(caption)
         product = decision.product

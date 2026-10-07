@@ -1112,3 +1112,56 @@ async def test_not_80_but_85_right_after_saving_sets_touches_only_that_message(l
     await hse.confirm(callback(f"fixok:{fix_token(e)}"), settings, db)
     sets = await rows(db, WorkoutSet, WorkoutSet.set_index)
     assert [(s.reps, float(s.weight_kg)) for s in sets] == [(8, 80.0), (6, 85.0)]
+
+
+# ---- which number of "W на R" the pair is about ----
+
+
+@pytest.mark.parametrize(
+    "text, pair, field",
+    [
+        ("жим 85 на 5, а не 80", (85, 80), "weight_kg"),
+        ("жим 85х5 а не 80", (85, 80), "weight_kg"),
+        ("жим 85 на 5, а не на 6", (5, 6), "reps"),
+        ("в жиме на 6, а не 5", (6, 5), "reps"),
+        ("в жиме на 6 раз, а не на 5", (6, 5), "reps"),
+        ("в жиме было 85, а не 80", (85, 80), None),
+        ("в плове было 250 г, а не 350", (250, 350), None),
+    ],
+)
+def test_pair_takes_the_replaced_number(text, pair, field):
+    intent = se.detect(text, TODAY)
+    assert intent.pair == pair and intent.pair_field == field
+
+
+async def test_weight_on_reps_pair_changes_the_weight_only(llm, settings, db):
+    await add_workout(db, TODAY, [("Жим штанги лёжа", [(5, 80), (5, 80)])], source="chat", raw="жим 2 по 5 на 80")
+    e = await send("жим 85 на 5, а не 80", llm, settings, db)
+    assert "85 кг × 5, 85 кг × 5" in reply(e) and llm.bodies == []
+    await hse.confirm(callback(f"fixok:{fix_token(e)}"), settings, db)
+    sets = await rows(db, WorkoutSet, WorkoutSet.set_index)
+    assert [(s.reps, float(s.weight_kg)) for s in sets] == [(5, 85.0), (5, 85.0)]
+
+
+async def test_reps_pair_changes_the_reps_only(llm, settings, db):
+    await add_workout(db, TODAY, [("Жим штанги лёжа", [(5, 5), (5, 80)])], source="chat", raw="жим")
+    e = await send("в жиме на 6, а не 5", llm, settings, db)
+    assert "5 кг × 6, 80 кг × 6" in reply(e) and llm.bodies == []  # the 5 kg weight stays: the pair is reps
+
+
+async def test_reps_pair_never_rewrites_a_matching_weight(llm, settings, db):
+    await add_workout(db, TODAY, [("Жим штанги лёжа", [(8, 5)])], source="chat", raw="жим")
+    e = await send("в жиме на 6, а не 5", llm, settings, db)
+    assert reply(e).startswith("Не нашёл") and not hse.OFFERS  # reps were 8, not 5
+
+
+@pytest.mark.parametrize(
+    "text", ["исправь технику в приседе", "поправь технику жима", "исправь форму в тяге", "поправь осанку",
+             "исправь технике в приседе"],
+)
+async def test_technique_goes_to_the_parser(text, llm, settings, db):
+    await add_workout(db, TODAY, [("Присед", [(5, 100)])], source="chat", raw="присед")
+    assert se.detect(text, TODAY) is None
+    llm.answers = [{"kind": "question", "clarification": "Совет."}]
+    await send(text, llm, settings, db)
+    assert len(llm.bodies) == 1 and not hse.OFFERS

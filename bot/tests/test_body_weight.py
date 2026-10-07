@@ -40,6 +40,12 @@ def clean_state():
 
 
 @pytest.fixture(autouse=True)
+def frozen_clock(monkeypatch):
+    """The preview TTL is checked against hbw.utcnow(): pin it to the messages' time, never the real clock."""
+    monkeypatch.setattr(hbw, "utcnow", lambda: T0)
+
+
+@pytest.fixture(autouse=True)
 def no_diary_answer(monkeypatch):
     async def parser_answer(message, text, result, *args):
         return result
@@ -212,8 +218,9 @@ async def test_save_writes_one_chat_row_and_publishes(settings, db, published):
     assert token not in hbw.PENDING
 
 
-async def test_save_day_is_the_local_date_of_the_message(settings, db):
+async def test_save_day_is_the_local_date_of_the_message(settings, db, monkeypatch):
     late = datetime(2026, 10, 7, 22, 30, tzinfo=UTC)  # 01:30 on the 8th in Moscow
+    monkeypatch.setattr(hbw, "utcnow", lambda: late)
     token = await preview(settings, db, at=late)
     await hbw.save_weight(callback(f"bwsave:{token}"), settings, db)
     (row,) = await rows(db)

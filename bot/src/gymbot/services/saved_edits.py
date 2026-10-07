@@ -62,7 +62,7 @@ _DELETE = re.compile(r"(?<!\w)(?:удали|убери|сотри)(?:те)?(?!\w
 _FIX = re.compile(r"(?<!\w)(?:исправь|поправь|измени)(?:те)?(?!\w)")
 # Not records: the plan, the program, settings ("убери из плана жим", "удали программу").
 _NOT_RECORDS = re.compile(
-    r"(?<!\w)(?:план\w*|программ\w*|напомина\w*|напомни\w*|факт\w*|норм[аеуы]?|цел[ьи]|таймер\w*|профил\w*)(?!\w)"
+    r"(?<!\w)(?:техник\w*|форм(?:а|у|е|ы|ой)|осанк\w*|план\w*|программ\w*|напомина\w*|напомни\w*|факт\w*|норм[аеуы]?|цел[ьи]|таймер\w*|профил\w*)(?!\w)"
 )
 # Plans for later, not a fix of the past ("давай сегодня жим 85, а не 80", "хочу убрать живот").
 _FUTURE = re.compile(r"(?<!\w)(?:давай(?:те)?|поставь|выставь|будет|буду|сделаю|хочу|планирую|надо|нужно)(?!\w)")
@@ -74,6 +74,16 @@ _NUM_WORDS = {
 }
 _NUM = r"(?:\d+(?:[.,]\d+)?|" + "|".join(_NUM_WORDS) + r")"
 # "самса была 2, а не 3", "в плове было 250 г, а не 350", "жим 85 а не 80": the new value, then the old one.
+# "жим 85 на 5, а не 80": the first number of "W на R" is the weight; "85 на 5, а не на 6" fixes the reps.
+_SETS_NOT = re.compile(
+    rf"(?<!\w)(?P<w>{_NUM})(?:\s*кг)?\s*(?:на|по|x|х|×|\*)\s*(?P<r>{_NUM})(?!\w)(?:\s*[a-zа-я.]{{0,12}})?"
+    rf"\s*,?\s*а\s+не\s+(?P<na>(?:на|по)\s+)?(?P<old>{_NUM})(?!\w)"
+)
+# "на 6, а не 5": reps (a hint: swap checks the reps really were 5)
+_REPS_NOT = re.compile(
+    rf"(?<!\w)(?:на|по)\s+(?P<new>{_NUM})(?!\w)(?:\s*(?:раз|повтор)\w*)?\s*,?\s*а\s+не\s+(?:(?:на|по)\s+)?"
+    rf"(?P<old>{_NUM})(?!\w)"
+)
 _WAS_NOT = re.compile(
     rf"(?<!\w)(?P<new>{_NUM})(?!\w)(?:\s*[a-zа-я.]{{0,12}})?\s*,?\s*а\s+не\s+(?P<old>{_NUM})(?!\w)"
 )
@@ -126,6 +136,7 @@ class Intent:
     whole_workout: bool  # "тренировку"
     sets_only: bool  # "подход": the last set, not all sets of an exercise
     pair: tuple[float, float] | None  # (new, old) of "N, а не M"
+    pair_field: Literal["weight_kg", "reps"] | None = None  # which set value the pair is about, when said
     soft: bool = False  # "<блюдо> без …": only food saved in the last SOFT_MINUTES that has the ingredient
     record_verb: bool = False  # "спал 7, а не 5": with nothing found the parser gets it
     imperative: bool = False  # "удали", "исправь"...
@@ -184,9 +195,17 @@ def detect(text: str, today: date) -> Intent | None:
     if _RECORD_VERB.search(norm) and not imperative:
         return None
     pair = None
-    if m := _WAS_NOT.search(norm):
+    pair_field: Literal["weight_kg", "reps"] | None = None
+    if m := _SETS_NOT.search(norm):
+        pair_field = "reps" if m["na"] else "weight_kg"
+        new, old = _num(m["r"] if m["na"] else m["w"]), _num(m["old"])
+    elif m := _REPS_NOT.search(norm):
+        pair_field, new, old = "reps", _num(m["new"]), _num(m["old"])
+    elif m := _WAS_NOT.search(norm):
         new, old = _num(m["new"]), _num(m["old"])
-        pair = (new, old) if new is not None and old is not None else None
+    else:
+        new = old = None
+    pair = (new, old) if new is not None and old is not None else None
     weak = soft = False
     name_part, without = norm, None
     if not imperative and pair is None:
@@ -227,6 +246,7 @@ def detect(text: str, today: date) -> Intent | None:
         # "удали подход жима" is one set; "в жиме было 3 подхода" edits the exercise, "последний подход" one set
         sets_only=bool(_SET_WORD.search(norm)) and (delete or bool(_LATEST.search(norm))),
         pair=pair,
+        pair_field=pair_field if pair is not None else None,
         soft=soft,
         record_verb=bool(_SLEEP_VERB.search(norm)),
         imperative=imperative,
@@ -335,13 +355,15 @@ def _local(dt: datetime, tz: ZoneInfo) -> datetime:
     return _aware(dt).astimezone(tz)
 
 
-def _has_value(unit: Unit, old: float) -> bool:
+def _has_value(unit: Unit, old: float, field_: str | None = None) -> bool:
     """Whether the unit holds the old value of "N, а не M" (narrows "жим" to the sets of 80 kg)."""
     r = unit.before
     if unit.kind == "food":
         return any(
             f.grams == old or f.kcal == old or re.search(rf"(?<![\d.]){old:g}\s*шт", f.description) for f in r.foods
         )
+    if unit.kind == "workout" and field_ is not None:
+        return any(getattr(s, field_) == old for ex in r.exercises for s in ex.sets)
     if unit.kind == "workout":
         return any(s.weight_kg == old or s.reps == old for ex in r.exercises for s in ex.sets) or any(
             len(ex.sets) == old for ex in r.exercises
@@ -463,7 +485,7 @@ def _select(units: list[Unit], intent: Intent, tz: ZoneInfo, now: datetime) -> l
     if kind == "wellbeing":
         picked = [u for u in units if u.kind == "wellbeing"]
         if intent.pair:
-            picked = [u for u in picked if _has_value(u, intent.pair[1])]
+            picked = [u for u in picked if _has_value(u, intent.pair[1], intent.pair_field)]
         if intent.action == "edit":
             return picked[-1:]  # one "how do I feel" record per day is the usual case: the newest
         return picked
@@ -497,7 +519,7 @@ def _select(units: list[Unit], intent: Intent, tz: ZoneInfo, now: datetime) -> l
     best = max(u.score for u in scored)
     picked = [u for u in scored if u.score == best]
     if intent.pair:
-        picked = [u for u in picked if _has_value(u, intent.pair[1])]  # the old value must be there exactly
+        picked = [u for u in picked if _has_value(u, intent.pair[1], intent.pair_field)]  # the old value must be there exactly
     return picked
 
 
@@ -533,7 +555,7 @@ def _select_last(units: list[Unit], intent: Intent, last: LastSaved) -> list[Uni
         u for u in units
         if u.level == level and u.kind == last.kind and any(original(r) == last.raw_text for r in u.raw_texts)
         and (u.kind == "workout" or u.at == _aware(last.sent_at))
-        and _has_value(u, intent.pair[1])
+        and _has_value(u, intent.pair[1], intent.pair_field)
     ]
 
 
@@ -706,9 +728,12 @@ def swap(unit: Unit, intent: Intent, text: str) -> ParseResult | None:
     try:
         if unit.kind == "workout" and len(r.exercises) == 1:
             ex = r.exercises[0]
-            field_ = "weight_kg" if any(s.weight_kg == old for s in ex.sets) else (
-                "reps" if any(s.reps == old for s in ex.sets) else None
-            )
+            if intent.pair_field is not None:  # "85 на 5, а не 80" is the weight, "на 6, а не 5" the reps
+                field_ = intent.pair_field if any(getattr(s, intent.pair_field) == old for s in ex.sets) else None
+            else:
+                field_ = "weight_kg" if any(s.weight_kg == old for s in ex.sets) else (
+                    "reps" if any(s.reps == old for s in ex.sets) else None
+                )
             if field_ is None or (field_ == "reps" and new != int(new)):
                 return None
             value = new if field_ == "weight_kg" else int(new)

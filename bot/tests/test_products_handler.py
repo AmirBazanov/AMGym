@@ -287,11 +287,23 @@ async def test_amount_the_product_cannot_turn_into_grams_asks_for_grams(db):
     assert hp.PREVIEWS == {}
 
 
-async def test_text_revising_an_open_preview_replaces_the_old_preview(db):
+async def test_after_the_preview_the_card_stops_listening(db):
     await card_token()
     await say(db, "60 г")
     (old,) = hp.PREVIEWS
-    _, second = await say(db, "80 г", T0 + timedelta(minutes=2))
+    taken, msg = await say(db, "80 г", T0 + timedelta(minutes=2))
+    assert taken is False  # the parser gets it (e.g. a correction of another record)
+    msg.answer.assert_not_awaited()
+    assert list(hp.PREVIEWS) == [old]
+
+
+async def test_enter_grams_after_the_preview_revises_it(db, monkeypatch):
+    monkeypatch.setattr(hp, "utcnow", lambda: T0 + timedelta(minutes=2))
+    token, _ = await card_token()
+    await say(db, "60 г")
+    (old,) = hp.PREVIEWS
+    await hp.choose_amount(callback(f"pa:{token}:g"))
+    _, second = await say(db, "80 г", T0 + timedelta(minutes=3))
     assert old not in hp.PREVIEWS
     (new,) = hp.PREVIEWS
     assert new != old
@@ -717,3 +729,69 @@ async def test_products_command_is_routed():
     msg = Message(message_id=1, date=T0, chat=Chat(id=USER, type="private"), text="/products")
     ok, _ = await h.check(msg, bot=Bot("123:abc"))
     assert ok
+
+
+# ---- review fixes: open dialogs, sets, bare numbers ----
+
+
+@pytest.mark.parametrize("answer", ["тот же", "то же", "такой же", "mars"])
+async def test_no_product_matching_while_the_parser_dialog_is_open(db, answer):
+    """«С каким весом?» answered «тот же»: the parser's dialog keeps it, no product card."""
+    await saved(db, MARS)
+    taken, msg = await say(db, answer, dialog_at=T0)
+    assert taken is False
+    msg.answer.assert_not_awaited()
+    assert hp.CARDS == {}
+
+
+@pytest.mark.parametrize("text", ["80 на 5", "ещё 80 на 5", "2 по 10", "3 по 10 с 60", "3x12", "12"])
+async def test_sets_and_small_bare_numbers_never_answer_a_card(db, text):
+    await card_token()
+    taken, msg = await say(db, text)
+    assert taken is False
+    msg.answer.assert_not_awaited()
+    assert hp.PREVIEWS == {}
+
+
+async def test_card_stops_listening_after_a_few_minutes(db):
+    await card_token()
+    taken, _ = await say(db, "60 г", T0 + hp.LISTEN + timedelta(seconds=1))
+    assert taken is False
+
+
+async def test_enter_grams_makes_a_bare_small_number_grams(db, monkeypatch):
+    monkeypatch.setattr(hp, "utcnow", lambda: T0)
+    token, _ = await card_token()
+    await hp.choose_amount(callback(f"pa:{token}:g"))
+    taken, _ = await say(db, "12")
+    assert taken is True
+    (preview,) = hp.PREVIEWS.values()
+    assert preview.food.grams == 12
+
+
+async def test_enter_grams_listens_only_for_a_few_minutes(db, monkeypatch):
+    monkeypatch.setattr(hp, "utcnow", lambda: T0)
+    token, _ = await card_token()
+    await hp.choose_amount(callback(f"pa:{token}:g"))
+    taken, _ = await say(db, "60 г", T0 + hp.LISTEN + timedelta(seconds=1))
+    assert taken is False
+
+
+async def test_a_card_offered_without_listening_ignores_typed_amounts(db):
+    await card_token(listen=False)
+    taken, _ = await say(db, "250 г")
+    assert taken is False
+
+
+async def test_a_question_is_never_a_product_message(db):
+    await saved(db, BAR)
+    taken, _ = await say(db, "батончик?")
+    assert taken is False
+
+
+async def test_same_alone_with_several_products_asks_which(db):
+    await saved(db, MARS, BAR)
+    taken, msg = await say(db, "тот же")
+    assert taken is True
+    text, kb = sent(msg)
+    assert text == hp.WHICH and len(tokens_of(kb, "pc")) == 2

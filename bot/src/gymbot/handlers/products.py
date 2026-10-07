@@ -14,6 +14,7 @@ user's products (gymbot.services.products.remember), and the Mini App gets a "nu
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -34,6 +35,13 @@ log = logging.getLogger(__name__)
 router = Router(name="products")
 
 TTL = timedelta(minutes=15)
+LISTEN = timedelta(minutes=5)  # a card takes a typed amount this long after it is shown or after «Ввести граммы»
+# A set pattern ("80 на 5", "2 по 10", "3x12") or two numbers are a workout, never an amount for a card.
+_SETS = re.compile(r"\d\s*(?:на|по|x|х|×|\*)\s*\d")
+
+
+def _looks_like_sets(text: str) -> bool:
+    return bool(_SETS.search(text.casefold())) or sum(t[0].isdigit() for t in pr.tokens(text)) >= 2
 MAX_PENDING = 200
 CANDIDATES_MAX = 4
 STALE = "Эта запись уже сохранена или устарела."
@@ -56,6 +64,8 @@ class Card:
     note: str | None = None
     alias: str | None = None  # a caption like "мой протеин", remembered with the product
     preview: str | None = None  # token in PREVIEWS
+    asked_at: datetime | None = None  # «Ввести граммы» pressed: the next amount, even a bare "12", is grams
+    listen: bool = True  # False: typed amounts go elsewhere until «Ввести граммы» (a card beside a plate preview)
 
 
 @dataclass
@@ -82,6 +92,10 @@ CARDS: dict[str, Card] = {}
 PREVIEWS: dict[str, Preview] = {}
 CHOICES: dict[str, Choice] = {}
 LATEST: dict[int, str] = {}  # Telegram id -> token of the newest card
+
+
+def utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 def _token(store: dict) -> str:
@@ -176,10 +190,14 @@ async def offer(
     note: str | None = None,
     alias: str | None = None,
     prefix: str = "",
+    listen: bool = True,
 ) -> None:
-    """A card for the product: the exact preview right away when `amount` gives grams, else «Сколько съел?»."""
+    """A card for the product: the exact preview right away when `amount` gives grams, else «Сколько съел?».
+
+    `listen=False`: a typed amount does not answer the card until «Ввести граммы» (it belongs to another preview).
+    """
     user_id = message.from_user.id  # type: ignore[union-attr]
-    card = Card(user_id, product, raw_text, message.date, message.date, note=note, alias=alias)
+    card = Card(user_id, product, raw_text, message.date, message.date, note=note, alias=alias, listen=listen)
     token = _new_card(card)
     grams = pr.grams_for(product, amount) if amount is not None else None
     if grams:
@@ -187,6 +205,14 @@ async def offer(
         await message.answer(prefix + text, reply_markup=preview_keyboard(ptoken))
         return
     await message.answer(prefix + card_text(card), reply_markup=amount_keyboard(token, product))
+
+
+def _listening(card: Card, now: datetime) -> bool:
+    """Whether a typed amount answers the card: while it waits for one (no preview yet) or right after
+    «Ввести граммы», for LISTEN. Once the preview is shown, only its buttons and «Ввести граммы» change it."""
+    if card.asked_at is not None:
+        return now - card.asked_at <= LISTEN
+    return card.listen and card.preview is None and now - card.at <= LISTEN
 
 
 def _open_card(user_id: int, now: datetime) -> tuple[str, Card] | None:
@@ -208,27 +234,43 @@ async def on_text(
 ) -> bool:
     """Handle a text message about a packaged product; False = not ours, the parser takes it.
 
-    1. An amount alone ("60 г", "60", "2 порции") for the newest open card, if that card is newer than the
-       parser's dialog (`dialog_at`): otherwise "200" may answer the parser's «Сколько грамм творога?».
-    2. A message about a saved product (services.products.match).
+    1. An amount ("60 г", "2 порции", "половина") for the newest card, if it still listens (`_listening`) and
+       is newer than the parser's open dialog (`dialog_at`): otherwise "200" may answer «Сколько грамм творога?».
+    2. A message about a saved product (services.products.match), only while no parser dialog is open:
+       «тот же» may answer the model's «С каким весом?».
     """
     user_id = message.from_user.id  # type: ignore[union-attr]
     now = message.date
+    if "?" in text:
+        return False
     if (opened := _open_card(user_id, now)) is not None and (dialog_at is None or opened[1].at >= dialog_at):
         token, card = opened
-        amount, rest = pr.parse_amount(text)
-        own = pr.keys(card.product)
-        if not amount.empty and all(any(pr.same_word(w, k) for k in own) for w in rest):
-            grams = pr.grams_for(card.product, amount)
-            if not grams:
-                await message.answer(prefix + ASK_GRAMS)
+        if _listening(card, now) and not _looks_like_sets(text):
+            amount, rest = pr.parse_amount(text)
+            own = pr.keys(card.product)
+            asked = card.asked_at is not None
+            # A bare small number ("12") is too ambiguous (reps?) unless the user pressed «Ввести граммы».
+            ambiguous = amount.bare is not None and amount.bare < pr.BARE_GRAMS_MIN and not asked
+            if (
+                not amount.empty
+                and not ambiguous
+                and all(any(pr.same_word(w, k) for k in own) for w in rest)
+            ):
+                if asked and amount.bare is not None and amount == pr.Amount(bare=amount.bare):
+                    amount = pr.Amount(grams=amount.bare)  # after «Ввести граммы» a number is grams
+                grams = pr.grams_for(card.product, amount)
+                if not grams:
+                    await message.answer(prefix + ASK_GRAMS)
+                    return True
+                card.at = now
+                card.asked_at = None
+                if raw_text not in card.raw_text.split("\n"):
+                    card.raw_text = f"{card.raw_text}\n{raw_text}"
+                preview, ptoken = _make_preview(token, grams)
+                await message.answer(prefix + preview, reply_markup=preview_keyboard(ptoken))
                 return True
-            card.at = now
-            if raw_text not in card.raw_text.split("\n"):
-                card.raw_text = f"{card.raw_text}\n{raw_text}"
-            preview, ptoken = _make_preview(token, grams)
-            await message.answer(prefix + preview, reply_markup=preview_keyboard(ptoken))
-            return True
+    if dialog_at is not None:
+        return False
     async with sessionmaker() as session:
         saved = await pr.user_products(session, user_id)
     found = pr.match(text, saved)
@@ -268,7 +310,7 @@ async def pick(cb: CallbackQuery) -> None:
         return
     CHOICES.pop(token, None)
     product = choice.products[int(index)]
-    card = Card(choice.user_id, product, choice.raw_text, choice.sent_at, datetime.now(UTC))
+    card = Card(choice.user_id, product, choice.raw_text, choice.sent_at, utcnow())
     ctoken = _new_card(card)
     grams = pr.grams_for(product, choice.amount)
     if cb.message:
@@ -295,7 +337,7 @@ async def choose_amount(cb: CallbackQuery) -> None:
         await cb.answer()
         return
     if what == "g":
-        card.at = datetime.now(UTC)
+        card.at = card.asked_at = utcnow()
         LATEST[card.user_id] = token
         await cb.answer()
         if cb.message:
@@ -309,7 +351,7 @@ async def choose_amount(cb: CallbackQuery) -> None:
     if not grams:
         await cb.answer(STALE, show_alert=True)
         return
-    card.at = datetime.now(UTC)
+    card.at = utcnow()
     text, ptoken = _make_preview(token, grams)
     if cb.message:
         await cb.message.edit_text(text, reply_markup=preview_keyboard(ptoken))  # type: ignore[union-attr]

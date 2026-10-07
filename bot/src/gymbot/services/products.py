@@ -42,7 +42,9 @@ DIFF_NOTE = 0.15  # OFF vs label kcal per 100 g
 PROMPT_LINE_MAX = 300  # "Мои продукты" for the parser, only products the message names
 LIST_MAX = 30  # /products and the matcher look at the newest products only
 LABEL_NAME = "Продукт с этикетки"  # a label without a readable name; never merged with another such product
-BARE_GRAMS_MIN = 15  # "snickers 2" = two packages, "протеин 30" = 30 g
+BARE_GRAMS_MIN = 15  # "протеин 2" = two servings, "протеин 30" = 30 g
+BARE_PACK_MAX = 300  # g; "2" means two packages only of a small pack (a bar), never of a 900 g tub
+_TIME = re.compile(r"(?<!\d)\d{1,2}:\d{2}(?!\d)")  # "в 15:00" is a time, not 15 g
 
 
 @dataclass(frozen=True)
@@ -262,7 +264,7 @@ _KEY_STOP = {"и", "с", "со", "в", "для", "без", "на", "из", "по
 
 
 def tokens(text: str) -> list[str]:
-    return _TOKEN.findall(text.casefold().replace("ё", "е"))
+    return _TOKEN.findall(_TIME.sub(" ", text.casefold().replace("ё", "е")))
 
 
 def _number(tok: str) -> float | None:
@@ -340,8 +342,11 @@ def grams_for(product: ProductInfo, amount: Amount) -> float | None:
     if amount.bare is not None:
         if amount.bare >= BARE_GRAMS_MIN:
             return amount.bare
-        unit = product.net_weight_g or product.serving_g
-        return amount.bare * unit if unit else None
+        if product.serving_g:
+            return amount.bare * product.serving_g
+        if product.net_weight_g and product.net_weight_g <= BARE_PACK_MAX:
+            return amount.bare * product.net_weight_g
+        return None  # "2" of a big pack without a serving: ask
     return None
 
 
@@ -451,11 +456,20 @@ async def delete(session: AsyncSession, telegram_id: int, product_id: int) -> bo
 
 
 def same_word(a: str, b: str) -> bool:
-    """One word in two forms: "батончик" / "батончика", "протеин" / "протеином"; not "батон" / "батончик"."""
+    """One word in two forms: "батончик" / "батончика", "пицца" / "пиццу", "грудка" / "грудки";
+    not "батон" / "батончик": lengths differ by at most 2 and the common start is at least
+    max(4, shorter - 2) letters (the ending may change, the stem may not)."""
     if a == b:
         return True
     short, long_ = sorted((a, b), key=len)
-    return len(short) >= 4 and long_.startswith(short) and len(long_) - len(short) <= 2
+    if len(long_) - len(short) > 2 or len(short) < 4:
+        return False
+    common = 0
+    for x, y in zip(short, long_, strict=False):
+        if x != y:
+            break
+        common += 1
+    return common >= max(4, len(short) - 2)
 
 
 def keys(product: ProductInfo) -> set[str]:
@@ -473,10 +487,11 @@ def match(text: str, products: list[ProductInfo]) -> Match | None:
     """The saved product a short message is about, or None (then the parser handles the message).
 
     `products` newest first. Fires only when every word is the product's name, an amount or a filler.
-    "тот же ..." picks the newest of several matches, or the newest product at all when no name matched.
+    "тот же ..." picks the newest of several matches; "тот же" alone the only product, or asks which.
+    "тот же батончик" without a saved product named "батончик" is the parser's (None).
     Two different products in one message ("сникерс и марс") are the parser's job.
     """
-    if not products:
+    if not products or "?" in text:  # "батончик?" is a question
         return None
     toks = tokens(text)
     scan = _scan(toks)
@@ -489,12 +504,17 @@ def match(text: str, products: list[ProductInfo]) -> Match | None:
             hits[pi] = hit
     named = set().union(*hits.values()) if hits else set()
     leftover = [t for ti, t in enumerate(toks) if ti not in scan.used and ti not in named]
-    # A package word ("батончик") that is no product's name is still an amount, not a foreign word.
+    # A package word ("пачка") that is no product's name is still an amount, not a foreign word, when another
+    # word names the product ("вся пачка mars"). Alone ("тот же батончик" with no saved bar) it names nothing.
+    packaging = [t for t in leftover if _PACKAGE_UNITS.match(t)]
     leftover = [t for t in leftover if not _PACKAGE_UNITS.match(t)]
     if leftover:
         return None
     if not hits:
-        return Match([products[0]], scan.amount) if same else None
+        if not same or packaging:
+            return None
+        # "тот же" alone: the only product, else ask which (newest first)
+        return Match(products[:1] if len(products) == 1 else list(products), scan.amount)
     best = max(len(h) for h in hits.values())
     top = [pi for pi, h in hits.items() if len(h) == best]
     if len(top) == 1:

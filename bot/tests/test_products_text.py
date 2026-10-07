@@ -251,3 +251,28 @@ async def test_products_line_goes_with_the_users_facts(llm, settings, db):
     assert SYSTEM_MARK in system and "порция творога 200 г" in system
     assert system.index(SYSTEM_MARK) < system.index("порция творога 200 г")
     assert system.count("Факты о пользователе") == 1  # one line, not two
+
+
+async def test_same_answers_the_parsers_question_not_a_saved_product(settings, db):
+    """The model asked «С каким весом?» about a workout; «тот же» answers it, no product card."""
+    async with db() as session:
+        user = await get_or_create_user(session, USER, "Amir")
+        await pr.remember(session, user.id, MARS)
+        await session.commit()
+    question = {"kind": "unknown", "clarification": "С каким весом?"}
+    workout = {"kind": "workout", "exercises": [{"exercise": "жим лёжа", "sets": [{"reps": 8, "weight_kg": 80}]}]}
+    llm = Llm(settings, [question, workout])
+    first = message("жим 8 раз")
+    await log_text.process_text(first, "жим 8 раз", settings, db, llm.client)
+    second = message("тот же", T0 + timedelta(minutes=1))
+    await log_text.process_text(second, "тот же", settings, db, llm.client)
+    assert len(llm.bodies) == 2  # the parser got «тот же»
+    assert hp.CARDS == {} and hp.CHOICES == {}
+    assert answer_text(second).startswith("Записать?")
+
+
+def test_vision_prompt_copies_only_a_visible_table():
+    from gymbot.llm.prompts import VISION_SYSTEM
+
+    assert "таблица пищевой ценности" in VISION_SYSTEM
+    assert "Таблицы не видно" in VISION_SYSTEM and "label не возвращай" in VISION_SYSTEM

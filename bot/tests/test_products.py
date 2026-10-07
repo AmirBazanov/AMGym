@@ -439,7 +439,7 @@ def test_grams_for_every_unit():
     assert pr.grams_for(p, Amount(packages=1)) == 60
     assert pr.grams_for(p, Amount(bare=80)) == 80  # 15 g and more: grams
     assert pr.grams_for(p, Amount(bare=15)) == 15
-    assert pr.grams_for(p, Amount(bare=2)) == 120  # below 15: packages
+    assert pr.grams_for(p, Amount(bare=2)) == 60  # below 15: servings first
     assert pr.grams_for(p, Amount()) is None
 
 
@@ -492,9 +492,13 @@ def test_match_saved_bar(message_, amount):
     assert found is not None and found.amount == amount
 
 
-def test_match_same_alone_takes_the_newest_product():
+def test_match_same_alone_with_several_products_asks_which():
     found = pr.match("тот же", [MARS, BAR])
-    assert names(found) == ["Mars"]
+    assert names(found) == ["Mars", "Протеиновый батончик"]  # candidates, newest first
+
+
+def test_match_same_alone_with_one_product_takes_it():
+    assert names(pr.match("тот же", [MARS])) == ["Mars"]
 
 
 @pytest.mark.parametrize("message_", ["то же самое", "тот же плов"])
@@ -915,3 +919,63 @@ def test_check_label_tolerance_is_symmetric(factor, ok):
 
     computed = 4 * 20 + 9 * 10 + 4 * 32  # 298
     assert check_label(LabelPer100(kcal=round(computed * factor, 1), protein_g=20, fat_g=10, carbs_g=32)) is ok
+
+
+# ---- review fixes ----
+
+PIZZA = prod("Пицца Маргарита", net=400)
+BREAST = prod("Куриная грудка", net=500)
+MILK = prod("Молоко", net=930)
+@pytest.mark.parametrize("message_", ["тот же батончик", "съел тот же батончик", "такой же батончик"])
+def test_same_bar_without_a_saved_bar_goes_to_the_parser(message_):
+    assert pr.match(message_, [PIZZA, MILK, BREAST, LOAF]) is None
+
+
+def test_same_bar_with_a_saved_bar_still_matches():
+    bar = prod("Протеиновый батончик", net=60)
+    found = pr.match("съел тот же батончик", [PIZZA, bar, MILK])
+    assert names(found) == ["Протеиновый батончик"]
+    assert found is not None and pr.grams_for(bar, found.amount) == 60
+
+
+def test_bare_small_number_prefers_the_serving():
+    tub = prod("Протеин", net=900, serving=30)
+    assert pr.grams_for(tub, Amount(bare=2)) == 60
+
+
+def test_bare_small_number_of_a_big_pack_without_serving_asks():
+    assert pr.grams_for(prod("Протеин", net=900), Amount(bare=2)) is None
+    assert pr.grams_for(prod("Mars", net=51), Amount(bare=2)) == 102  # a small pack: packages
+
+
+def test_time_is_not_grams():
+    bar = prod("Протеиновый батончик", net=60)
+    found = pr.match("батончик в 15:00", [bar])
+    assert found is not None and found.amount.grams is None and found.amount.bare is None
+    assert pr.grams_for(bar, found.amount) == 60
+    assert pr.parse_amount("в 9:30 50 г")[0] == Amount(grams=50)
+
+
+@pytest.mark.parametrize("message_", ["батончик?", "mars?", "сколько в mars?"])
+def test_questions_never_match(message_):
+    assert pr.match(message_, [prod("Протеиновый батончик", net=60), MARS]) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "name"),
+    [("пиццы 200 г", "Пицца Маргарита"), ("пиццу 150 г", "Пицца Маргарита"), ("грудки 150 г", "Куриная грудка")],
+)
+def test_word_forms_match(text, name):
+    assert names(pr.match(text, [PIZZA, BREAST])) == [name]
+
+
+@pytest.mark.parametrize(("a", "b", "same"), [
+    ("пицца", "пиццы", True), ("грудка", "грудки", True), ("батончик", "батончика", True),
+    ("протеин", "протеином", True), ("батон", "батончик", False), ("банан", "банка", False),
+])  # fmt: skip
+def test_same_word_stems(a, b, same):
+    assert pr.same_word(a, b) is same
+
+
+def test_mentioned_uses_word_forms():
+    assert [p.name for p in pr.mentioned("кусок пиццы и чай", [PIZZA, BREAST])] == ["Пицца Маргарита"]

@@ -580,11 +580,16 @@ async def test_code_unknown_to_off_but_a_plate_goes_to_the_usual_preview(setting
     msg.answer.assert_not_awaited()
 
 
-async def test_off_hit_wins_over_a_plate_estimate(settings, db, reply, known, code):
-    msg = make_message("x")
+async def test_plate_with_a_barcode_keeps_the_plate_and_offers_the_product(settings, db, reply, known, code):
+    """A yogurt beside a plate: the plate estimate stays, the product comes as a separate card."""
+    msg = make_message("250 г")
     await run(msg, fake_llm(food_result()), settings, db)
-    reply.assert_not_awaited()
-    assert card_of(msg).product == MARS
+    reply.assert_awaited_once()
+    card = card_of(msg)
+    assert card.product == MARS
+    assert card.listen is False  # "250 г" typed next corrects the plate, not the card
+    assert msg.answer.await_args.args[0].startswith(photo.ALSO_PACKAGE)
+    assert "Сколько съел?" in msg.answer.await_args.args[0]
 
 
 async def test_unreadable_label_asks_for_another_photo(settings, db, reply, known):

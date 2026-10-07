@@ -350,7 +350,8 @@ VISION_SYSTEM = """Ты оцениваешь еду по фото для дне�
 Одна запись на блюдо или компонент, название по-русски, числа, не диапазоны.
 Граммы и штуки из подписи важнее оценки по фото. Порции: каса ~300 г, лепёшка ~250 г, самса ~120 г, манты ~60 г/шт.
 Нет еды на фото: {"foods":[]}. note — коротко, если оценка неуверенная, иначе null.
-Упаковка или этикетка, а не блюдо: не оценивай, перепиши с этикетки {"label":{"name":str|null,"brand":str|null,"per100":{"kcal":number,"protein_g":number,"fat_g":number,"carbs_g":number},"net_weight_g":number|null,"serving_g":number|null}}, per100 — на 100 г, name и brand только как написано на упаковке, иначе null."""
+На фото видна таблица пищевой ценности упаковки: не оценивай, перепиши её числа {"label":{"name":str|null,"brand":str|null,"per100":{"kcal":number,"protein_g":number,"fat_g":number,"carbs_g":number},"net_weight_g":number|null,"serving_g":number|null}}, per100 — на 100 г, name и brand только как написано на упаковке, иначе null.
+Таблицы не видно (лицевая сторона, штрихкод) — label не возвращай, числа по памяти не пиши."""
 VISION_FACTS_MAX_CHARS = 300  # the user's portion facts ("самса ~150 г") help, but the quota is shared
 VISION_DEFAULT_TEXT = "Оцени еду на фото."
 
