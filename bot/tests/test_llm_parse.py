@@ -1,3 +1,5 @@
+import pytest
+
 from gymbot.llm.openrouter import extract_json
 from gymbot.llm.prompts import EXAMPLES, SYSTEM_PROMPT, build_messages
 from gymbot.llm.schemas import ParseResult
@@ -69,6 +71,7 @@ def test_only_corrections_revise():
         "нет, четыре": True,
         "самса была так себе, белка поменьше": True,
         "съел 3 манты, они у нас крупные, по 90 г": False,
+        "гречка 200 г и 2 чапчуки": False,
         "спал 6 часов, болит левое плечо, сил мало": False,
         "сколько белка в 100 г творога?": False,
         "привет": False,
@@ -183,3 +186,64 @@ def test_facts_line_is_capped():
     line = format_facts([f"факт номер {i} " + "x" * 180 for i in range(50)])
     assert line.startswith("Факты о пользователе: факт номер 0 ") and len(line) <= FACTS_MAX_CHARS
     assert format_facts([]) == ""
+
+
+def test_schema_line_in_prompt_names_every_model_field():
+    # The schema line of the prompt and ParseResult must not drift apart.
+    for name in ParseResult.model_fields:
+        assert f'"{name}"' in SYSTEM_PROMPT, name
+
+
+def test_unknown_word_example_asks_instead_of_inventing():
+    r = example("гречка 200 г и 2 чапчуки")
+    assert r.kind == "food" and r.unknown_terms == ["чапчук"]
+    assert [f.description for f in r.foods] == ["гречка варёная"]  # no made-up macros for the unknown word
+    assert all("чапчук" not in f.description for f in r.foods)
+    assert r.clarification and "чапчук" in r.clarification
+    users = [u for u, _ in EXAMPLES]
+    assert users.index("гречка 200 г и 2 чапчуки") < len(users) - 1  # the last example is not a record
+    assert [u for u, a in EXAMPLES if ParseResult.model_validate_json(a).unknown_terms] == [
+        "гречка 200 г и 2 чапчуки"
+    ]  # one example only
+
+
+def test_unknown_terms_default_is_empty():
+    assert ParseResult.model_validate({"kind": "food"}).unknown_terms == []
+
+
+def test_unknown_terms_accepts_a_string():
+    assert ParseResult.model_validate({"kind": "food", "unknown_terms": "курт"}).unknown_terms == ["курт"]
+
+
+@pytest.mark.parametrize("bad", [None, 123, 1.5, {"a": "курт"}, True])
+def test_unknown_terms_junk_becomes_empty_list(bad):
+    assert ParseResult.model_validate({"kind": "food", "unknown_terms": bad}).unknown_terms == []
+
+
+def test_unknown_terms_are_cleaned_deduped_and_capped():
+    raw = ["  курт ", "Курт", "", "x" * 41, "a", "b", "c"]
+    assert ParseResult.model_validate({"kind": "food", "unknown_terms": raw}).unknown_terms == ["курт", "a", "b"]
+
+
+def test_unknown_terms_drops_non_strings_and_keeps_limit_length():
+    raw = [None, 5, ["курт"], "x" * 40, "кутаб"]
+    got = ParseResult.model_validate({"kind": "food", "unknown_terms": raw}).unknown_terms
+    assert got == ["x" * 40, "кутаб"]
+
+
+def test_unknown_terms_are_stripped_of_quotes_and_punctuation():
+    got = ParseResult.model_validate({"kind": "food", "unknown_terms": ["«курт»", "кутаб?", " тандыр   гошт ."]})
+    assert got.unknown_terms == ["курт", "кутаб", "тандыр гошт"]
+
+
+def test_food_without_kcal_becomes_an_unknown_term():
+    # Live: gpt-oss listed an unknown dish with null macros; that must not reject the whole answer.
+    r = ParseResult.model_validate(
+        {"kind": "food", "unknown_terms": "гульчатай", "foods": [
+            {"description": "гульчатай, 2 шт", "grams": None, "kcal": None, "protein_g": None,
+             "fat_g": None, "carbs_g": None},
+            {"description": "чай", "kcal": 2, "protein_g": 0, "fat_g": 0, "carbs_g": 0},
+        ]}
+    )
+    assert [f.description for f in r.foods] == ["чай"]
+    assert r.unknown_terms == ["гульчатай"]

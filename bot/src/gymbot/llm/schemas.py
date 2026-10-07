@@ -1,10 +1,14 @@
 """Structured output the LLM must return. The bot only trusts data that validates here."""
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 REMEMBER_MAX = 200  # also the fact length limit (gymbot.services.facts.TEXT_MAX)
+UNKNOWN_TERMS_MAX = 3  # words the bot may look up per message (gymbot.services.food_lookup)
+UNKNOWN_TERM_LEN = 40
+_PIECES_SUFFIX = re.compile(r",?\s*\d+(?:[.,]\d+)?\s*шт\.?\s*$")
 
 
 class ParsedSet(BaseModel):
@@ -111,6 +115,28 @@ class ParseResult(BaseModel):
     revises: bool = Field(default=False, description="the message corrects the previous record of the dialog")
     note: str | None = Field(default=None, description="what was changed and why, or why the estimate is such")
     remember: str | None = Field(default=None, description="a lasting fact about the user to offer remembering")
+    unknown_terms: list[str] = Field(
+        default=[], description="words or dishes the model could not identify (the bot looks them up)"
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _foods_without_numbers(cls, data: Any) -> Any:
+        """A food with kcal null is the model admitting it does not know the dish (live: gpt-oss lists
+        "гульчатай" with null macros): move it to unknown_terms instead of rejecting the whole answer."""
+        if not isinstance(data, dict) or not isinstance(data.get("foods"), list):
+            return data
+        known, unknown = [], []
+        for f in data["foods"]:
+            if isinstance(f, dict) and f.get("kcal") is None:
+                unknown.append(_PIECES_SUFFIX.sub("", str(f.get("description") or "")))
+            else:
+                known.append(f)
+        if not unknown:
+            return data
+        terms = data.get("unknown_terms")
+        terms = [terms] if isinstance(terms, str) else terms if isinstance(terms, list) else []
+        return {**data, "foods": known, "unknown_terms": [*terms, *unknown]}
 
     @field_validator("remember", mode="before")
     @classmethod
@@ -120,6 +146,18 @@ class ParseResult(BaseModel):
             return None
         text = " ".join(v.split())
         return text if 0 < len(text) <= REMEMBER_MAX else None
+
+    @field_validator("unknown_terms", mode="before")
+    @classmethod
+    def _unknown_terms(cls, v: Any) -> list[str]:
+        """Accept a string or a list; strip, dedupe, cap. Junk is dropped, never rejected."""
+        items = [v] if isinstance(v, str) else v if isinstance(v, list) else []
+        terms: list[str] = []
+        for item in items:
+            term = " ".join(str(item).split()).strip(" .,!?«»\"'") if isinstance(item, str) else ""
+            if term and len(term) <= UNKNOWN_TERM_LEN and term.casefold() not in {t.casefold() for t in terms}:
+                terms.append(term)
+        return terms[:UNKNOWN_TERMS_MAX]
 
     def is_record(self) -> bool:
         """Whether this is something to save (the rest is an answer or a clarifying question)."""

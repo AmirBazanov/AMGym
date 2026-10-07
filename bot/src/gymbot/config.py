@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     openrouter_fallback_models: list[str] = ["inclusionai/ling-3.0-flash-sante:free", "apodex/apodex-1.1-mini:free"]
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
+    # Web search for unknown dishes (gymbot.services.food_lookup). Open Food Facts and Wikipedia need no key;
+    # Tavily (https://tavily.com, free tier) is an extra source used only when the key is set.
+    tavily_api_key: str = ""
+
     # Speech-to-text for voice messages: any OpenAI-compatible /audio/transcriptions endpoint.
     # Default is Groq's free tier (key at https://console.groq.com/keys). Empty key = voice is off.
     stt_api_key: str = ""

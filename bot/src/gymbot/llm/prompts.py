@@ -18,7 +18,7 @@ SYSTEM_PROMPT = """Ты дневник тренировок, питания и �
  "exercises": [{"exercise": str, "sets": [{"reps": int, "weight_kg": float|null, "drop_index": int}]}],
  "foods": [{"description": str, "grams": float|null, "kcal": float, "protein_g": float, "fat_g": float, "carbs_g": float}],
  "wellbeing": {"sleep_hours": float|null, "sleep_quality": int|null, "energy": int|null, "mood": int|null, "pains": [{"place": str, "severity": int|null}], "note": str|null}|null,
- "clarification": str|null, "revises": bool, "note": str|null, "remember": str|null}
+ "clarification": str|null, "revises": bool, "note": str|null, "remember": str|null, "unknown_terms": [str]}
 Правила:
 - "3 по 10", "3х10" = три подхода по 10, каждый подход отдельным элементом sets. Вес в кг, без веса null.
 - Дропсет "12-6-6 с 20 кг" = подходы drop_index 0,1,2; вес снижения не указан = null.
@@ -27,7 +27,7 @@ SYSTEM_PROMPT = """Ты дневник тренировок, питания и �
 - Штуки ("3 самсы", "2 яйца", "три штуки"): grams = N × вес одной штуки, в description ", N шт".
 - Порции: каса, касушка = пиала ~300 г (плов, лагман, шурпа, мастава); лепёшка ~250 г; самса ~120 г; манты ~60 г/шт; шашлык, палочка ~100 г мяса; курт = сушёный солёный творожный шарик, маленький ~10 г, обычный ~25 г (на 100 г ~260 ккал, Б25 Ж15 У3). Знай: чучвара, димлама, нарын, чак-чак, казы.
 - Названия продуктов пиши грамотно ("лепёшка", не "лепёка").
-- Слово похоже на ошибку распознавания речи или неизвестный продукт: не придумывай ему КБЖУ и не заменяй другим блюдом («курты» это не чучвара); запиши понятные позиции, а в clarification один короткий вопрос ("косушка — это что?").
+- Незнакомое слово или ошибка распознавания речи: не придумывай КБЖУ и не заменяй другим блюдом («курты» не чучвара); запиши понятное, слово в unknown_terms в начальной форме ("курт", не "куртов"), в clarification вопрос ("косушка — это что?").
 - Правка предыдущей записи (количество, вес, название, "нет, четыре") = ПОЛНАЯ исправленная запись того же kind, revises=true. Новая еда или упражнение = только она, revises=false.
 - Комментарий о качестве, составе, размере, готовке или сомнение в оценке без чисел: не спрашивай числа, сам поправь оценку (плохое качество или много теста: белок −25%, жир +15%; "большая": граммы +30%; "без масла": жир −50%) и верни ПОЛНУЮ запись, revises=true.
 - Сон, боли, усталость, энергия, настроение: kind="wellbeing", шкалы 1-5 (плохо, "сил мало" = 2, нормально = 3, отлично = 5), не сказано = null; боль с местом как сказано, severity если сказано; прочее в wellbeing.note.
@@ -88,6 +88,12 @@ EXAMPLES: list[tuple[str, str]] = [
         ('{"kind":"food","exercises":[],"foods":['
         '{"description":"манты, 3 шт","grams":270,"kcal":620,"protein_g":30,"fat_g":30,"carbs_g":57}],'
         '"clarification":null,"revises":false,"note":null,"remember":"манты ~90 г/шт"}'),
+    ),
+    (
+        "гречка 200 г и 2 чапчуки",
+        ('{"kind":"food","exercises":[],"foods":['
+        '{"description":"гречка варёная","grams":200,"kcal":220,"protein_g":8,"fat_g":2,"carbs_g":43}],'
+        '"clarification":"«чапчук» — это что?","revises":false,"note":null,"unknown_terms":["чапчук"]}'),
     ),
     (
         "сколько белка в 100 г творога?",
@@ -189,3 +195,22 @@ def build_plan_messages(context: str, draft_json: str) -> list[dict[str, str]]:
         {"role": "system", "content": PLAN_SYSTEM_PROMPT},
         {"role": "user", "content": f"Сводка:\n{context}\n\nЧерновик:\n{draft_json}"},
     ]
+
+
+# ---- Unknown dish lookup (gymbot.services.food_lookup.suggest): JSON with variants ----
+
+LOOKUP_SYSTEM_PROMPT = """Ты нутрициолог. Парсер дневника питания не узнал слово из сообщения. Тебе дают слово, фразу пользователя и выдержки из источников. Предложи до 3 вариантов, что это за еда, с КБЖУ на ОДНУ штуку или одну обычную порцию. Отвечай ТОЛЬКО JSON:
+{"options": [{"name": str, "portion_g": float, "kcal": float, "protein_g": float, "fat_g": float, "carbs_g": float, "note": str}]}
+Правила:
+- name по-русски до 40 символов, с пояснением в скобках: "курт (сушёный сыр)".
+- Штучное (курт, пирожок, кутаб, самса): portion_g = вес ОДНОЙ штуки (курт 10-25 г, пирожок 50-120 г), не 100 г; иначе обычная порция. Учитывай размер из фразы ("маленьких" = меньше). Количество из фразы не умножай.
+- КБЖУ = значения на 100 г × portion_g / 100. Пример: курт 260 ккал на 100 г, штука 10 г = 26 ккал.
+- В note коротко откуда: "на 100 г 260 ккал, по Open Food Facts". Нет цифр в источниках: оценка по составу, note "оценка по описанию". Нет источников: note "оценка без источника".
+- Варианты разные (разные блюда, виды или размеры), самый вероятный первым. Не подменяй слово другим блюдом, о котором источники не говорят.
+- Не понимаешь, что это за еда: {"options": []}.
+"""
+
+
+def build_lookup_messages(term: str, phrase: str, sources_text: str) -> list[dict[str, str]]:
+    user = f"Слово: {term}\nФраза: {phrase or term}\nИсточники:\n{sources_text or 'нет'}"
+    return [{"role": "system", "content": LOOKUP_SYSTEM_PROMPT}, {"role": "user", "content": user}]

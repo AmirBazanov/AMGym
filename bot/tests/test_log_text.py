@@ -15,6 +15,7 @@ from gymbot.handlers import log_text
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.llm.prompts import EXAMPLES
 from gymbot.llm.schemas import ParseResult
+from gymbot.services import food_lookup
 
 T0 = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
 USER = 42
@@ -704,3 +705,538 @@ async def test_revision_carries_the_offered_fact(llm, settings, db):
     assert buttons(second) == [["save", "drop"], ["remember"]]
     assert "Запомнить: «самса ~150 г»" in second.answer.await_args.args[0]
     assert log_text.FACTS[token_of(second)].text == "самса ~150 г"
+
+
+# ---- unknown words: web lookup variants (gymbot.services.food_lookup) ----
+
+KURT = food_lookup.Option(
+    name="курт (сушёный сыр)", portion_g=25, kcal=65, protein_g=6, fat_g=4, carbs_g=1,
+    note="на 100 г 260 ккал, по Open Food Facts",
+)  # fmt: skip
+KURT_SMALL = food_lookup.Option(
+    name="курт (творожный)", portion_g=10, kcal=26, protein_g=2.5, fat_g=1.5, carbs_g=0.3
+)
+KUTAB = food_lookup.Option(
+    name="кутаб (лепёшка с зеленью)", portion_g=150, kcal=330, protein_g=10, fat_g=12, carbs_g=44, note="оценка"
+)
+BURSAK = food_lookup.Option(
+    name="бурсак (жареное тесто)", portion_g=30, kcal=110, protein_g=2, fat_g=6, carbs_g=11,
+    note="оценка по описанию",
+)  # fmt: skip
+
+TEA = {"description": "чай", "grams": 200, "kcal": 2, "protein_g": 0, "fat_g": 0, "carbs_g": 0.5}
+UNCLEAR_KURT = {"kind": "food", "foods": [], "clarification": "«курт» — это что?", "unknown_terms": ["курт"]}
+BURSAK_TEXT = "съел пару бурсаков и чай"
+BURSAK_WITH_TEA = {
+    "kind": "food",
+    "foods": [TEA],
+    "clarification": "«бурсак» — это что?",
+    "unknown_terms": ["бурсак"],
+}
+
+
+class FakeFind:
+    """Replaces food_lookup.find_options: options per term (or `default`), a call log, optional failure."""
+
+    def __init__(self):
+        self.default: list | Exception = []
+        self.by_term: dict[str, list | Exception] = {}
+        self.calls: list[tuple] = []
+
+    async def __call__(self, term, phrase, llm, http, *, tavily_key=""):
+        self.calls.append((term, phrase, llm, http, tavily_key))
+        result = self.by_term.get(term, self.default)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def terms(self) -> list[str]:
+        return [c[0] for c in self.calls]
+
+
+@pytest.fixture
+def find(monkeypatch):
+    fake = FakeFind()
+    monkeypatch.setattr(food_lookup, "find_options", fake)
+    return fake
+
+
+@pytest.fixture(autouse=True)
+def clean_lookups():
+    log_text.LOOKUPS.clear()
+    yield
+    log_text.LOOKUPS.clear()
+
+
+def reply_markup(msg):
+    return msg.answer.await_args.kwargs["reply_markup"]
+
+
+def edited_markup(cb):
+    return cb.message.edit_text.await_args.kwargs["reply_markup"]
+
+
+def labels(markup) -> list[list[str]]:
+    return [[b.text for b in row] for row in markup.inline_keyboard]
+
+
+def data(markup) -> list[list[str]]:
+    return [[b.callback_data for b in row] for row in markup.inline_keyboard]
+
+
+def lookup_token(msg) -> str:
+    for row in reply_markup(msg).inline_keyboard:
+        for b in row:
+            if b.callback_data.startswith("lookup:"):
+                return b.callback_data.split(":")[1]
+    raise AssertionError("no lookup button")
+
+
+async def pick(token: str, choice: int | str, user_id: int = USER):
+    cb = callback(f"lookup:{token}:{choice}", user_id)
+    await log_text.pick(cb)
+    return cb
+
+
+def stale_alert(cb) -> bool:
+    return cb.answer.await_args == ((log_text.LOOKUP_STALE,), {"show_alert": True})
+
+
+async def test_unclear_message_with_variants_offers_buttons_instead_of_the_question(llm, settings, db, find):
+    llm.answers = [UNCLEAR_KURT]
+    find.default = [KURT, KURT_SMALL]
+    msg = await send("съел 5 маленьких куртов", llm, settings, db)
+    token = lookup_token(msg)
+    text = msg.answer.await_args.args[0]
+    assert "Не знаю «курт»" in text and "Варианты на 5 шт" in text
+    assert "курт (сушёный сыр), 25 г: 65 ккал" in text and "(на 100 г 260 ккал, по Open Food Facts)" in text
+    assert "Уточни" not in text and "это что" not in text  # the model's question is replaced by the variants
+    kb = reply_markup(msg)
+    assert [row[0] for row in labels(kb)[:2]] == ["1 · курт 25 г · 65 ккал", "2 · курт 10 г · 26 ккал"]
+    assert data(kb) == [
+        [f"lookup:{token}:0"], [f"lookup:{token}:1"], [f"lookup:{token}:other", f"drop:{token}"],
+    ]  # fmt: skip
+    assert labels(kb)[-1] == ["Другое", "✖ Отмена"]
+    assert not log_text.PENDING  # nothing to save yet
+    assert token in log_text.LOOKUPS
+    assert log_text.CONTEXT[USER].token is None
+
+
+async def test_lookup_gets_the_original_text_and_key(llm, settings, db, find):
+    llm.answers = [UNCLEAR_KURT]
+    find.default = [KURT]
+    keyed = settings.model_copy(update={"tavily_api_key": "tk"})
+    await send("съел 5 маленьких куртов", llm, keyed, db)
+    ((term, phrase, used_llm, http, key),) = find.calls
+    assert (term, phrase, key) == ("курт", "съел 5 маленьких куртов", "tk")
+    assert used_llm is llm.client and http is llm.client.http
+
+
+async def test_tap_on_a_variant_makes_a_record_that_still_needs_save(llm, settings, db, find):
+    text = "съел 5 маленьких куртов"
+    llm.answers = [UNCLEAR_KURT]
+    find.default = [KURT, KURT_SMALL]
+    msg = await send(text, llm, settings, db)
+    token = lookup_token(msg)
+
+    cb = await pick(token, 0)
+    pending = log_text.PENDING[token]
+    assert pending.user_id == USER and pending.raw_text == text
+    assert pending.result.kind == "food" and pending.result.unknown_terms == []
+    (food_line,) = pending.result.foods
+    assert food_line.description == "курт (сушёный сыр), 5 шт" and food_line.grams == 125
+    assert food_line.kcal == pytest.approx(5 * KURT.kcal, abs=1)
+    cb.message.edit_text.assert_awaited_once()
+    shown = cb.message.edit_text.await_args.args[0]
+    assert shown.startswith("Записать еду?") and "курт (сушёный сыр), 5 шт 125 г" in shown
+    assert "Не знаю" not in shown and "lookup" not in shown
+    kb = edited_markup(cb)
+    assert labels(kb)[0] == ["✅ Сохранить", "✖ Отмена"]
+    assert data(kb) == [[f"save:{token}", f"drop:{token}"]]  # no variant buttons remain
+    assert token not in log_text.LOOKUPS
+    ex = log_text.CONTEXT[USER]
+    assert ex.token == token and ex.result is pending.result and ex.raw_text == text
+    cb.answer.assert_awaited_once_with()
+
+    await log_text.save(callback(f"save:{token}"), settings, db)
+    async with db() as s:
+        (row,) = (await s.scalars(select(FoodEntry))).all()
+    assert row.description == "курт (сушёный сыр), 5 шт" and float(row.grams) == 125
+    assert row.raw_text == text
+    assert token not in log_text.PENDING and USER not in log_text.CONTEXT
+
+
+async def test_next_message_after_a_tap_sees_the_picked_record(llm, settings, db, find):
+    llm.answers = [UNCLEAR_KURT, food(1, "курт (сушёный сыр)", revises=True)]
+    find.default = [KURT]
+    msg = await send("съел 5 курт", llm, settings, db)
+    await pick(lookup_token(msg), 0)
+    await send("нет, шесть", llm, settings, db, T0 + timedelta(minutes=1))
+    sent = llm.last_messages()
+    assert sent[-3] == "съел 5 курт"
+    assert json.loads(sent[-2])["foods"][0]["description"] == "курт (сушёный сыр), 5 шт"
+
+
+async def test_record_with_an_unknown_word_keeps_save_cancel_first(llm, settings, db, find):
+    llm.answers = [BURSAK_WITH_TEA]
+    find.default = [BURSAK]
+    msg = await send(BURSAK_TEXT, llm, settings, db)
+    token = token_of(msg)  # the first button is still "Сохранить"
+    assert token in log_text.PENDING and token in log_text.LOOKUPS
+    kb = reply_markup(msg)
+    assert labels(kb)[0] == ["✅ Сохранить", "✖ Отмена"]
+    assert data(kb)[1:] == [[f"lookup:{token}:0"], [f"lookup:{token}:other"]]
+    assert labels(kb)[2] == ["Другое"]
+    text = msg.answer.await_args.args[0]
+    assert text.startswith("Записать еду?") and "• чай 200 г" in text
+    assert "Не знаю «бурсак». Варианты на 2 шт:" in text
+    assert "«бурсак» — это что?" not in text  # replaced by the variants
+    assert log_text.PENDING[token].result.foods[0].description == "чай"  # nothing was added yet
+
+    cb = await pick(token, 0)
+    result = log_text.PENDING[token].result
+    assert [f.description for f in result.foods] == ["чай", "бурсак (жареное тесто), 2 шт"]
+    assert result.foods[1].grams == 60
+    assert result.note == "бурсак (жареное тесто): оценка по описанию"
+    assert result.clarification is None and result.unknown_terms == []
+    assert log_text.PENDING[token].raw_text == BURSAK_TEXT
+    shown = cb.message.edit_text.await_args.args[0]
+    assert "бурсак (жареное тесто), 2 шт" in shown and "оценка по описанию" in shown and "Не знаю" not in shown
+    assert labels(edited_markup(cb)) == [["✅ Сохранить", "✖ Отмена"]]
+    assert token not in log_text.LOOKUPS
+
+
+async def test_variant_replaces_the_word_the_model_also_put_in_foods(llm, settings, db, find):
+    made_up = {"description": "курт", "grams": 100, "kcal": 500, "protein_g": 30, "fat_g": 30, "carbs_g": 20}
+    llm.answers = [{**UNCLEAR_KURT, "kind": "food", "foods": [TEA, made_up]}]
+    find.default = [KURT]
+    msg = await send("чай и 3 курта", llm, settings, db)
+    token = token_of(msg)
+    await pick(token, 0)
+    foods = log_text.PENDING[token].result.foods
+    assert [f.description for f in foods] == ["чай", "курт (сушёный сыр), 3 шт"]
+    assert foods[1].grams == 75 and foods[1].kcal == pytest.approx(3 * KURT.kcal, abs=1)
+
+
+async def test_other_only_shows_a_hint(llm, settings, db, find):
+    llm.answers = [BURSAK_WITH_TEA]
+    find.default = [BURSAK]
+    msg = await send(BURSAK_TEXT, llm, settings, db)
+    token = token_of(msg)
+    before = log_text.PENDING[token].result
+    cb = await pick(token, "other")
+    cb.answer.assert_awaited_once_with(log_text.OTHER_HINT, show_alert=True)
+    cb.message.edit_text.assert_not_awaited()
+    assert token in log_text.LOOKUPS and log_text.PENDING[token].result is before
+
+
+async def test_other_on_an_unclear_message_keeps_the_variants(llm, settings, db, find):
+    llm.answers = [UNCLEAR_KURT]
+    find.default = [KURT]
+    msg = await send("курт", llm, settings, db)
+    token = lookup_token(msg)
+    cb = await pick(token, "other")
+    cb.answer.assert_awaited_once_with(log_text.OTHER_HINT, show_alert=True)
+    assert token in log_text.LOOKUPS
+    cb = await pick(token, 0)  # still works after "Другое"
+    assert token in log_text.PENDING and cb.message.edit_text.await_count == 1
+
+
+async def test_someone_elses_tap_changes_nothing(llm, settings, db, find):
+    llm.answers = [BURSAK_WITH_TEA]
+    find.default = [BURSAK]
+    msg = await send(BURSAK_TEXT, llm, settings, db)
+    token = token_of(msg)
+    before = log_text.PENDING[token].result
+    cb = await pick(token, 0, user_id=7)
+    assert stale_alert(cb)
+    cb.message.edit_text.assert_not_awaited()
+    assert log_text.PENDING[token].result is before and token in log_text.LOOKUPS
+    cb = await pick(token, 0)  # the owner can still pick
+    assert len(log_text.PENDING[token].result.foods) == 2
+
+
+async def test_double_tap_adds_the_variant_once(llm, settings, db, find):
+    llm.answers = [BURSAK_WITH_TEA]
+    find.default = [BURSAK, food_lookup.Option(name="бурсак (казахский)", portion_g=40, kcal=150, protein_g=3,
+                                                fat_g=8, carbs_g=16)]  # fmt: skip
+    msg = await send(BURSAK_TEXT, llm, settings, db)
+    token = token_of(msg)
+    first = await pick(token, 0)
+    second = await pick(token, 1)
+    assert stale_alert(second)
+    first.message.edit_text.assert_awaited_once()
+    second.message.edit_text.assert_not_awaited()
+    foods = log_text.PENDING[token].result.foods
+    assert [f.description for f in foods] == ["чай", "бурсак (жареное тесто), 2 шт"]
+
+
+async def test_tap_after_cancel_is_stale(llm, settings, db, find):
+    llm.answers = [BURSAK_WITH_TEA]
+    find.default = [BURSAK]
+    msg = await send(BURSAK_TEXT, llm, settings, db)
+    token = token_of(msg)
+    await log_text.drop(callback(f"drop:{token}"))
+    assert token not in log_text.LOOKUPS and token not in log_text.PENDING
+    cb = await pick(token, 0)
+    assert stale_alert(cb)
+    assert token not in log_text.PENDING  # a stale tap must not resurrect the record
+    cb.message.edit_text.assert_not_awaited()
+
+
+async def test_tap_after_save_is_stale(llm, settings, db, find):
+    llm.answers = [BURSAK_WITH_TEA]
+    find.default = [BURSAK]
+    msg = await send(BURSAK_TEXT, llm, settings, db)
+    token = token_of(msg)
+    await log_text.save(callback(f"save:{token}"), settings, db)
+    assert token not in log_text.LOOKUPS
+    cb = await pick(token, 0)
+    assert stale_alert(cb)
+    async with db() as s:
+        rows = (await s.scalars(select(FoodEntry))).all()
+    assert [r.description for r in rows] == ["чай"]  # the variant was not added after saving
+
+
+async def test_cancel_of_an_unclear_message_ends_it(llm, settings, db, find):
+    llm.answers = [UNCLEAR_KURT]
+    find.default = [KURT]
+    msg = await send("курт", llm, settings, db)
+    token = lookup_token(msg)
+    cb = callback(f"drop:{token}")
+    await log_text.drop(cb)
+    cb.message.edit_text.assert_awaited_once_with("Отменено.")
+    assert token not in log_text.LOOKUPS and USER not in log_text.CONTEXT
+    assert stale_alert(await pick(token, 0))
+    assert not log_text.PENDING
+
+
+async def test_tap_after_a_newer_message_to_an_unclear_one_is_stale(llm, settings, db, find):
+    llm.answers = [UNCLEAR_KURT, {"kind": "unknown", "clarification": "Сколько штук?"}]
+    find.default = [KURT]
+    msg = await send("курт", llm, settings, db)
+    await send("ну эти", llm, settings, db, T0 + timedelta(minutes=1))
+    cb = await pick(lookup_token(msg), 0)
+    assert stale_alert(cb)
+    assert not log_text.PENDING
+
+
+async def test_revision_makes_the_old_variants_stale(llm, settings, db, find):
+    llm.answers = [BURSAK_WITH_TEA, {"kind": "food", "revises": True, "foods": [TEA, {**TEA, "description": "кофе"}]}]
+    find.default = [BURSAK]
+    first = await send(BURSAK_TEXT, llm, settings, db)
+    old = token_of(first)
+    second = await send("и кофе, без бурсаков", llm, settings, db, T0 + timedelta(minutes=1))
+    assert old not in log_text.LOOKUPS and old not in log_text.PENDING
+    assert not log_text.LOOKUPS  # the new preview has no unknown words, so no variants
+    assert buttons(second) == [["save", "drop"]]
+    assert stale_alert(await pick(old, 0))
+    assert [f.description for f in log_text.PENDING[token_of(second)].result.foods] == ["чай", "кофе"]
+
+
+async def test_revision_that_still_has_the_unknown_word_gets_fresh_variants(llm, settings, db, find):
+    again = {**BURSAK_WITH_TEA, "revises": True}
+    llm.answers = [BURSAK_WITH_TEA, again]
+    find.default = [BURSAK]
+    first = await send(BURSAK_TEXT, llm, settings, db)
+    second = await send("нет, три бурсака", llm, settings, db, T0 + timedelta(minutes=1))
+    old, new = token_of(first), token_of(second)
+    assert old != new and old not in log_text.LOOKUPS and new in log_text.LOOKUPS
+    assert stale_alert(await pick(old, 0))
+    await pick(new, 0)
+    assert log_text.PENDING[new].result.foods[-1].description == "бурсак (жареное тесто), 3 шт"
+
+
+# ---- no variants: exactly the old behaviour ----
+
+
+async def test_no_variants_for_a_record_is_the_old_preview(llm, settings, db, find):
+    llm.answers = [BURSAK_WITH_TEA]
+    find.default = []
+    msg = await send(BURSAK_TEXT, llm, settings, db)
+    expected = log_text.render_preview(ParseResult.model_validate(BURSAK_WITH_TEA), source_text=BURSAK_TEXT)
+    assert msg.answer.await_args.args[0] == expected
+    assert "Уточни: «бурсак» — это что?" in expected
+    assert buttons(msg) == [["save", "drop"]]
+    assert not log_text.LOOKUPS and token_of(msg) in log_text.PENDING
+
+
+async def test_no_variants_for_an_unclear_message_is_the_models_question(llm, settings, db, find):
+    llm.answers = [UNCLEAR_KURT]
+    find.default = []
+    msg = await send("съел 5 курт", llm, settings, db)
+    msg.answer.assert_awaited_once_with("«курт» — это что?")  # plain text, no keyboard
+    assert not log_text.LOOKUPS and not log_text.PENDING
+    assert find.terms() == ["курт"]
+
+
+async def test_kind_unknown_with_unknown_terms_gets_variants_too(llm, settings, db, find):
+    llm.answers = [{"kind": "unknown", "clarification": "«курт» — это что?", "unknown_terms": ["курт"]}]
+    find.default = [KURT]
+    msg = await send("курт", llm, settings, db)
+    assert "Не знаю «курт»" in msg.answer.await_args.args[0]
+    assert lookup_token(msg) in log_text.LOOKUPS
+
+
+async def test_lookup_is_not_called_without_unknown_terms(llm, settings, db, find):
+    llm.answers = [food(1), {"kind": "unknown", "clarification": "Сколько штук?"}]
+    find.default = [KURT]
+    await send("самса", llm, settings, db)
+    await send("ну эту", llm, settings, db, T0 + timedelta(minutes=1))
+    assert find.calls == [] and not log_text.LOOKUPS
+
+
+async def test_lookup_is_not_called_for_questions_and_workouts(llm, settings, db, find):
+    llm.answers = [
+        {"kind": "question", "clarification": "В курте около 260 ккал.", "unknown_terms": ["курт"]},
+        {**workout("жим лёжа"), "unknown_terms": ["курт"]},
+    ]
+    find.default = [KURT]
+    await send("сколько ккал в курте?", llm, settings, db)
+    await send("жим 3х10 на 60", llm, settings, db, T0 + timedelta(minutes=1))
+    assert find.calls == [] and not log_text.LOOKUPS
+
+
+async def test_question_about_a_pending_record_gets_no_variants(llm, settings, db, find):
+    llm.answers = [food(1), {"kind": "unknown", "clarification": "«курт» — это что?", "unknown_terms": ["курт"]}]
+    find.default = [KURT]
+    first = await send("самса", llm, settings, db)
+    second = await send("и курт", llm, settings, db, T0 + timedelta(minutes=1))
+    assert find.calls == [] and not log_text.LOOKUPS  # variants would edit another preview
+    assert second.answer.await_args.args[0] == "«курт» — это что?"
+    assert token_of(first) in log_text.PENDING and log_text.CONTEXT[USER].token == token_of(first)
+
+
+async def test_at_most_two_words_are_looked_up(llm, settings, db, find):
+    answer = {**BURSAK_WITH_TEA, "unknown_terms": ["курт", "кутаб", "бурсак"], "clarification": "что это?"}
+    llm.answers = [answer]
+    find.by_term = {"курт": [KURT], "кутаб": [KUTAB]}
+    msg = await send("чай, курт, кутаб, бурсак", llm, settings, db)
+    assert find.terms() == ["курт", "кутаб"]
+    text = msg.answer.await_args.args[0]
+    assert "Не знаю «курт»" in text and "Не знаю «кутаб»" in text and "Не знаю «бурсак»" not in text
+    assert "Уточни: «бурсак» — это что?" in text  # the rest stays a question
+    assert "что это?" not in text  # the model's own wording is replaced
+    token = token_of(msg)
+    assert data(reply_markup(msg))[1:] == [
+        [f"lookup:{token}:0"], [f"lookup:{token}:1"], [f"lookup:{token}:other"],
+    ]  # fmt: skip
+
+
+async def test_word_without_options_stays_a_question_when_another_has_them(llm, settings, db, find):
+    answer = {**BURSAK_WITH_TEA, "unknown_terms": ["курт", "кутаб"], "clarification": "что это?"}
+    llm.answers = [answer]
+    find.by_term = {"курт": [], "кутаб": [KUTAB]}
+    msg = await send("чай, курт, кутаб", llm, settings, db)
+    text = msg.answer.await_args.args[0]
+    assert "Не знаю «кутаб»" in text and "Не знаю «курт»" not in text
+    assert "Уточни: «курт» — это что?" in text
+    token = token_of(msg)
+    await pick(token, 0)
+    result = log_text.PENDING[token].result
+    assert result.unknown_terms == ["курт"] and result.clarification == "«курт» — это что?"
+    assert token not in log_text.LOOKUPS  # nothing left to pick
+
+
+async def test_two_words_are_resolved_one_tap_at_a_time(llm, settings, db, find):
+    answer = {**BURSAK_WITH_TEA, "unknown_terms": ["курт", "кутаб"]}
+    llm.answers = [answer]
+    find.by_term = {"курт": [KURT, KURT_SMALL], "кутаб": [KUTAB]}
+    msg = await send("чай, курт, кутаб", llm, settings, db)
+    token = token_of(msg)
+
+    cb = await pick(token, 0)
+    assert token in log_text.LOOKUPS  # кутаб is still open
+    shown = cb.message.edit_text.await_args.args[0]
+    assert "Не знаю «кутаб»" in shown and "Не знаю «курт»" not in shown
+    assert data(edited_markup(cb)) == [
+        [f"save:{token}", f"drop:{token}"], [f"lookup:{token}:2"], [f"lookup:{token}:other"],
+    ]  # the numbers of the buttons are kept
+    assert [f.description for f in log_text.PENDING[token].result.foods] == ["чай", "курт (сушёный сыр)"]
+
+    again = await pick(token, 1)  # another variant for the word that is already resolved
+    again.answer.assert_awaited_once_with("Для «курт» вариант уже выбран.")
+    again.message.edit_text.assert_not_awaited()
+    assert len(log_text.PENDING[token].result.foods) == 2
+
+    await pick(token, 2)
+    assert [f.description for f in log_text.PENDING[token].result.foods] == [
+        "чай", "курт (сушёный сыр)", "кутаб (лепёшка с зеленью)",
+    ]  # fmt: skip
+    assert token not in log_text.LOOKUPS
+
+
+async def test_bad_choice_is_ignored(llm, settings, db, find):
+    llm.answers = [BURSAK_WITH_TEA]
+    find.default = [BURSAK]
+    msg = await send(BURSAK_TEXT, llm, settings, db)
+    token = token_of(msg)
+    for choice in ("9", "x", ""):
+        cb = await pick(token, choice)
+        cb.answer.assert_awaited_once_with()
+        cb.message.edit_text.assert_not_awaited()
+    assert token in log_text.LOOKUPS and len(log_text.PENDING[token].result.foods) == 1
+
+
+async def test_lookup_failure_never_costs_the_preview(llm, settings, db, find):
+    llm.answers = [BURSAK_WITH_TEA]
+    find.default = RuntimeError("boom")
+    msg = await send(BURSAK_TEXT, llm, settings, db)  # no exception
+    expected = log_text.render_preview(ParseResult.model_validate(BURSAK_WITH_TEA), source_text=BURSAK_TEXT)
+    assert msg.answer.await_args.args[0] == expected
+    assert buttons(msg) == [["save", "drop"]] and not log_text.LOOKUPS
+
+
+async def test_lookup_failure_for_an_unclear_message_keeps_the_question(llm, settings, db, find):
+    llm.answers = [UNCLEAR_KURT]
+    find.default = RuntimeError("boom")
+    msg = await send("курт", llm, settings, db)
+    msg.answer.assert_awaited_once_with("«курт» — это что?")
+    assert not log_text.LOOKUPS
+
+
+async def test_one_failing_word_drops_all_variants_but_not_the_preview(llm, settings, db, find):
+    answer = {**BURSAK_WITH_TEA, "unknown_terms": ["курт", "кутаб"]}
+    llm.answers = [answer]
+    find.by_term = {"курт": [KURT], "кутаб": RuntimeError("boom")}
+    msg = await send("чай, курт, кутаб", llm, settings, db)
+    assert buttons(msg) == [["save", "drop"]] and not log_text.LOOKUPS
+    assert "Уточни:" in msg.answer.await_args.args[0]
+
+
+async def test_variants_keep_the_voice_prefix(llm, settings, db, find):
+    prefix = "Распознал: «съел курт»\n\n"
+    llm.answers = [UNCLEAR_KURT]
+    find.default = [KURT]
+    msg = message("съел курт")
+    await log_text.process_text(msg, "съел курт", settings, db, llm.client, raw_text="[voice] съел курт", prefix=prefix)
+    assert msg.answer.await_args.args[0].startswith(prefix + "Не знаю «курт»")
+    token = lookup_token(msg)
+    cb = await pick(token, 0)
+    assert cb.message.edit_text.await_args.args[0].startswith(prefix + "Записать еду?")
+    assert log_text.PENDING[token].raw_text == "[voice] съел курт"
+
+
+async def test_variants_with_an_offered_fact_keep_the_remember_row(llm, settings, db, find):
+    llm.answers = [{**BURSAK_WITH_TEA, "remember": "бурсак ~30 г"}]
+    find.default = [BURSAK]
+    msg = await send(BURSAK_TEXT, llm, settings, db)
+    token = token_of(msg)
+    assert data(reply_markup(msg))[-1] == [f"remember:{token}"]
+    assert "Запомнить: «бурсак ~30 г»" in msg.answer.await_args.args[0]
+    cb = await pick(token, 0)
+    assert "Запомнить: «бурсак ~30 г»" in cb.message.edit_text.await_args.args[0]
+    assert data(edited_markup(cb))[-1] == [f"remember:{token}"]
+
+
+async def test_remember_tap_keeps_the_open_variants(llm, settings, db, find):
+    llm.answers = [{**BURSAK_WITH_TEA, "remember": "бурсак ~30 г"}]
+    find.default = [BURSAK]
+    msg = await send(BURSAK_TEXT, llm, settings, db)
+    token = token_of(msg)
+    cb = callback(f"remember:{token}")
+    await log_text.remember(cb, db)
+    rows = data(cb.message.edit_reply_markup.await_args.kwargs["reply_markup"])
+    assert rows[0] == [f"save:{token}", f"drop:{token}"]
+    assert [f"lookup:{token}:0"] in rows and [f"lookup:{token}:other"] in rows
+    assert [f"remember:{token}"] not in rows
