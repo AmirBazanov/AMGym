@@ -180,7 +180,7 @@ if grep -q '^BOT_TOKEN=.\+' "$APP_DIR/.env"; then
   DB="$APP_DIR/data/gym.db"
   if [ -f "$DB" ]; then
     sudo systemctl stop $SERVICE || true
-    cp -p "$DB" "$DB.bak-$(date +%Y%m%d-%H%M%S)"
+    cp "$DB" "$DB.bak-$(date +%Y%m%d-%H%M%S)"  # no -p: the copy's own time, so ls -t finds it
     ls -1t "$DB".bak-* 2>/dev/null | tail -n +6 | xargs -r rm -f
     echo "== database copied: $(ls -1t "$DB".bak-* | head -1)"
   fi
