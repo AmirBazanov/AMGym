@@ -66,9 +66,15 @@ async def mcp_client(app):
 class FakeBot:
     def __init__(self) -> None:
         self.calls: list[tuple[int, str, dict]] = []
+        self.fail_html = False  # when True, Telegram "rejects" HTML markup once
 
     async def send_message(self, chat_id, text, **kw):
         self.calls.append((chat_id, text, kw))
+        if self.fail_html and kw.get("parse_mode") == "HTML":
+            self.fail_html = False
+            from aiogram.exceptions import TelegramBadRequest
+
+            raise TelegramBadRequest(method=None, message="can't parse entities")  # type: ignore[arg-type]
         return types.SimpleNamespace(message_id=7)
 
 
@@ -264,7 +270,7 @@ async def test_send_message_goes_to_the_owner(tmp_path, db):
     bot = FakeBot()
     async with running(tmp_path, db, bot=bot) as (app, _), mcp_client(app) as client:
         out = data(await call(client, "send_message", text="Привет, это тест"))
-    assert out == {"sent": True, "message_id": 7}
+    assert out == {"sent": True, "message_id": 7, "html": False}
     (chat_id, text, kw) = bot.calls[0]
     assert chat_id == 42
     assert text == "Привет, это тест"
@@ -338,3 +344,17 @@ async def test_set_and_delete_reminder(tmp_path, db):
         assert (await call(client, "delete_reminder", id=made["id"])).is_error
     async with db() as session:
         assert (await session.scalars(select(Reminder))).all() == []
+
+
+async def test_send_message_html_and_fallback(tmp_path, db):
+    await make_owner(db)
+    bot = FakeBot()
+    async with running(tmp_path, db, bot=bot) as (app, _), mcp_client(app) as client:
+        out = data(await call(client, "send_message", text="<b>Питание</b>\nок", html=True))
+        assert out["sent"] and out["html"] is True
+        assert bot.calls[-1][2].get("parse_mode") == "HTML"
+
+        bot.fail_html = True  # Telegram rejects the markup once
+        out = data(await call(client, "send_message", text="<b>битая", html=True))
+        assert out["sent"] and out["html"] is False and "разметка" in out["note"]
+        assert bot.calls[-1][2].get("parse_mode") is None

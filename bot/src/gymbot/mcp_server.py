@@ -573,8 +573,12 @@ def build_mcp(
     # ---- delivery and service ----
 
     @tool(OUTSIDE)
-    async def send_message(text: Annotated[str, Field(max_length=MESSAGE_MAX)]) -> str:
-        """Отправить владельцу сообщение в Telegram от имени бота (простой текст, без разметки, до 4000 символов)."""
+    async def send_message(
+        text: Annotated[str, Field(max_length=MESSAGE_MAX)],
+        html: Annotated[bool, Field(description="Текст в HTML-разметке Telegram: <b>, <i>, <u>, <s>, <code>, <a href>; символы < > & в обычном тексте экранируй как &lt; &gt; &amp;")] = False,
+    ) -> str:
+        """Отправить владельцу сообщение в Telegram от имени бота, до 4000 символов. html=true включает
+        HTML-разметку Telegram (жирные заголовки, курсив); если Telegram её отклонит, сообщение уйдёт как простой текст."""
         if not text.strip():
             raise ToolError("Пустое сообщение.")
         if bot is None:
@@ -584,11 +588,19 @@ def build_mcp(
         chat_id = user.telegram_id if user else (settings.allowed_user_ids[0] if settings.allowed_user_ids else None)
         if chat_id is None:
             raise ToolError("Владелец ещё не писал боту: некому отправить.")
+        parse_mode = "HTML" if html else None
         try:
-            sent = await bot.send_message(chat_id, text, parse_mode=None)
+            sent = await bot.send_message(chat_id, text, parse_mode=parse_mode)
         except TelegramAPIError as e:
-            raise ToolError(f"Telegram не принял сообщение: {e}") from e
-        return dumps({"sent": True, "message_id": sent.message_id})
+            if parse_mode is None:
+                raise ToolError(f"Telegram не принял сообщение: {e}") from e
+            # Broken markup: deliver the content anyway rather than lose the report.
+            try:
+                sent = await bot.send_message(chat_id, text, parse_mode=None)
+            except TelegramAPIError as e2:
+                raise ToolError(f"Telegram не принял сообщение: {e2}") from e2
+            return dumps({"sent": True, "message_id": sent.message_id, "html": False, "note": "разметка отклонена, отправлено как текст"})
+        return dumps({"sent": True, "message_id": sent.message_id, "html": html})
 
     @tool(READ)
     async def service_status() -> str:
