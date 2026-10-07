@@ -176,6 +176,14 @@ sed "s#__HOME__#$HOME#g; s#__USER__#$USER#g; s#__MODULE__#$MODULE#g" "$APP_DIR/d
 sudo systemctl daemon-reload
 sudo systemctl enable $SERVICE >/dev/null
 if grep -q '^BOT_TOKEN=.\+' "$APP_DIR/.env"; then
+  # Migrations run at start: copy the database with the service stopped (consistent file), keep the last 5.
+  DB="$APP_DIR/data/gym.db"
+  if [ -f "$DB" ]; then
+    sudo systemctl stop $SERVICE || true
+    cp -p "$DB" "$DB.bak-$(date +%Y%m%d-%H%M%S)"
+    ls -1t "$DB".bak-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+    echo "== database copied: $(ls -1t "$DB".bak-* | head -1)"
+  fi
   sudo systemctl restart $SERVICE
   echo "== started; logs: journalctl -u $SERVICE -f"
 else
