@@ -1650,3 +1650,25 @@ async def test_overlap_check_failure_keeps_the_preview(llm, settings, db, monkey
     llm.answers = [workout("жим лёжа")]
     msg = await send("жим лёжа 10 на 60", llm, settings, db)
     assert msg.answer.await_args.args[0] == BENCH_PREVIEW and buttons(msg) == [["save", "drop"]]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Да, вижу: жим 82.5×8 ×2. Ничего не записано, пока не нажмёшь «Завершить».",
+        "Последний подход добавлен в 18:40, в мини-аппе 2 из 4",
+        "Я ничего не сохранил, это только превью.",
+        "Ты уже добавил вес, молодец",
+        "Ты вчера записал 3 подхода",
+        "к жиму добавилось 5 кг",
+    ],
+)
+def test_honest_diary_replies_are_not_claims(reply):
+    assert not log_text.claims_action(reply)
+
+
+@pytest.mark.parametrize(
+    "reply", ["Подход добавлен.", "Записал: жим 80×8.", "Я сохранил твой подход", "Готово, добавил подход в дневник"]
+)
+def test_bot_claims_are_caught(reply):
+    assert log_text.claims_action(reply)

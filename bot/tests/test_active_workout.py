@@ -404,11 +404,12 @@ def test_overlap_note_different_sets_comma_separated_and_bodyweight():
     assert "жим лёжа 80×8 ×2, 85×6; подтягивания 10 повт. —" in note  # first letter lowercased, "; " between
 
 
-def test_overlap_note_matches_by_containment_only_for_long_names():
-    exercises = [{"name": "жим лёжа", "sets": [{"weight": 80, "reps": 8, "done": True}]}]
-    assert aw.overlap_note(workout_in(exercises=exercises), ["жим лёжа в тренажёре"]) != ""
-    short = [{"name": "жим", "sets": [{"weight": 80, "reps": 8, "done": True}]}]
-    assert aw.overlap_note(workout_in(exercises=short), ["жим лёжа"]) == ""  # "жим" is shorter than 5
+def test_overlap_note_matches_exact_names_only():
+    exercises = [{"name": "Жим  лёжа", "sets": [{"weight": 80, "reps": 8, "done": True}]}]
+    assert aw.overlap_note(workout_in(exercises=exercises), ["жим лёжа"]) != ""  # case and spaces only
+    # Different exercises that contain each other's name: no warning, the owner must not skip a real save.
+    assert aw.overlap_note(workout_in(exercises=exercises), ["жим лёжа 30°"]) == ""
+    assert aw.overlap_note(workout_in(exercises=exercises), ["французский жим лёжа"]) == ""
 
 
 def test_overlap_note_empty_cases():

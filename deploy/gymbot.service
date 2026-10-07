@@ -14,7 +14,7 @@ ExecStart=__HOME__/.local/bin/uv run --project bot python -m __MODULE__
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
-TimeoutStopSec=20
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target

@@ -380,10 +380,23 @@ def wants_diary(text: str) -> bool:
 # "тебе видно?", "видишь в мини-аппе?": only the diary answer knows the workout in progress.
 ASKS_VISIBILITY = re.compile(r"мини[\s-]?апп?|миниапп?|mini ?app|\b(?:видно|видишь|вижу)\b", re.IGNORECASE)
 # A reply that is not a record must never claim an action: the bot writes only after «Сохранить».
-# "ты записал …" (what the user did) is not a claim of the bot.
-ACTION_CLAIM = re.compile(
-    r"(?<!ты )(?<!вы )(?:записал|запис(?:ано|ала)|добав(?:ил|лен|ила)|сохран(?:ил|ено|ила)|обновил)", re.IGNORECASE
-)
+# Checked per clause: a first-person past verb ("записал", "я сохранила") claims a write unless the clause
+# is about the user ("ты/вы …") or negated ("не записал"); a bare participle claims one only in a short
+# clause without numbers ("Подход добавлен."), so "подход добавлен в 18:40" or "ничего не записано" pass.
+_CLAUSES = re.compile(r"[^.!?;:\n,—–]+")
+_CLAIM_VERB = re.compile(r"(?<!\w)(?:записал|сохранил|добавил|обновил|внес|внёс)а?(?!\w)", re.IGNORECASE)
+_CLAIM_PARTICIPLE = re.compile(r"(?<!\w)(?:записан|сохран[её]н|добавлен|обновл[её]н)[аоы]?(?!\w)", re.IGNORECASE)
+_NOT_ME = re.compile(r"(?<!\w)(?:ты|вы|не|ничего)(?!\w)", re.IGNORECASE)
+
+
+def _claims_in(clause: str) -> bool:
+    if _NOT_ME.search(clause):
+        return False
+    if _CLAIM_VERB.search(clause):
+        return True
+    return bool(_CLAIM_PARTICIPLE.search(clause)) and len(clause.split()) <= 4 and not re.search(r"\d", clause)
+
+
 NO_ACTION = (
     "Я не записываю сам — чтобы записать, нажми «Сохранить» под превью. "
     "Отмеченные в мини-аппе подходы я вижу, только когда спросишь."
@@ -391,7 +404,9 @@ NO_ACTION = (
 
 
 def claims_action(reply: str | None) -> bool:
-    return bool(reply) and reply != MINIAPP_SETUP_ANSWER and bool(ACTION_CLAIM.search(reply or ""))
+    if not reply or reply == MINIAPP_SETUP_ANSWER:
+        return False
+    return any(_claims_in(c) for c in _CLAUSES.findall(reply))
 
 
 def honest(result: ParseResult) -> ParseResult:

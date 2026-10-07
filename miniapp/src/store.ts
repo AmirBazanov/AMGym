@@ -533,6 +533,13 @@ function applyServer(server: ServerState) {
     next.activePlanKey = null
     // The server holds exactly this: no PUT until something changes.
     next.activeSent = { id: restored.id, fp: activeFingerprint(restored) }
+  } else if (next.active && known.has(next.active.id)) {
+    // Finished on another device: the server already has it in the history. Keeping it here would show a
+    // workout in progress forever, and sets ticked here would be dropped by the idempotent POST.
+    next.active = null
+    next.activeSuggested = {}
+    next.activePlanKey = null
+    next.activeSent = null
   }
   // New baselines reach the prepared workout, and today's overrides also a started one, in place (empty
   // or app-suggested weights of sets not done only), whether or not the day plan request succeeds.

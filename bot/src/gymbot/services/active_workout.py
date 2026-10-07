@@ -125,8 +125,8 @@ async def current_out(session: AsyncSession, user_id: int, now_utc: datetime, tz
 
 
 def _same_exercise(a: str, b: str) -> bool:
-    na, nb = normalize(a), normalize(b)
-    return na == nb or (min(len(na), len(nb)) >= 5 and (na in nb or nb in na))
+    # Exact names only: «жим лёжа» vs «жим лёжа 30°» or «французский жим лёжа» are different exercises.
+    return normalize(a) == normalize(b)
 
 
 def _grouped(sets: list[tuple[float | None, int | None]]) -> str:
