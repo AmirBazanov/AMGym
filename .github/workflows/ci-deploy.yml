@@ -1,0 +1,53 @@
+name: CI and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Bot lint and tests
+        working-directory: bot
+        env:
+          BOT_TOKEN: "0:ci"
+        run: |
+          uv sync -q
+          uv run ruff check src tests
+          uv run pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: miniapp/package-lock.json
+      - name: Mini App typecheck, build, tests
+        working-directory: miniapp
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+          npm test
+
+  deploy:
+    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency: deploy-production
+    steps:
+      - name: Deploy over SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # setup-ec2.sh is idempotent: pulls main, installs deps, rebuilds the Mini App, restarts the service.
+          ssh -i ~/.ssh/deploy_key "$USER@$HOST" 'bash ~/amgym/deploy/setup-ec2.sh main'
+          ssh -i ~/.ssh/deploy_key "$USER@$HOST" 'systemctl is-active gymbot && journalctl -u gymbot -n 5 --no-pager'
