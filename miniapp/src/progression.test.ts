@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { Intensity, Prescription, ProgramExercise } from './program'
-import type { SetEntry, Workout } from './store'
+import type { Baseline, SetEntry, Workout } from './store'
 import {
   bestE1rm,
   doubleProgression,
   equipmentStep,
+  findBaseline,
   lastSameSession,
+  normalizeBaselines,
   percentOf1rm,
   roundToStep,
   suggestWeight,
@@ -281,5 +283,143 @@ describe('suggestWeight', () => {
     // record 20 * 1.4 = 28, 28 / 1.4 = 20 < 21
     const s = suggestWeight(history, ex('сгибания с гантелями', 'heavy', DROPSET))
     expect(s?.weight).toBe(21)
+  })
+})
+
+function bl(exercise: string, weightKg: number, reps: number | null, factId = 1): Baseline {
+  return { exercise, weightKg, reps, factId }
+}
+
+describe('normalizeBaselines', () => {
+  it('treats an absent field (older server) or a non-list as none', () => {
+    expect(normalizeBaselines(undefined)).toEqual([])
+    expect(normalizeBaselines(null)).toEqual([])
+    expect(normalizeBaselines({})).toEqual([])
+  })
+
+  it('drops entries without a name or a positive weight, reps below 1 are unknown', () => {
+    const raw = [
+      bl('жим лёжа', 90, 8),
+      bl('  ', 90, 8),
+      bl('присед', 0, 5),
+      bl('присед', Number.NaN, 5),
+      { exercise: 'тяга', reps: 5, factId: 2 },
+      bl('румынская тяга', 100, 0, 3),
+      null,
+    ]
+    expect(normalizeBaselines(raw)).toEqual([bl('жим лёжа', 90, 8), bl('румынская тяга', 100, null, 3)])
+  })
+})
+
+describe('findBaseline', () => {
+  it('ignores case and extra whitespace', () => {
+    expect(findBaseline([bl(' Жим  ЛЁЖА ', 90, 8)], 'жим лёжа')?.weightKg).toBe(90)
+  })
+
+  it('treats ё and е as the same letter, both ways (the server folds it too)', () => {
+    expect(findBaseline([bl('жим лежа', 90, 8)], 'жим лёжа')?.weightKg).toBe(90)
+    expect(findBaseline([bl('жим лёжа', 90, 8)], 'жим лежа')?.weightKg).toBe(90)
+    expect(findBaseline([bl('ЖИМ ЛЁЖА', 90, 8)], 'Жим лежа')?.weightKg).toBe(90)
+  })
+
+  it('needs the whole name: "жим лёжа" is not "жим лёжа 30°"', () => {
+    expect(findBaseline([bl('жим лёжа', 90, 8)], 'жим лёжа 30°')).toBeNull()
+    expect(findBaseline([bl('жим лёжа 30°', 70, 8)], 'жим лёжа')).toBeNull()
+  })
+
+  it('takes the newest entry (highest factId) when there are several', () => {
+    const list = [bl('жим лёжа', 95, 5, 7), bl('жим лёжа', 90, 8, 3)]
+    expect(findBaseline(list, 'жим лёжа')).toEqual(bl('жим лёжа', 95, 5, 7))
+  })
+})
+
+describe('suggestWeight from baselines', () => {
+  // The owner's own words from the bot chat.
+  const OWNER = [
+    bl('жим лёжа', 90, 8, 1),
+    bl('тяга вертикального блока', 80, 10, 2),
+    bl('румынская тяга', 100, null, 3),
+    bl('присед со штангой', 140, 1, 4),
+  ]
+
+  it('without a third argument behaves as before', () => {
+    expect(suggestWeight([], ex('жим лёжа', 'heavy'))).toBeNull()
+  })
+
+  it('reps known: Epley 1RM and the same share as the record branch', () => {
+    // 90 × (1 + 8 / 30) = 114; heavy for 12 reps: 114 / 1.4 = 81.4 -> 82.5
+    const s = suggestWeight([], ex('жим лёжа', 'heavy'), OWNER)
+    expect(s?.weight).toBe(82.5)
+    expect(s?.reason).toBe('по твоим словам 90 × 8 (1ПМ ≈ 114 кг), 71 % для 12 повторов')
+  })
+
+  it('reps 1: the weight itself is the max', () => {
+    // 140 / 1.4 = 100
+    const s = suggestWeight([], ex('присед со штангой', 'heavy'), OWNER)
+    expect(s?.weight).toBe(100)
+    expect(s?.reason).toBe('от твоего максимума 140 кг, 71 % для 12 повторов')
+  })
+
+  it('reps unknown: the stated weight is the max, same share as the record branch', () => {
+    // 100 / 1.4 = 71.4 -> 72.5
+    const s = suggestWeight([], ex('румынская тяга', 'heavy'), OWNER)
+    expect(s?.weight).toBe(72.5)
+    expect(s?.reason).toBe('по твоим словам ~100 кг (как максимум), 71 % для 12 повторов')
+  })
+
+  it('reps unknown follows the intensity like a record', () => {
+    // medium 64.3 -> 65, light 57.1 -> 57.5, no intensity = medium
+    expect(suggestWeight([], ex('румынская тяга', 'medium'), OWNER)?.weight).toBe(65)
+    expect(suggestWeight([], ex('румынская тяга', 'light'), OWNER)?.weight).toBe(57.5)
+    expect(suggestWeight([], ex('румынская тяга', null), OWNER)?.weight).toBe(65)
+    // 8 reps heavy: 100 / 1.267 = 78.9 -> 80
+    expect(suggestWeight([], ex('румынская тяга', 'heavy', { reps_max: 8 }), OWNER)?.weight).toBe(80)
+  })
+
+  it('reps unknown with dumbbells rounds to 1 kg', () => {
+    // 31 × 0.643 = 19.9 -> 20
+    expect(suggestWeight([], ex('жим гантелей сидя', 'medium'), [bl('жим гантелей сидя', 31, null)])?.weight).toBe(20)
+  })
+
+  it('dropset: the first drop is the target reps', () => {
+    // 90 × 8 -> 114; heavy for 12 reps: 81.4 -> 81 on 1 kg steps
+    const s = suggestWeight([], ex('сгибания с гантелями', 'heavy', DROPSET), [bl('сгибания с гантелями', 90, 8)])
+    expect(s?.weight).toBe(81)
+  })
+
+  it('matches names ignoring case and whitespace', () => {
+    expect(suggestWeight([], ex('жим лёжа', 'heavy'), [bl('Жим  Лёжа', 90, 8)])?.weight).toBe(82.5)
+  })
+
+  it('does not take a baseline of a similar exercise', () => {
+    expect(suggestWeight([], ex('жим лёжа 30°', 'heavy'), OWNER)).toBeNull()
+  })
+
+  it('is ignored entirely once the exercise has history', () => {
+    const history = [workout('2026-10-01T10:00:00Z', 'жим лёжа', [[60, 10], [60, 9], [60, 8]])]
+    const s = suggestWeight(history, ex('жим лёжа', 'heavy'), OWNER)
+    // Record 60 × 10 -> 80 -> 57.1 -> 57.5 vs "как в прошлый раз 60": the baseline's 82.5 never shows up.
+    expect(s?.weight).toBe(60)
+    expect(s?.reason).toBe('как в прошлый раз 60 кг')
+  })
+
+  it('history of another exercise does not hide the baseline', () => {
+    const history = [workout('2026-10-01T10:00:00Z', 'присед со штангой', [[100, 5]])]
+    expect(suggestWeight(history, ex('жим лёжа', 'heavy'), OWNER)?.weight).toBe(82.5)
+  })
+
+  describe('owner sanity numbers (8–12 reps, program intensities)', () => {
+    it.each([
+      ['жим лёжа', 'heavy', 82.5],
+      ['жим лёжа', 'medium', 72.5],
+      ['тяга вертикального блока', 'heavy', 75],
+      ['тяга вертикального блока', 'medium', 67.5],
+      ['присед со штангой', 'heavy', 100],
+      ['присед со штангой', 'medium', 90],
+      ['румынская тяга', 'heavy', 72.5],
+      ['румынская тяга', 'medium', 65],
+    ] as const)('%s, %s -> %d kg', (name, intensity, kg) => {
+      expect(suggestWeight([], ex(name, intensity), OWNER)?.weight).toBe(kg)
+    })
   })
 })

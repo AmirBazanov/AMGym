@@ -43,6 +43,7 @@ from gymbot.config import ROOT, Settings
 from gymbot.db.models import Exercise, Reminder, User, UserFact, UserProgram, Workout, WorkoutSet
 from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import OpenRouterClient, routes_from
+from gymbot.services import baselines
 from gymbot.services import facts as fx
 from gymbot.services import nutrition as nut
 from gymbot.services import plan as day_plan
@@ -462,7 +463,7 @@ def build_mcp(
             await session.commit()
             return dumps({"targets": nut.user_targets(user).model_dump()})
 
-    async def save_fact(text: str, category: str | None, source: str) -> str:
+    async def save_fact(text: str, category: str | None, source: str, *, weights: bool = False) -> str:
         try:
             cleaned = fx.checked_text(text)
         except ValueError as e:
@@ -474,6 +475,8 @@ def build_mcp(
             await session.commit()
             assert added.fact is not None
             f = added.fact
+            if weights:  # working weights only: a fact from MCP never fills the profile (baselines.MCP_SOURCE)
+                baselines.schedule(sessionmaker, get_llm(), f.id)
             return dumps({"status": added.status, "fact": {"id": f.id, "text": f.text, "category": f.category}})
 
     @tool(WRITE)
@@ -484,7 +487,7 @@ def build_mcp(
         """Запомнить долгосрочный факт о владельце (предпочтения, аллергии, порции, режим, ограничения), до 200 символов.
         category: food | training | health | schedule | other; не передана — угадывается по тексту.
         Такой же активный факт не дублируется (status=duplicate)."""
-        return await save_fact(text, category, "[mcp] add_fact")
+        return await save_fact(text, category, "[mcp] add_fact", weights=True)
 
     @tool(REMOVE)
     async def deactivate_fact(id: int) -> str:

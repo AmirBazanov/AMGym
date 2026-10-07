@@ -218,6 +218,28 @@ class UserFact(Base):
     active: Mapped[bool] = mapped_column(default=True)
     source_text: Mapped[str | None] = mapped_column(Text)  # the chat message it came from
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # When working weights were extracted from the text (gymbot.services.baselines); None = not yet.
+    baselines_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # ORM cascade: SQLite does not enforce ON DELETE CASCADE without PRAGMA foreign_keys.
+    baselines: Mapped[list[ExerciseBaseline]] = relationship(
+        back_populates="fact", cascade="all, delete-orphan"
+    )
+
+
+class ExerciseBaseline(Base):
+    """A working weight the user named in a fact ("жим лёжа 90 на 8"): the Mini App's start weight while
+    an exercise has no logged sets. Counts only while its fact is active; one fact may give several."""
+
+    __tablename__ = "exercise_baselines"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    fact_id: Mapped[int] = mapped_column(ForeignKey("user_facts.id", ondelete="CASCADE"), index=True)
+    exercise_id: Mapped[int] = mapped_column(ForeignKey("exercises.id"))
+    weight_kg: Mapped[Decimal] = mapped_column(Numeric(6, 2))
+    reps: Mapped[int | None] = mapped_column(Integer)  # None = not said ("~100 смогу"); 1 = a max
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    fact: Mapped[UserFact] = relationship(back_populates="baselines")
+    exercise: Mapped[Exercise] = relationship()
 
 
 # --- Adaptive day plan (gymbot.services.plan): today's program day adjusted to wellbeing, food, recovery ---

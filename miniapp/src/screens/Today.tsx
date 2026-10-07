@@ -33,7 +33,8 @@ import { entriesCount, formatWellbeing, groupByDate, localISODate } from '../wel
 
 /** Why the day's weight is what it is, under the exercise name. */
 function SuggestHint({ history, exercise }: { history: Workout[]; exercise: ProgramExercise }) {
-  const s = suggestWeight(history, exercise)
+  const { baselines } = useStore()
+  const s = suggestWeight(history, exercise, baselines)
   if (!s) return null
   return (
     <div className="ex-suggest num">
@@ -176,6 +177,7 @@ export function Today() {
   // Rebuild the prepared (not started) workout when the plan's content or the mode changes; never on
   // an unknown answer (offline, 401), so a failed refetch does not undo the correction.
   const planContent = dp.plan === undefined ? null : planKey(visiblePlan(dp))
+  // New baselines need no rebuild here: store.applyServer refills the prepared workout in place.
   const activeId = state.active?.id
   useEffect(() => {
     if (planContent != null) actions.applyDayPlan(visiblePlan(dp))
@@ -202,7 +204,7 @@ export function Today() {
 
 function DayPreview({ dp }: { dp: DayPlanState }) {
   const state = useStore()
-  const { programId, startDate, history } = state
+  const { programId, startDate, history, baselines } = state
   const run = currentRun(state)
   const program = getProgram(programId)
   const pos = programPosition(program, startDate)
@@ -213,7 +215,9 @@ function DayPreview({ dp }: { dp: DayPlanState }) {
   const [sheet, setSheet] = useState<string | null>(null)
   const day = getDay(program, week, weekday)
   const mode = planMode(state)
-  const applied = day ? applyPlan(day, mode === 'adjusted' ? visiblePlan(dp) : null, history, localISODate(), week) : null
+  const applied = day
+    ? applyPlan(day, mode === 'adjusted' ? visiblePlan(dp) : null, history, localISODate(), week, baselines)
+    : null
   const weekDays = program.weeks.find((w) => w.number === week)?.days ?? []
   const doneHere = run.some((w) => w.week === week && w.weekday === weekday)
 
@@ -401,7 +405,7 @@ function mmss(sec: number) {
 
 function ActiveWorkout({ workout, dp }: { workout: Workout; dp: DayPlanState }) {
   const state = useStore()
-  const { restSeconds, restEnd, history } = state
+  const { restSeconds, restEnd, history, baselines } = state
   const setRestEnd = actions.setRestEnd
   const [sheet, setSheet] = useState<string | null>(null)
   const now = useNow(true)
@@ -411,8 +415,10 @@ function ActiveWorkout({ workout, dp }: { workout: Workout; dp: DayPlanState }) 
   const plan = visiblePlan(dp)
   // Look exercises up in what the workout was built from, so replaced ones keep their prescription.
   const builtFromPlan = plan != null && state.activePlanKey === planKey(plan)
-  const built = day ? applyPlan(day, builtFromPlan ? plan : null, history, localISODate(), workout.week) : null
-  const shown = day ? applyPlan(day, mode === 'adjusted' ? plan : null, history, localISODate(), workout.week) : null
+  const built = day ? applyPlan(day, builtFromPlan ? plan : null, history, localISODate(), workout.week, baselines) : null
+  const shown = day
+    ? applyPlan(day, mode === 'adjusted' ? plan : null, history, localISODate(), workout.week, baselines)
+    : null
   const lookup = (name: string) => lookupExercise(built, day, name)
 
   const total = workout.exercises.reduce((n, e) => n + e.sets.length, 0)

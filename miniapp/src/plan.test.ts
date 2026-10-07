@@ -1,9 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import type { DayPlan, DayPlanExercise } from './api'
-import { applyPlan, planFitsDay, planKey, planNote, planTitle, safeFactor, scaleWeight } from './plan'
+import {
+  applyPlan,
+  planFitsDay,
+  planKey,
+  planNote,
+  planTitle,
+  refillFromBaselines,
+  safeFactor,
+  scaleWeight,
+  suggestionsOf,
+  type PreparedSuggestions,
+} from './plan'
 import { formatPrescription, type Intensity, type Prescription, type ProgramDay, type ProgramExercise } from './program'
 import { roundToStep, suggestWeight } from './progression'
-import type { Workout } from './store'
+import type { Baseline, ExerciseLog, Workout } from './store'
 
 const TODAY = '2026-10-07'
 
@@ -380,6 +391,150 @@ describe('applyPlan', () => {
     expect(rest.changed).toBe(false)
     expect(rest.target).toBe('4 × 8–12')
     expect(r.exercises[2].reason).toBeNull()
+  })
+})
+
+describe('applyPlan with baselines', () => {
+  const BASE: Baseline[] = [
+    { exercise: BENCH, weightKg: 90, reps: 8, factId: 1 },
+    { exercise: PRESS, weightKg: 30, reps: null, factId: 2 },
+  ]
+
+  it('takes the weight from baselines in the plain day', () => {
+    const r = applyPlan(DAY, null, [], TODAY, undefined, BASE)
+    // 90 × 8 -> 1RM 114, heavy for 12 reps -> 82.5
+    expect(r.exercises[0].weight).toBe(82.5)
+    expect(r.exercises[0].baseWeight).toBe(82.5)
+    expect(r.exercises[1].weight).toBeNull()
+  })
+
+  it('without baselines (older server) the day has no weights', () => {
+    expect(applyPlan(DAY, null, [], TODAY).exercises[0].weight).toBeNull()
+  })
+
+  it('applies the plan weightFactor on top of the baseline weight', () => {
+    const a = applyPlan(DAY, plan([pe(BENCH, { weightFactor: 0.9 })]), [], TODAY, undefined, BASE).exercises[0]
+    expect(a.baseWeight).toBe(82.5)
+    expect(a.weight).toBe(scaleWeight(82.5, 0.9, 2.5))
+    expect(a.weight).toBe(75)
+    expect(a.factor).toBe(0.9)
+  })
+
+  it('a replacement takes its own baseline', () => {
+    const a = applyPlan(DAY, plan([pe(BENCH, { replaceWith: PRESS })]), [], TODAY, undefined, BASE).exercises[0]
+    // ~30 kg without reps counts as the max: heavy for 12 reps 30 / 1.4 = 21.4 -> 21 on 1 kg dumbbell steps
+    expect(a.baseWeight).toBe(21)
+    expect(a.weight).toBe(21)
+  })
+
+  it('history wins over the baseline', () => {
+    const h = [workout('2026-10-01T10:00:00Z', BENCH, [[67.5, 10], [67.5, 10], [67.5, 10]])]
+    expect(applyPlan(DAY, null, h, TODAY, undefined, BASE).exercises[0].weight).toBe(67.5)
+  })
+})
+
+describe('refillFromBaselines', () => {
+  const B90 = [{ exercise: BENCH, weightKg: 90, reps: 8, factId: 1 }] // heavy 12 reps -> 82.5
+  const B100 = [{ exercise: BENCH, weightKg: 100, reps: 8, factId: 2 }] // 126.7 / 1.4 = 90.5 -> 90
+
+  /** The prepared workout as store.startWorkout / applyDayPlan build it. */
+  function prepared(p: DayPlan | null, baselines: Baseline[], history: Workout[] = []) {
+    const res = applyPlan(DAY, p, history, TODAY, undefined, baselines)
+    const exercises: ExerciseLog[] = res.exercises.map((a) => ({
+      name: a.exercise.name,
+      target: a.target,
+      dropset: false,
+      sets: Array.from({ length: a.exercise.prescription.sets }, () => ({ weight: a.weight, reps: null, done: false })),
+    }))
+    const w: Workout = { id: 'a', programId: 'p', week: 1, weekday: 3, startedAt: TODAY, finishedAt: null, exercises }
+    return { w, suggested: suggestionsOf(res.exercises) }
+  }
+
+  const weights = (w: Workout, i: number) => w.exercises[i].sets.map((s) => s.weight)
+
+  function setWeight(w: Workout, i: number, j: number, weight: number | null): Workout {
+    return {
+      ...w,
+      exercises: w.exercises.map((e, k) =>
+        k === i ? { ...e, sets: e.sets.map((s, n) => (n === j ? { ...s, weight } : s)) } : e,
+      ),
+    }
+  }
+
+  it('first load: built without baselines, the new list fills the empty weights only', () => {
+    const { w, suggested } = prepared(null, [])
+    expect(weights(w, 0)).toEqual([null, null, null, null])
+    const edited = setWeight(w, 0, 0, 60)
+    const r = refillFromBaselines(edited, suggested, DAY, [], B90)
+    expect(weights(r!.workout, 0)).toEqual([60, 82.5, 82.5, 82.5])
+    expect(r!.suggested[BENCH].weight).toBe(82.5)
+    // Other exercises have no baseline: still empty.
+    expect(weights(r!.workout, 1)).toEqual([null, null, null, null])
+  })
+
+  it('updates weights still equal to the old suggestion and keeps the edited one', () => {
+    const { w, suggested } = prepared(null, B90)
+    expect(weights(w, 0)).toEqual([82.5, 82.5, 82.5, 82.5])
+    const edited = setWeight(w, 0, 1, 70)
+    const r = refillFromBaselines(edited, suggested, DAY, [], B100)
+    expect(weights(r!.workout, 0)).toEqual([90, 70, 90, 90])
+  })
+
+  it('a baseline for an exercise not in the workout changes nothing', () => {
+    const { w, suggested } = prepared(null, B90)
+    const more = [...B90, { exercise: 'присед', weightKg: 140, reps: 1, factId: 5 }]
+    expect(refillFromBaselines(w, suggested, DAY, [], more)).toBeNull()
+  })
+
+  it('never touches a started workout', () => {
+    const { w, suggested } = prepared(null, [])
+    const started: Workout = {
+      ...w,
+      exercises: w.exercises.map((e, i) => (i === 2 ? { ...e, sets: [{ weight: 20, reps: 10, done: true }, ...e.sets.slice(1)] } : e)),
+    }
+    expect(refillFromBaselines(started, suggested, DAY, [], B90)).toBeNull()
+  })
+
+  it('leaves exercises with history alone, even with a baseline', () => {
+    const h = [workout('2026-10-01T10:00:00Z', BENCH, [[50, 10]])]
+    const { w, suggested } = prepared(null, [], h)
+    const edited = setWeight(w, 0, 0, null)
+    expect(refillFromBaselines(edited, suggested, DAY, h, B90)).toBeNull()
+  })
+
+  it('keeps added and removed exercises; a user-added one is not filled', () => {
+    const { w, suggested } = prepared(null, [])
+    const custom: ExerciseLog = { name: 'присед', target: '', dropset: false, sets: [{ weight: null, reps: null, done: false }] }
+    const changed: Workout = { ...w, exercises: [w.exercises[0], custom] } // CURL and the French press removed
+    const r = refillFromBaselines(changed, suggested, DAY, [], [...B90, { exercise: 'присед', weightKg: 140, reps: 1, factId: 5 }])
+    expect(r!.workout.exercises.map((e) => e.name)).toEqual([BENCH, 'присед'])
+    expect(weights(r!.workout, 0)).toEqual([82.5, 82.5, 82.5, 82.5])
+    expect(weights(r!.workout, 1)).toEqual([null])
+  })
+
+  it('applies the plan factor the workout was built with', () => {
+    const { w, suggested } = prepared(plan([pe(BENCH, { weightFactor: 0.9 })]), [])
+    const r = refillFromBaselines(w, suggested, DAY, [], B90)
+    expect(weights(r!.workout, 0)).toEqual([75, 75, 75, 75]) // 82.5 × 0.9 on 2.5 kg steps
+  })
+
+  it('a deactivated fact clears the weights it had suggested, not the edited ones', () => {
+    const { w, suggested } = prepared(null, B90)
+    const edited = setWeight(w, 0, 3, 80)
+    const r = refillFromBaselines(edited, suggested, DAY, [], [])
+    expect(weights(r!.workout, 0)).toEqual([null, null, null, 80])
+  })
+
+  it('without a snapshot (prepared by an older version) fills empty weights from the day', () => {
+    const { w } = prepared(null, [])
+    const r = refillFromBaselines(setWeight(w, 0, 2, 50), {} satisfies PreparedSuggestions, DAY, [], B90)
+    expect(weights(r!.workout, 0)).toEqual([82.5, 82.5, 50, 82.5])
+  })
+
+  it('is idempotent: a second sync with the same list changes nothing', () => {
+    const { w, suggested } = prepared(null, [])
+    const r = refillFromBaselines(w, suggested, DAY, [], B90)!
+    expect(refillFromBaselines(r.workout, r.suggested, DAY, [], B90)).toBeNull()
   })
 })
 

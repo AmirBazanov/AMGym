@@ -2,8 +2,8 @@
 // Pure and node-safe: type-only imports from api/store (api.ts reads window), the rest comes in as arguments.
 import type { DayPlan, DayPlanExercise } from './api'
 import { formatPrescription, isDropset, type Prescription, type ProgramDay, type ProgramExercise } from './program'
-import { equipmentStep, roundToStep, suggestWeight } from './progression'
-import type { Workout } from './store'
+import { equipmentStep, hasHistory, roundToStep, suggestWeight } from './progression'
+import type { Baseline, ExerciseLog, Workout } from './store'
 
 export type PlanMode = 'adjusted' | 'program'
 
@@ -13,7 +13,7 @@ export interface AdjustedExercise {
   /** The program's exercise as written. */
   original: ProgramExercise
   replaced: boolean
-  /** Suggested weight × factor, on the equipment step; null without history. */
+  /** Suggested weight × factor, on the equipment step; null without history and baselines. */
   weight: number | null
   /** Suggested weight before the factor. */
   baseWeight: number | null
@@ -99,8 +99,8 @@ function adjustPrescription(p: Prescription, a: DayPlanExercise | undefined): Pr
   return { ...p, sets, reps_min: repsMin, reps_max: repsMax }
 }
 
-function unchanged(e: ProgramExercise, history: Workout[]): AdjustedExercise {
-  const weight = suggestWeight(history, e)?.weight ?? null
+function unchanged(e: ProgramExercise, history: Workout[], baselines: readonly Baseline[]): AdjustedExercise {
+  const weight = suggestWeight(history, e, baselines)?.weight ?? null
   const target = formatPrescription(e.prescription)
   return { exercise: e, original: e, replaced: false, weight, baseWeight: weight, factor: 1, reason: null, target, changed: false }
 }
@@ -109,6 +109,7 @@ function unchanged(e: ProgramExercise, history: Workout[]): AdjustedExercise {
  * The day as it should be trained: plan corrections applied by exercise name (sets, reps, weight
  * factor, skip, replacement). Without a fitting plan, or when it would skip everything, the program
  * day as written (`applied` false), so the user always has something to train.
+ * Weights come from history, else from the owner's baselines; the plan factor applies on top of either.
  */
 export function applyPlan(
   day: ProgramDay,
@@ -116,8 +117,13 @@ export function applyPlan(
   history: Workout[],
   today: string,
   week?: number,
+  baselines: readonly Baseline[] = [],
 ): AppliedPlan {
-  const plain = (): AppliedPlan => ({ exercises: day.exercises.map((e) => unchanged(e, history)), skipped: [], applied: false })
+  const plain = (): AppliedPlan => ({
+    exercises: day.exercises.map((e) => unchanged(e, history, baselines)),
+    skipped: [],
+    applied: false,
+  })
   if (!plan || !planFitsDay(day, plan, today, week)) return plain()
 
   const exercises: AdjustedExercise[] = []
@@ -139,8 +145,8 @@ export function applyPlan(
       name: replaced ? newName : original.name,
       prescription: { ...prescription, raw: target },
     }
-    // A replacement has its own history: its base weight and step come from its own name.
-    const baseWeight = suggestWeight(history, { ...exercise, prescription })?.weight ?? null
+    // A replacement has its own history and baseline: its base weight and step come from its own name.
+    const baseWeight = suggestWeight(history, { ...exercise, prescription }, baselines)?.weight ?? null
     const factor = safeFactor(a?.weightFactor)
     const weight = scaleWeight(baseWeight, factor, equipmentStep(exercise.name))
     exercises.push({
@@ -177,4 +183,68 @@ export function planTitle(plan: Pick<DayPlan, 'readiness' | 'summary'>): string 
   const summary = plan.summary?.trim()
   const head = plan.readiness === 'rest' ? 'Сегодня лучше отдохнуть' : 'План скорректирован'
   return summary ? `${head}: ${summary}` : head
+}
+
+/** What the app put into one exercise of the prepared workout, so new baselines can refill it later. */
+export interface PreparedSuggestion {
+  /** The exercise as applied: replacement name, adjusted prescription. */
+  exercise: ProgramExercise
+  factor: number
+  /** The weight the app filled in (after the factor); null when it had none. */
+  weight: number | null
+}
+
+/** By exercise name; the first one wins when a day repeats an exercise. */
+export type PreparedSuggestions = Record<string, PreparedSuggestion>
+
+/** Snapshot of the weights a freshly built prepared workout got (store.plannedLog puts `weight` in every set). */
+export function suggestionsOf(exercises: readonly AdjustedExercise[]): PreparedSuggestions {
+  const out: PreparedSuggestions = {}
+  for (const a of exercises) {
+    if (!out[a.exercise.name]) out[a.exercise.name] = { exercise: a.exercise, factor: a.factor, weight: a.weight }
+  }
+  return out
+}
+
+/**
+ * New baselines applied to the prepared workout in place, without rebuilding it: added and removed
+ * exercises and the user's own weights stay. Only exercises without any history are touched, and in them
+ * only sets whose weight is empty or still the one the app suggested; the plan factor applies on top.
+ * An exercise missing from `suggested` (workout prepared before the snapshot existed) falls back to the
+ * day's exercise with factor 1, so only its empty weights are filled. User-added exercises (in neither)
+ * are left alone. A started workout is never touched. Returns null when nothing changes.
+ */
+export function refillFromBaselines(
+  workout: Workout,
+  suggested: PreparedSuggestions,
+  day: ProgramDay | undefined,
+  history: Workout[],
+  baselines: readonly Baseline[],
+): { workout: Workout; suggested: PreparedSuggestions } | null {
+  if (workout.exercises.some((e) => e.sets.some((s) => s.done))) return null
+  const nextSuggested: PreparedSuggestions = { ...suggested }
+  let changed = false
+  const exercises = workout.exercises.map((log): ExerciseLog => {
+    if (hasHistory(history, log.name)) return log
+    const known = suggested[log.name]
+    const fromDay = day?.exercises.find((e) => e.name === log.name)
+    const prev: PreparedSuggestion | null = known ?? (fromDay ? { exercise: fromDay, factor: 1, weight: null } : null)
+    if (!prev) return log
+    const base = suggestWeight([], prev.exercise, baselines)?.weight ?? null
+    const next = scaleWeight(base, prev.factor, equipmentStep(log.name))
+    if (!known || next !== prev.weight) {
+      nextSuggested[log.name] = { ...prev, weight: next }
+      changed = true
+    }
+    let setsChanged = false
+    const sets = log.sets.map((s) => {
+      if (s.done || s.weight === next || (s.weight != null && s.weight !== prev.weight)) return s
+      setsChanged = true
+      return { ...s, weight: next }
+    })
+    if (!setsChanged) return log
+    changed = true
+    return { ...log, sets }
+  })
+  return changed ? { workout: { ...workout, exercises }, suggested: nextSuggested } : null
 }

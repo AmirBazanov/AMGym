@@ -1332,3 +1332,83 @@ async def test_diary_answer_starts_the_program_and_shows_todays_plan(llm, settin
         assert await s.scalar(select(UserProgram)) is not None  # like /plan on first use
     system = llm.bodies[-1]["messages"][0]["content"]
     assert "Программа «" in system and "План на сегодня" in system
+
+
+# ---- a Mini App setup request is not a record ----
+
+SETUP_TEXT = "Запиши тогда в мини-ап мою программу, чтобы я мог прийти и запустить тренировку"
+
+
+async def test_miniapp_setup_request_is_not_a_workout(llm, settings, db):
+    from gymbot.llm.prompts import MINIAPP_SETUP_ANSWER
+
+    # The parser (wrongly) turned the request into sets with weights it remembered.
+    llm.answers = [{**workout("жим лёжа"), "exercises": [
+        {"exercise": "жим лёжа", "sets": [{"reps": 8, "weight_kg": 90}] * 3}]}]
+    msg = await send(SETUP_TEXT, llm, settings, db)
+    assert buttons(msg) == [] and not log_text.PENDING
+    assert USER not in log_text.CONTEXT or log_text.CONTEXT[USER].token is None
+    assert MINIAPP_SETUP_ANSWER in msg.answer.await_args.args[0]
+    assert "Записать" not in msg.answer.await_args.args[0]
+
+
+async def test_miniapp_setup_request_goes_to_the_diary_answer(llm, settings, db, diary):
+    from gymbot.llm.prompts import MINIAPP_SETUP_ANSWER
+
+    llm.answers = [workout("жим лёжа"), "Сегодня жим лёжа 3×8, начни с 60 кг."]
+    msg = await send(SETUP_TEXT, llm, settings, db)
+    assert len(llm.bodies) == 2  # the parser, then the diary answer
+    assert msg.answer.await_args.args[0] == "Сегодня жим лёжа 3×8, начни с 60 кг."
+    assert msg.answer.await_args.args[0] != MINIAPP_SETUP_ANSWER
+    assert buttons(msg) == [] and not log_text.PENDING
+
+
+async def test_setup_guard_does_not_fire_for_a_workout_with_numbers(llm, settings, db):
+    llm.answers = [workout("жим лёжа")]
+    msg = await send("запиши жим лёжа 3 по 10 на 60", llm, settings, db)
+    assert msg.answer.await_args.args[0].startswith("Записать")
+    assert buttons(msg) == [["save", "drop"]]
+    assert log_text.PENDING[token_of(msg)].result.kind == "workout"
+
+
+async def test_setup_guard_does_not_fire_for_a_workout_that_says_the_program_weight(llm, settings, db):
+    llm.answers = [workout("жим лёжа")]
+    msg = await send("запиши жим лёжа три по десять с весом как в программе", llm, settings, db)
+    assert msg.answer.await_args.args[0].startswith("Записать")
+    assert buttons(msg) == [["save", "drop"]]
+    assert log_text.PENDING[token_of(msg)].result.kind == "workout"
+
+
+def test_setup_request_pattern():
+    wk = ParseResult.model_validate(workout("жим лёжа"))
+    for text in (
+        SETUP_TEXT,
+        "запиши в мини-ап мою программу и выставь рабочие веса на сегодня",
+        "выставь веса на сегодня",
+        "поставь рабочие веса",
+        "Запиши тогда в мини-ап мою программу, чтобы я мог сейчас просто в зал прийти и запустить тренировку",
+        "выстави рабочие веса на сегодня",
+    ):
+        assert log_text.is_setup_request(text, wk), text
+    assert not log_text.is_setup_request("запиши жим лёжа 3 по 10 на 60", wk)  # digits
+    assert not log_text.is_setup_request("жим лёжа три по десять", wk)  # no request
+    assert not log_text.is_setup_request(SETUP_TEXT, ParseResult.model_validate(food(1)))  # not a workout
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "поставил рекорд в жиме, всё по программе",  # a done verb, not an imperative
+        "запиши тренировку по программе, всё сделал",  # "сделал"
+        "запиши жим лёжа три по десять с весом как в программе",  # number words
+        "запиши приседания три подхода по восемь с весом шестьдесят, остальное по программе",
+        "запиши в мини-ап пятьдесят на восемь",
+        "запиши в приложение двести на раз",
+        "запиши в приложение тренировку, всё сделал",
+        "запиши в приложение жим лёжа",  # names the parsed exercise
+    ],
+)
+def test_setup_guard_stays_quiet_for_a_workout_the_user_states(text):
+    wk = ParseResult.model_validate(workout("жим лёжа"))
+    assert wk.kind == "workout"
+    assert not log_text.is_setup_request(text, wk), text

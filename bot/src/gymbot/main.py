@@ -25,6 +25,7 @@ from gymbot.db.migrate import upgrade_head
 from gymbot.db.session import make_engine
 from gymbot.handlers import advice, common, facts, log_text, plan, voice
 from gymbot.llm.openrouter import OpenRouterClient
+from gymbot.services import baselines
 from gymbot.services.access import is_allowed
 from gymbot.services.programs import sync_programs
 from gymbot.services.reminders import reminder_loop
@@ -115,6 +116,7 @@ async def shutdown(
     reminders.cancel()
     with contextlib.suppress(Exception, asyncio.CancelledError):
         await reminders
+    await baselines.cancel_all()  # unfinished facts are picked up by the next startup's backfill
     if polling is not None:
         with contextlib.suppress(RuntimeError):  # polling may already be stopped
             await dp.stop_polling()
@@ -145,6 +147,8 @@ async def run() -> None:
     # One LLM client per process (bot and API): it remembers which models reject response_format.
     llm = OpenRouterClient(settings)
     log.info("LLM routes: %s", ", ".join(r.name for r in llm.routes) or "none (no API key)")
+    # Working weights for facts saved before this feature or while the model was down (idempotent).
+    baselines.start_backfill(sessionmaker, llm)
 
     bot: Bot | None = None
     dp: Dispatcher | None = None
@@ -175,6 +179,7 @@ async def run() -> None:
         try:
             await server.serve()
         finally:
+            await baselines.cancel_all()
             await llm.aclose()
             await engine.dispose()
         return

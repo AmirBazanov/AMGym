@@ -74,6 +74,7 @@ def test_only_corrections_revise():
         "гречка 200 г и 2 чапчуки": False,
         "спал 6 часов, болит левое плечо, сил мало": False,
         "сколько белка в 100 г творога?": False,
+        "запиши в мини-ап мою программу и выставь рабочие веса на сегодня": False,
         "привет": False,
     }
     assert all('"revises":' in a and '"note":' in a for _, a in EXAMPLES)  # explicit in every example
@@ -247,3 +248,30 @@ def test_food_without_kcal_becomes_an_unknown_term():
     )
     assert [f.description for f in r.foods] == ["чай"]
     assert r.unknown_terms == ["гульчатай"]
+
+
+def test_miniapp_setup_example_is_second_to_last_and_not_a_record():
+    from gymbot.llm.prompts import MINIAPP_SETUP_ANSWER
+
+    text, answer = EXAMPLES[-2]
+    assert text == "запиши в мини-ап мою программу и выставь рабочие веса на сегодня"
+    assert EXAMPLES[-1][0] == "привет"  # the last example stays a plain question
+    parsed = ParseResult.model_validate_json(answer)
+    assert parsed.kind == "question" and not parsed.exercises and not parsed.foods
+    assert parsed.clarification == MINIAPP_SETUP_ANSWER and "Сегодня" in parsed.clarification
+
+
+def test_miniapp_setup_example_is_sent_to_the_model():
+    msgs = build_messages("привет", [])
+    users = [m["content"] for m in msgs if m["role"] == "user"]
+    assert "запиши в мини-ап мою программу и выставь рабочие веса на сегодня" in users
+
+
+def test_baseline_messages_carry_catalog_and_fact():
+    from gymbot.llm.prompts import build_baseline_messages
+
+    msgs = build_baseline_messages("жим лёжа 90 на 8", ["жим лёжа", "румынская тяга"])
+    assert [m["role"] for m in msgs] == ["system", "user"]
+    assert "жим лёжа, румынская тяга" in msgs[0]["content"] and "{catalog}" not in msgs[0]["content"]
+    assert msgs[1]["content"] == "Факт: жим лёжа 90 на 8"
+    assert "пусто" in build_baseline_messages("x", [])[0]["content"]

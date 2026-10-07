@@ -4,13 +4,29 @@ import { useSyncExternalStore } from 'react'
 import { getDay, getProgram, isDropset, programPosition } from './program'
 import { api, ApiError, EMPTY_PROFILE, EMPTY_TARGETS, inTelegram, type DayPlan, type Profile, type Targets } from './api'
 import { buildDemoHistory, demoStartDate } from './mock'
-import { applyPlan, planKey, type AdjustedExercise, type PlanMode } from './plan'
-import { lastSameSession } from './progression'
+import {
+  applyPlan,
+  planKey,
+  refillFromBaselines,
+  suggestionsOf,
+  type AdjustedExercise,
+  type PlanMode,
+  type PreparedSuggestions,
+} from './plan'
+import { lastSameSession, normalizeBaselines } from './progression'
 
 export interface SetEntry {
   weight: number | null // kg
   reps: number | null
   done: boolean
+}
+
+/** The owner's own words about a lift ("жим 90 на 8"), newest per exercise; from GET /api/state. */
+export interface Baseline {
+  exercise: string // exact program/catalog exercise name
+  weightKg: number
+  reps: number | null // null: weight without reps ("~100 смогу"), counted as the max
+  factId: number
 }
 
 export interface ExerciseLog {
@@ -53,6 +69,10 @@ export interface State {
   planChoice: { date: string; mode: PlanMode } | null
   // planKey() the not-yet-started active workout was built from ('program' = as written).
   activePlanKey: string | null
+  // Starting weights from the owner's words (server data; none in the demo).
+  baselines: Baseline[]
+  // What the app filled into the not-yet-started active workout, so new baselines refill it in place.
+  activeSuggested: PreparedSuggestions
 }
 
 interface ServerState {
@@ -62,6 +82,7 @@ interface ServerState {
   history: Workout[]
   targets?: Targets // absent on servers older than the nutrition API
   profile?: Partial<Profile> // absent on servers older than the profile API
+  baselines?: Baseline[] // absent on servers older than the baselines
 }
 
 type SettingsPatch = Partial<Pick<State, 'programId' | 'startDate' | 'restSeconds' | 'targets'>> & {
@@ -89,6 +110,8 @@ function initialState(): State {
     profile: EMPTY_PROFILE,
     planChoice: null,
     activePlanKey: null,
+    baselines: [],
+    activeSuggested: {},
   }
 }
 
@@ -105,6 +128,8 @@ function load(): State {
         delete saved.rejected
         delete saved.active
         delete saved.mode
+        delete saved.baselines
+        delete saved.activeSuggested
       }
       // Nested merge: storage written before the profile existed (or with fewer keys) still loads.
       return { ...initialState(), ...saved, profile: { ...EMPTY_PROFILE, ...saved.profile } }
@@ -209,6 +234,7 @@ export const actions = {
     const program = getProgram(state.programId)
     const day = getDay(program, week, weekday)
     if (!day) return
+    const res = applyPlan(day, null, state.history, localDate(), week, state.baselines)
     commit({
       ...state,
       active: {
@@ -218,9 +244,10 @@ export const actions = {
         weekday,
         startedAt: new Date().toISOString(),
         finishedAt: null,
-        exercises: applyPlan(day, null, state.history, localDate()).exercises.map(plannedLog),
+        exercises: res.exercises.map(plannedLog),
       },
       activePlanKey: 'program',
+      activeSuggested: suggestionsOf(res.exercises),
     })
   },
 
@@ -232,17 +259,22 @@ export const actions = {
    * Rebuilds the prepared workout from the adaptive plan (or back from the program) while no set is
    * ticked. prepareToday runs before the plan is fetched, so Today calls this whenever the plan or the
    * mode changes. Idempotent on the plan's content: a refetch of the same plan keeps weight edits.
-   * A started workout is never touched.
+   * A started workout is never touched. New baselines do not rebuild it: applyServer refills it in place.
    */
   applyDayPlan(plan: DayPlan | null) {
     const a = state.active
     if (!a || isStarted(a)) return
     const day = getDay(getProgram(a.programId), a.week, a.weekday)
     if (!day) return
-    const res = applyPlan(day, planMode() === 'adjusted' ? plan : null, state.history, localDate(), a.week)
+    const res = applyPlan(day, planMode() === 'adjusted' ? plan : null, state.history, localDate(), a.week, state.baselines)
     const key = res.applied ? planKey(plan) : 'program'
     if ((state.activePlanKey ?? 'program') === key) return
-    commit({ ...state, activePlanKey: key, active: { ...a, exercises: res.exercises.map(plannedLog) } })
+    commit({
+      ...state,
+      activePlanKey: key,
+      active: { ...a, exercises: res.exercises.map(plannedLog) },
+      activeSuggested: suggestionsOf(res.exercises),
+    })
   },
 
   updateSet(exIdx: number, setIdx: number, patch: Partial<SetEntry>) {
@@ -307,7 +339,7 @@ export const actions = {
       .map((ex) => ({ ...ex, sets: ex.sets.filter((s) => s.done) }))
       .filter((ex) => ex.sets.length)
     if (!exercises.length) {
-      commit({ ...state, active: null })
+      commit({ ...state, active: null, activeSuggested: {} })
       return
     }
     const done: Workout = { ...a, exercises, finishedAt: new Date().toISOString() }
@@ -315,6 +347,7 @@ export const actions = {
     commit({
       ...state,
       active: null,
+      activeSuggested: {},
       history: [...state.history, done],
       pending: server ? [...state.pending, done] : state.pending,
     })
@@ -322,7 +355,7 @@ export const actions = {
   },
 
   cancelWorkout() {
-    commit({ ...state, active: null, skipAutoStart: localDate() })
+    commit({ ...state, active: null, activeSuggested: {}, skipAutoStart: localDate() })
   },
 
   deleteWorkout(id: string) {
@@ -394,7 +427,9 @@ export const actions = {
 function applyServer(server: ServerState) {
   const known = new Set(server.history.map((w) => w.clientId).filter(Boolean))
   const pending = state.pending.filter((w) => !known.has(w.id))
-  commit({
+  // Absent field (older server): keep what we have, so the refill below has nothing to clear.
+  const baselines = server.baselines === undefined ? state.baselines : normalizeBaselines(server.baselines)
+  const next: State = {
     ...state,
     mode: 'server',
     programId: server.programId,
@@ -404,7 +439,15 @@ function applyServer(server: ServerState) {
     profile: server.profile ? { ...EMPTY_PROFILE, ...server.profile } : state.profile,
     history: [...server.history, ...pending, ...state.rejected].sort((a, b) => a.startedAt.localeCompare(b.startedAt)),
     pending,
-  })
+    baselines,
+  }
+  // New baselines reach the prepared workout in place (empty or app-suggested weights only), whether or
+  // not the day plan request succeeds. Idempotent, so every sync may run it.
+  const a = next.active
+  const refill = a
+    ? refillFromBaselines(a, next.activeSuggested, getDay(getProgram(a.programId), a.week, a.weekday), next.history, baselines)
+    : null
+  commit(refill ? { ...next, active: refill.workout, activeSuggested: refill.suggested } : next)
 }
 
 let flushing = false

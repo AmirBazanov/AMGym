@@ -21,6 +21,7 @@ from gymbot.db.models import FoodEntry, Reminder, User, UserFact, UserProgram, W
 from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.mcp_server import MCP_PATH, BearerGuard, mcp_http
+from gymbot.services import baselines as bl
 from gymbot.services import facts as fx
 from gymbot.services import nutrition as nut
 from gymbot.services import plan as day_plan
@@ -44,6 +45,8 @@ class StateOut(BaseModel):
     targets: nut.Targets
     profile: prof.Profile
     history: list[ws.WorkoutOut]
+    # Working weights from the user's words in active facts, newest per exercise (gymbot.services.baselines).
+    baselines: list[bl.BaselineOut]
 
 
 class TargetsIn(BaseModel):
@@ -155,6 +158,10 @@ def create_app(
             clients.append(OpenRouterClient(settings))
         return clients[0]
 
+    def schedule_baselines(fact_id: int) -> None:
+        """Working weights from a saved fact, in the background (only with the shared client from main.py)."""
+        bl.schedule(sessionmaker, clients[0] if clients else None, fact_id)
+
     mcp_routes: list[BaseRoute] = []
     mcp_lifespan = None
     if settings.mcp_token:
@@ -206,6 +213,7 @@ def create_app(
             targets=nut.user_targets(user),
             profile=prof.user_profile(user),
             history=history,
+            baselines=await bl.current(session, user.id),
         )
 
     @app.get("/api/health")
@@ -323,6 +331,7 @@ def create_app(
             raise HTTPException(409, f"at most {fx.MAX_ACTIVE} active facts")
         await session.commit()
         assert added.fact is not None
+        schedule_baselines(added.fact.id)
         if added.status == "duplicate":
             response.status_code = 200  # the same active fact exists: return it, create nothing
         return fx.fact_out(added.fact)
@@ -344,16 +353,20 @@ def create_app(
             raise HTTPException(422, "the same fact is already active")
         if active and not f.active and await fx.count_active(session, f.user_id) >= fx.MAX_ACTIVE:
             raise HTTPException(409, f"at most {fx.MAX_ACTIVE} active facts")
+        if text != f.text:
+            await bl.reset(session, f)  # the old weights came from the old text
         f.text, f.active = text, active
         if changes.get("category") is not None:
             f.category = changes["category"]
         await session.commit()
+        if f.active and f.baselines_at is None:
+            schedule_baselines(f.id)
         return fx.fact_out(f)
 
     @app.delete("/api/facts/{fact_id}", status_code=204)
     async def delete_fact(fact_id: int, session: Session, tg: TgUser) -> None:
         f = await own_fact(session, tg, fact_id)
-        await session.delete(f)
+        await session.delete(f)  # its baselines go too (ORM cascade)
         await session.commit()
 
     async def today_plan(session: AsyncSession, tg: TelegramUser, force: bool) -> day_plan.DayPlanOut:

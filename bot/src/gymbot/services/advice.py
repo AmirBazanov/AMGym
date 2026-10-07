@@ -6,7 +6,8 @@ aggregated food and training numbers and the current program.
 Nutrition is averaged over the 7 completed local days before today (today is not over yet and would
 inflate the shortfall); today's intake so far is a separate line. Training and wellbeing (sleep, energy,
 pains, the last note; gymbot.services.wellbeing) cover the last 14 local days including today.
-Active user facts (gymbot.services.facts) follow the profile, newest first, cut to FACTS_IN_CONTEXT.
+Active user facts (gymbot.services.facts) follow the profile, newest first, cut to FACTS_IN_CONTEXT, then
+the working weights the user named in them (gymbot.services.baselines.context_line, <= CONTEXT_CHARS).
 build_context only reads: it never creates users or programs.
 """
 
@@ -24,6 +25,7 @@ from gymbot.config import Settings
 from gymbot.db.models import Exercise, User, UserProgram, Workout, WorkoutSet
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.llm.prompts import ADVICE_DISCLAIMER, build_advice_messages, format_facts
+from gymbot.services import baselines
 from gymbot.services.facts import active_facts
 from gymbot.services.nutrition import day_summary, user_targets, week_summary
 from gymbot.services.profile import GOAL_NAMES
@@ -246,9 +248,11 @@ async def build_context(
     """Compact Russian summary (<= CONTEXT_MAX characters) of the user's data for the advice prompt."""
     today = now_utc.astimezone(tz).date()
     facts = format_facts([f.text for f in await active_facts(session, user.id)], FACTS_IN_CONTEXT)
+    weights = baselines.context_line(await baselines.current(session, user.id))
     head = [
         *_profile_lines(user, today),
         *([facts + "."] if facts else []),
+        *([weights] if weights else []),
         _targets_line(user),
         *await _food_lines(session, user, today, tz),
     ]

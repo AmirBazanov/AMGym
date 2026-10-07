@@ -1,9 +1,10 @@
 // Day weight suggestions: the record (estimated 1RM) and double progression, the higher one wins.
 // Pure functions: history and the program exercise come in as arguments, nothing is read from the store.
+// Without any history the owner's own words (baselines from the bot chat) give a starting weight.
 // History sets of a dropset are already the first set of each dropset: the server folds the drops
 // (drop_index > 0) into their main set, so every SetEntry here is a working set.
 import type { Intensity, Prescription, ProgramExercise } from './program'
-import type { SetEntry, Workout } from './store'
+import type { Baseline, SetEntry, Workout } from './store'
 import { e1rm, formatKg } from './stats'
 
 export interface Record1rm {
@@ -96,13 +97,83 @@ export function doubleProgression(last: SetEntry[] | null, prescription: Prescri
   return allAtTop ? clean(top + step) : top
 }
 
-/** Weight for today's plan: max of the record-based weight and double progression, with a reason in Russian. */
-export function suggestWeight(history: Workout[], exercise: ProgramExercise): Suggestion | null {
+/** Case, whitespace and ё/е do not matter for baseline names: "Жим  лёжа " is "жим лежа" (as on the server). */
+function normName(name: string): string {
+  return name.trim().replace(/\s+/g, ' ').toLowerCase().replace(/ё/g, 'е')
+}
+
+/**
+ * Server baselines made safe: absent (older server) or not a list -> [], entries without a name or a
+ * positive weight dropped, reps below 1 count as unknown.
+ */
+export function normalizeBaselines(raw: unknown): Baseline[] {
+  if (!Array.isArray(raw)) return []
+  const out: Baseline[] = []
+  for (const b of raw as Partial<Baseline>[]) {
+    if (!b || typeof b.exercise !== 'string' || !b.exercise.trim()) continue
+    if (typeof b.weightKg !== 'number' || !Number.isFinite(b.weightKg) || b.weightKg <= 0) continue
+    const reps = typeof b.reps === 'number' && Number.isFinite(b.reps) && b.reps >= 1 ? Math.round(b.reps) : null
+    out.push({ exercise: b.exercise, weightKg: b.weightKg, reps, factId: typeof b.factId === 'number' ? b.factId : 0 })
+  }
+  return out
+}
+
+/** The owner's latest words about this exercise (highest factId when the server sends several). */
+export function findBaseline(baselines: readonly Baseline[], name: string): Baseline | null {
+  const key = normName(name)
+  let best: Baseline | null = null
+  for (const b of baselines) {
+    if (normName(b.exercise) === key && (!best || b.factId > best.factId)) best = b
+  }
+  return best
+}
+
+/** Reps the working weight must allow: the first drop for dropsets, else the top of the range. */
+function targetReps(p: Prescription): number | null {
+  return p.drop_reps?.[0] ?? p.reps_max ?? p.reps_min ?? null
+}
+
+/**
+ * Starting weight from the owner's words, the same share of 1RM as the record branch. Known reps: Epley
+ * 1RM (reps 1 = the max itself). Unknown reps ("~100 смогу"): the stated weight counts as the max.
+ */
+function fromBaseline(b: Baseline, exercise: ProgramExercise, step: number): Suggestion | null {
+  const reps = targetReps(exercise.prescription)
+  const pct = percentOf1rm(reps, exercise.intensity)
+  const max = b.reps == null ? b.weightKg : e1rm(b.weightKg, b.reps)
+  const weight = roundToStep(max * pct, step)
+  if (weight <= 0) return null
+  const share = `${Math.round(pct * 100)} % для ${repsWord(reps ?? 10)}`
+  const kg = formatKg(b.weightKg)
+  let reason: string
+  if (b.reps == null) reason = `по твоим словам ~${kg} кг (как максимум), ${share}`
+  else if (b.reps === 1) reason = `от твоего максимума ${kg} кг, ${share}`
+  else reason = `по твоим словам ${kg} × ${b.reps} (1ПМ ≈ ${formatKg(Math.round(max))} кг), ${share}`
+  return { weight, reason }
+}
+
+/** True when the history has a completed weighted set of the exercise: baselines no longer count. */
+export function hasHistory(history: Workout[], name: string): boolean {
+  return lastSameSession(history, name) != null || bestE1rm(history, name) != null
+}
+
+/**
+ * Weight for today's plan: max of the record-based weight and double progression, with a reason in
+ * Russian. Baselines count only while the history has nothing for the exercise.
+ */
+export function suggestWeight(
+  history: Workout[],
+  exercise: ProgramExercise,
+  baselines: readonly Baseline[] = [],
+): Suggestion | null {
   const { name, prescription: p, intensity } = exercise
   const last = lastSameSession(history, name)
   const record = bestE1rm(history, name)
-  if (!last && !record) return null
   const step = equipmentStep(name)
+  if (!last && !record) {
+    const b = findBaseline(baselines, name)
+    return b ? fromBaseline(b, exercise, step) : null
+  }
 
   const progressed = doubleProgression(last, p, step)
   let best: Suggestion | null = null
@@ -120,7 +191,7 @@ export function suggestWeight(history: Workout[], exercise: ProgramExercise): Su
 
   if (record) {
     // Dropsets have no rep range: the first drop is what the weight must allow.
-    const reps = p.drop_reps?.[0] ?? p.reps_max ?? p.reps_min ?? null
+    const reps = targetReps(p)
     const pct = percentOf1rm(reps, intensity)
     const fromRecord = roundToStep(record.e1rm * pct, step)
     if (fromRecord > 0 && (!best || fromRecord > best.weight)) {

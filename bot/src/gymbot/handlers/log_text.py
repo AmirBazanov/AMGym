@@ -71,10 +71,11 @@ from gymbot.db.models import FoodEntry
 from gymbot.db.session import Sessionmaker
 from gymbot.handlers.plan import send_after_wellbeing
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
+from gymbot.llm.prompts import MINIAPP_SETUP_ANSWER
 from gymbot.llm.schemas import REMEMBER_MAX, ParsedFood, ParsedWellbeing, ParseResult
 from gymbot.services import answer as qa
-from gymbot.services import facts, food_lookup
-from gymbot.services.programs import exercise_catalog
+from gymbot.services import baselines, facts, food_lookup
+from gymbot.services.programs import exercise_catalog, normalize
 from gymbot.services.users import get_or_create_user
 from gymbot.services.wellbeing import wellbeing_entry
 from gymbot.services.workouts import save_from_chat
@@ -312,6 +313,55 @@ def _answers_history(user_id: int, now: datetime) -> list[tuple[str, str]]:
     ]
 
 
+# A Mini App setup request the parser may turn into a workout with weights it remembers: "запиши в мини-ап
+# мою программу", "выстави рабочие веса на сегодня". Conservative: an imperative verb, then the Mini App or
+# the day's working weights as the target, and nothing in the text that looks like sets done (below). When
+# in doubt the guard does not fire: a real workout swallowed is worse than one setup request previewed.
+_SETUP_VERB = r"(?<!\w)(?:запиши|занеси|внеси|выстави|выставь|поставь|заполни)(?:те)?(?!\w)"
+_SETUP_TARGET = r"(?<!\w)(?:мини[\s-]?ап\w*|приложени\w*|рабочи[ехй]\s+вес\w*|вес\w*\s+на\s+сегодня)(?!\w)"
+MINIAPP_REQUEST = re.compile(_SETUP_VERB + r".*?" + _SETUP_TARGET, re.DOTALL)
+# Signs the user states sets (matched on normalize() text, ё -> е): numbers in words (voice transcripts say
+# "три по десять"), set words, and "done" verbs ("всё сделал", "поставил рекорд").
+STATED_SETS = re.compile(
+    r"(?<!\w)(?:"
+    r"од(?:ин|на|ну|но|ного|ной)|дв(?:а|е|ух|умя)|тр(?:и|ех|емя)|четыр\w*|пят(?:ь|и|ью)|шест(?:ь|и|ью)|"
+    r"сем(?:ь|и|ью)|восем(?:ь|и)|восьм\w*|девят(?:ь|и|ью)|десят(?:ь|и|ью|ок|ка|ку)|\w+надцат\w*|"
+    r"двадцат\w*|тридцат\w*|сорок\w*|\w+десят\w*|девяност\w*|сто|ста|сотн\w*|сотк\w*|двест\w*|"
+    r"трист\w*|четырест\w*|(?:пят|шест|сем|восем|девят)сот\w*|полтор\w*|полтинник\w*|пар[аеуы]|"
+    r"раз|дважды|трижды|"
+    r"подход\w*|повтор\w*|сет|сета|сетов|сеты|кг|кило\w*|блин\w*|рекорд\w*|"
+    r"(?:с|вы|от|по|до)?делал\w*|выполнил\w*|отработал\w*|(?:по|от)?занимал\w*|потренил\w*|"
+    r"(?:по|от)?тренировал\w*|закончил\w*|прош[её]л|прошла|сходил\w*|был|была|пожал\w*|присел\w*|"
+    r"подтянул\w*|отжал\w*"
+    r")(?!\w)"
+)
+
+
+def is_setup_request(text: str, result: ParseResult) -> bool:
+    """A "workout" parsed from a Mini App setup request with no sets the user stated: not sets done.
+
+    Fires only when the text has no digit, no number word, no set or "done" word (STATED_SETS) and names
+    none of the parsed exercises, so any sets the parser produced came from its memory, not the user.
+    """
+    if result.kind != "workout" or re.search(r"\d", text):
+        return False
+    norm = normalize(text)
+    if not MINIAPP_REQUEST.search(norm) or STATED_SETS.search(norm):
+        return False
+    return not _names_an_exercise(norm, result)
+
+
+def _names_an_exercise(norm: str, result: ParseResult) -> bool:
+    """Whether the text has a word of a parsed exercise name ("жим", "приседания"), loosely by stem."""
+    words = re.findall(r"\w+", norm)
+    for ex in result.exercises:
+        for w in re.findall(r"\w{3,}", normalize(ex.exercise)):
+            stem = w[: max(3, len(w) - 2)]
+            if any(t.startswith(stem) for t in words):
+                return True
+    return False
+
+
 def wants_diary(text: str) -> bool:
     """Whether a question is worth the diary answer: not "привет", "спасибо", "ок" (two more model calls)."""
     return "?" in text or len(text.split()) > SMALL_TALK_WORDS
@@ -545,6 +595,9 @@ async def process_text(
     except LLMError:
         await message.answer(prefix + "Нейросеть сейчас недоступна, попробуй ещё раз чуть позже.")
         return
+    if is_setup_request(text, result) and not (prev and prev.token):
+        log.info("a Mini App setup request parsed as a workout: answered instead")
+        result = ParseResult(kind="question", clarification=MINIAPP_SETUP_ANSWER)
     # A question about a pending preview ("а сколько в ней калорий?") is about data the diary does not have
     # yet: the parser, who saw the preview, answers it.
     if result.kind == "question" and not (prev and prev.token) and wants_diary(text):
@@ -753,7 +806,7 @@ async def pick(cb: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("remember:"))
-async def remember(cb: CallbackQuery, sessionmaker: Sessionmaker) -> None:
+async def remember(cb: CallbackQuery, sessionmaker: Sessionmaker, llm: OpenRouterClient | None = None) -> None:
     token = (cb.data or "").split(":", 1)[1]
     # pop, not get: a double tap must not add the fact twice.
     offered = FACTS.pop(token, None)
@@ -776,6 +829,8 @@ async def remember(cb: CallbackQuery, sessionmaker: Sessionmaker) -> None:
             f"Фактов уже {facts.MAX_ACTIVE}: удали лишние в /facts или в дневнике.", show_alert=True
         )
         return
+    assert added.fact is not None
+    baselines.schedule(sessionmaker, llm, added.fact.id)  # working weights in the background
     done = (
         f"Запомнил: «{offered.text}» ✅ Все факты: /facts"
         if added.status == "created"
