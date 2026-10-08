@@ -766,3 +766,19 @@ export function afterEdit<T extends RetargetInput & { programId: string; program
     next = { ...next, programVersion: program.version }
   return next
 }
+
+/**
+ * A copy of the template made outside this app (the bot's chat, another device) that /api/state already
+ * made active, while the prepared workout or the offline queue still names the template: returns the
+ * template slug to switch from (as afterEdit's `switchedFrom`), else null. Idempotent: once afterEdit
+ * moved them, nothing names the template and this is null.
+ */
+export function externalFork(
+  s: { programId: string; active: Workout | null; pending: Workout[] },
+  program: { id: string; basedOn?: string | null },
+): string | null {
+  const from = program.basedOn
+  if (!from || from === program.id || s.programId !== program.id) return null
+  const named = s.active?.programId === from || s.pending.some((w) => w.programId === from)
+  return named ? from : null
+}

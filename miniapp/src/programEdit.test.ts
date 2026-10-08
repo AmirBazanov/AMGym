@@ -11,6 +11,7 @@ import {
   draftMatchesDay,
   draftOps,
   editOutcome,
+  externalFork,
   formatWeeks,
   itemChange,
   moveItem,
@@ -1659,5 +1660,58 @@ describe('afterEdit', () => {
     expect(s).toEqual({ ...before, programVersion: 4 })
     expect(s.active).toBe(before.active)
     expect(s.history).toBe(before.history)
+  })
+})
+
+// ---------- 12. externalFork (store.storeProgram: a copy made by the bot's chat or another device) ----------
+
+describe('externalFork', () => {
+  const wk = (id: string, programId: string): Workout => ({
+    id,
+    programId,
+    week: 1,
+    weekday: 1,
+    startedAt: '2026-09-10T08:00:00.000Z',
+    finishedAt: null,
+    exercises: [],
+  })
+  const copy = { id: 'tpl.u1', version: 2, basedOn: 'tpl' }
+  // /api/state already names the copy; the app's workouts still name the template.
+  const synced = (active: string | null, pending: string[] = []) => ({
+    programId: 'tpl.u1',
+    programVersion: 2,
+    startDate: '2026-09-07',
+    active: active ? wk('a', active) : null,
+    pending: pending.map((p, i) => wk(`p${i}`, p)),
+    history: [] as Workout[],
+  })
+
+  it('the prepared workout on the template: switch from it', () => {
+    expect(externalFork(synced('tpl'), copy)).toBe('tpl')
+  })
+
+  it('only the offline queue on the template: switch too', () => {
+    expect(externalFork(synced(null, ['tpl']), copy)).toBe('tpl')
+    expect(externalFork(synced('tpl.u1', ['tpl']), copy)).toBe('tpl')
+  })
+
+  it('then afterEdit moves everything, and a second pass finds nothing (idempotent)', () => {
+    const s = afterEdit(synced('tpl', ['tpl']), copy, externalFork(synced('tpl', ['tpl']), copy))
+    expect(s.active!.programId).toBe('tpl.u1')
+    expect(s.pending[0].programId).toBe('tpl.u1')
+    expect(externalFork(s, copy)).toBeNull()
+  })
+
+  it('nothing names the template, or nothing at all: no switch', () => {
+    expect(externalFork(synced('tpl.u1', ['tpl.u1']), copy)).toBeNull()
+    expect(externalFork(synced(null), copy)).toBeNull()
+  })
+
+  it('not a copy, a copy of another template, or not the active program: no switch', () => {
+    expect(externalFork(synced('tpl'), { id: 'tpl.u1', basedOn: null })).toBeNull()
+    expect(externalFork(synced('tpl'), { id: 'tpl.u1' })).toBeNull()
+    expect(externalFork(synced('tpl'), { id: 'tpl.u1', basedOn: 'other' })).toBeNull()
+    expect(externalFork({ ...synced('tpl'), programId: 'tpl' }, copy)).toBeNull()
+    expect(externalFork(synced('tpl'), { id: 'tpl', basedOn: 'tpl' })).toBeNull()
   })
 })

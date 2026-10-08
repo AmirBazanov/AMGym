@@ -37,7 +37,7 @@ import {
   programFromServer,
   rebuildDecision,
 } from './programSync'
-import { afterEdit, editOutcome, type EditOutcome } from './programEdit'
+import { afterEdit, editOutcome, externalFork, type EditOutcome } from './programEdit'
 import { newId } from './id'
 import { findOverride, lastSameSession, mergeOverrides, normalizeBaselines } from './progression'
 import {
@@ -636,6 +636,10 @@ function storeProgram(program: Program) {
   // A late answer (a slow GET, an older 409 body) must not roll the cache back to an older version.
   const cached = state.programs[program.id]?.version
   if (cached != null && program.version != null && program.version < cached) return
+  // A fork made outside this app (the bot's chat, another device): move the run to the copy as after an
+  // own edit, the prepared workout rebuilt from the copy against the template's day.
+  const from = externalFork(state, program)
+  if (from) return applyEdit(program, from)
   const a = state.active
   // The day the prepared workout was built from, read before the registry changes.
   const before = a && a.programId === program.id ? findProgram(a.programId) : undefined
