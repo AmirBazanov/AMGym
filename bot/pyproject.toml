@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-xdist>=3.6", "ruff>=0.5", "time-machine>=2.14"]
 
 [build-system]
 requires = ["hatchling"]
@@ -34,6 +34,8 @@ packages = ["src/gymbot"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# 6 workers: ~30 s instead of ~80 s; `-n0` for one process (pdb, a single test).
+addopts = "-n 6"
 
 [tool.ruff]
 line-length = 110

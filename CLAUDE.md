@@ -35,7 +35,7 @@ reminder loop (asyncio) ──> services/reminders ──> Telegram (ежедн�
 - Вес в кг, время в UTC, отображение в `TIMEZONE`.
 - Мини-апп доверяет только серверу; сервер проверяет Telegram initData по HMAC.
 - Пользовательские тексты по-русски, код и комментарии по-английски.
-- Проверки перед сдачей: `cd bot && ruff check src tests && pytest -q`; `cd miniapp && npm run typecheck && npm run build && npm test`.
+- Проверки перед сдачей: `cd bot && ruff check src tests && pytest -q && pytest -q --shift-days 5` (тесты идут в 6 процессов, ~30 с; второй прогон сдвигает часы и ловит тесты, привязанные к реальной дате; `-n0` для одного процесса); `cd miniapp && npm run typecheck && npm run build && npm test`.
 
 ## Как делится работа между агентами
 
