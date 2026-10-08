@@ -322,6 +322,9 @@ class OpenRouterClient:
             route.model, messages, purpose,
             use_schema=json_mode, stable_system=stable_system, stable_messages=stable_messages,
         )
+        # An organization-level key must name the workspace on every request (a 400 otherwise).
+        if workspace := self.s.anthropic_workspace_id.strip():
+            kwargs["extra_headers"] = {**kwargs.get("extra_headers", {}), "anthropic-workspace-id": workspace}
         message = await self.claude_api.messages.create(**kwargs)
         usage = claude.usage_of(route.model, message.usage)
         log.info(

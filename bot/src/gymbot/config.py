@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-opus-5-5"
     anthropic_enabled: bool = True
+    # Needed only for an organization-level key (not scoped to a workspace): Console → Settings → Workspaces.
+    anthropic_workspace_id: str = ""
 
     # Chat LLM: Groq first (free tier, fast, separate limits per model), OpenRouter free models as the
     # last fallback. Routes are tried in this order: GROQ_MODELS, then OPENROUTER_MODEL and its fallbacks.

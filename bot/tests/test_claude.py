@@ -514,3 +514,12 @@ async def test_failed_claude_answer_logs_the_class_not_the_content(caplog):
     assert (await h.client.parse_message("секретная самса", [])).kind == "unknown"  # Groq answered
     assert "llm anthropic/claude-opus-5-5 failed: ValidationError" in caplog.text
     assert "секретная" not in caplog.text
+
+
+async def test_workspace_header_only_when_configured():
+    plain = Harness([message(GOOD)])
+    await plain.client.parse_message("самса", [])
+    assert "anthropic-workspace-id" not in plain.claude_headers[0]
+    scoped = Harness([message(GOOD)], anthropic_workspace_id="wrkspc_123")
+    await scoped.client.parse_message("самса", [])
+    assert scoped.claude_headers[0]["anthropic-workspace-id"] == "wrkspc_123"
