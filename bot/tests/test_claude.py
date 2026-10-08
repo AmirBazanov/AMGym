@@ -216,7 +216,7 @@ async def test_answer_uses_medium_effort_no_schema_and_caches_prompt_and_summary
         ("settings", "low", structured.SETTINGS),
         ("baselines", "low", structured.BASELINES),
         ("lookup", "low", structured.LOOKUP),
-        ("plan", "medium", structured.PLAN),
+        ("plan", "low", structured.PLAN),
         ("json", "low", None),
     ],
 )

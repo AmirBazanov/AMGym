@@ -59,7 +59,7 @@ PURPOSES: dict[str, Purpose] = {
         Purpose("baselines", "low", 4096, 30.0, structured.BASELINES),
         Purpose("lookup", "low", 4096, 30.0, structured.LOOKUP),
         Purpose("json", "low", 4096, 30.0),  # complete_json without a known schema
-        Purpose("plan", "medium", 8192, 60.0, structured.PLAN),
+        Purpose("plan", "low", 4096, 25.0, structured.PLAN),  # the Mini App waits for it: keep it short
         Purpose("answer", "medium", 8192, 60.0, None, ANSWER_SYSTEM_PROMPT),
         Purpose("advice", "medium", 8192, 60.0),
         Purpose("probe", "low", 1024, 30.0),  # /llm test
