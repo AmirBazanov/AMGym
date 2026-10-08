@@ -26,6 +26,7 @@ import anthropic
 
 from gymbot.llm import structured
 from gymbot.llm.prompts import ANSWER_SYSTEM_PROMPT, VISION_SYSTEM
+from gymbot.llm.prompts_edit import EDIT_SYSTEM_PROMPT
 
 API_URL = "https://api.anthropic.com"  # explicit: the SDK would otherwise follow ANTHROPIC_BASE_URL from the env
 CREDIT_COOLDOWN = 3600.0  # seconds Claude is skipped after "credit balance is too low"
@@ -56,6 +57,7 @@ PURPOSES: dict[str, Purpose] = {
         Purpose("parse", "low", 4096, 30.0, structured.PARSE),  # chat parser, saved-edit re-estimate, repair
         Purpose("photo", "low", 4096, 40.0, structured.PHOTO, VISION_SYSTEM),
         Purpose("settings", "low", 4096, 30.0, structured.SETTINGS),
+        Purpose("edit", "low", 4096, 30.0, structured.EDIT, stable_system=EDIT_SYSTEM_PROMPT),  # program edits
         Purpose("baselines", "low", 4096, 30.0, structured.BASELINES),
         Purpose("lookup", "low", 4096, 30.0, structured.LOOKUP),
         Purpose("json", "low", 4096, 30.0),  # complete_json without a known schema

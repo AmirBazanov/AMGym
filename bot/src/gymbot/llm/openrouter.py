@@ -600,7 +600,7 @@ class OpenRouterClient:
         Only "is it a JSON object" is checked here; the caller validates the content itself, so a wrong
         but well-formed answer costs one request, not a retry on every route. `prefer`: the top-level key of
         the expected answer, so an inner object with a "kind" key is not taken for it (see extract_json).
-        `purpose` ("settings", "baselines", "lookup", "plan") gives Claude its schema and effort.
+        `purpose` ("settings", "edit", "baselines", "lookup", "plan") gives Claude its schema and effort.
         """
         spec = PURPOSES[purpose]
 

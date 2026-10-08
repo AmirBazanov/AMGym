@@ -26,6 +26,7 @@ from gymbot.llm.openrouter import (
     vision_routes_from,
 )
 from gymbot.llm.prompts import ANSWER_SYSTEM_PROMPT, EXAMPLES, VISION_SYSTEM, build_answer_messages
+from gymbot.llm.prompts_edit import EDIT_SYSTEM_PROMPT, build_edit_messages
 
 KEY = "sk-ant-test-secret"
 GOOD = {"kind": "unknown", "clarification": "что?"}
@@ -215,6 +216,7 @@ async def test_answer_uses_high_effort_no_schema_and_caches_prompt_and_summary()
     ("purpose", "effort", "schema"),
     [
         ("settings", "low", structured.SETTINGS),
+        ("edit", "low", structured.EDIT),
         ("baselines", "low", structured.BASELINES),
         ("lookup", "low", structured.LOOKUP),
         ("plan", "low", structured.PLAN),
@@ -228,6 +230,16 @@ async def test_complete_json_effort_and_schema_per_purpose(purpose, effort, sche
     config = h.claude_bodies[0]["output_config"]
     assert config["effort"] == effort
     assert config.get("format") == (None if schema is None else {"type": "json_schema", "schema": schema})
+
+
+async def test_edit_purpose_caches_its_system_prompt():
+    """The edit prompt (stable, > 512 tokens) is cached; the program week goes in the user turn."""
+    h = Harness([message({"actions": [], "summary": ""})])
+    await h.client.complete_json(build_edit_messages("убери жим", "Сегодня …"), prefer="actions", purpose="edit")
+    body = h.claude_bodies[0]
+    assert body["system"] == [{"type": "text", "text": EDIT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
+    assert body["output_config"]["format"]["schema"] == structured.EDIT
+    assert "Сообщение: убери жим" in body["messages"][0]["content"][0]["text"]
 
 
 async def test_advice_purpose_is_medium():

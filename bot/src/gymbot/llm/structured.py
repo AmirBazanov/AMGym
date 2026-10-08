@@ -4,7 +4,7 @@ Built from pydantic models with the SDK's `transform_schema` (additionalProperti
 numeric and string limits move into the description). A single-value Literal becomes an enum first: the
 transform keeps `enum` but would demote `const` to description text. The schemas only shape the answer:
 the callers keep validating it as before (ParseResult, chat_settings.parse_actions, baselines.parse_answer,
-plan.apply_refinement, food_lookup.suggest), so a schema that drifts from them costs a rejected answer, not
+plan.apply_refinement, food_lookup.suggest, chat_edit.parse_actions), so a schema that drifts from them costs a rejected answer, not
 bad data. The models below mirror the prompts in gymbot.llm.prompts; keep them in sync.
 """
 
@@ -152,9 +152,88 @@ class PlanAnswer(BaseModel):
     exercises: list[_PlanExercise]
 
 
+# ---- program edits from the chat (prompts_edit.EDIT_SYSTEM_PROMPT; mirrors services.chat_edit) ----
+
+
+class _EditDay(BaseModel):
+    weekday: int | None
+    focus: str | None
+    when: Literal["today", "tomorrow"] | None
+
+
+_EditScope = Literal["this_week", "from_this_week", "all_weeks"] | None
+
+
+class _EditReplace(BaseModel):
+    type: Literal["replace"]
+    day: _EditDay
+    exercise: str
+    new_name: str
+    scope: _EditScope
+
+
+class _EditRemove(BaseModel):
+    type: Literal["remove"]
+    day: _EditDay
+    exercise: str
+    scope: _EditScope
+
+
+class _EditAdd(BaseModel):
+    type: Literal["add"]
+    day: _EditDay
+    name: str
+    sets: int | None
+    repsMin: int | None
+    repsMax: int | None
+    dropReps: list[int] | None
+    after: str | None
+    scope: _EditScope
+
+
+class _EditPrescribe(BaseModel):
+    type: Literal["prescribe"]
+    day: _EditDay
+    exercise: str
+    sets: int | None
+    repsMin: int | None
+    repsMax: int | None
+    dropReps: list[int] | None
+    intensity: Literal["heavy", "medium", "light"] | None
+    scope: _EditScope
+
+
+class _EditReorder(BaseModel):
+    type: Literal["reorder"]
+    day: _EditDay
+    order: list[str]
+
+
+class _EditWeight(BaseModel):
+    type: Literal["weight"]
+    said: str
+    exercise: str | None
+    weight_kg: float
+    date: str | None
+
+
+class _EditClarify(BaseModel):
+    type: Literal["clarify"]
+    question: str
+    options: list[str]
+
+
+class EditAnswer(BaseModel):
+    actions: list[
+        _EditReplace | _EditRemove | _EditAdd | _EditPrescribe | _EditReorder | _EditWeight | _EditClarify
+    ]
+    summary: str
+
+
 PARSE = schema_of(ParseResult)
 PHOTO = schema_of(VisionAnswer)
 SETTINGS = schema_of(SettingsAnswer)
 BASELINES = schema_of(BaselineAnswer)
 LOOKUP = schema_of(LookupAnswer)
 PLAN = schema_of(PlanAnswer)
+EDIT = schema_of(EditAnswer)

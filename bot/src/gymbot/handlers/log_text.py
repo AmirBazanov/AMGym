@@ -72,6 +72,7 @@ from gymbot.db.models import FoodEntry, User, Workout, WorkoutSet
 from gymbot.db.session import Sessionmaker
 from gymbot.handlers import body_weight, saved_edits
 from gymbot.handlers import products as product_cards
+from gymbot.handlers.chat_edit import send_edit, stage_edit
 from gymbot.handlers.chat_settings import send_staged, stage_settings
 from gymbot.handlers.plan import send_after_wellbeing
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
@@ -84,6 +85,7 @@ from gymbot.services import products as pr
 from gymbot.services.answer_intent import classify as classify_question
 from gymbot.services.answer_intent import plan_question
 from gymbot.services.body_weight import parse_chat as parse_body_weight
+from gymbot.services.chat_edit import is_edit_command
 from gymbot.services.chat_settings import is_settings_request
 from gymbot.services.programs import exercise_catalog, normalize
 from gymbot.services.tg_html import escape, send_html
@@ -712,6 +714,14 @@ async def process_text(
     dialog_at = ex.at if ex is not None and _dialog_open(user_id, message.date) else None
     if await product_cards.on_text(message, text, raw, sessionmaker, dialog_at=dialog_at, prefix=prefix):
         return
+    # "убери французский жим из дня рук", "поставь на сгибания 30 кг": the program, its own preview
+    # (handlers/chat_edit.py). Consumes the message only when the model found a valid edit; else it goes on.
+    if not _dialog_open(user_id, message.date) and is_edit_command(text):
+        async with keep_typing(message):  # a model call and a dry run before any reply
+            edit = await stage_edit(message, text, raw, settings, sessionmaker, llm)
+        if edit is not None:
+            await send_edit(message, edit, prefix=prefix)
+            return
     # "удали самсу", "самса была 2, а не 3": saved records, their own preview (handlers/saved_edits.py). Not while
     # a preview or the model's question is open: then it revises that preview in the dialog below.
     if not _dialog_open(user_id, message.date) and await saved_edits.handle(

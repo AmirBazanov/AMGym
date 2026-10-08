@@ -26,6 +26,7 @@ from gymbot.db.session import make_engine
 from gymbot.handlers import (
     advice,
     backup,
+    chat_edit,
     chat_settings,
     common,
     deload,
@@ -197,6 +198,7 @@ async def run() -> None:
             plan.router,
             deload.router,
             chat_settings.router,
+            chat_edit.router,
             voice.router,
             photo.router,
             products.router,
