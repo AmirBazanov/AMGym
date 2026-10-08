@@ -221,13 +221,14 @@ describe('doubleProgression', () => {
 describe('suggestWeight', () => {
   const BENCH = 'жим лёжа'
 
-  it('returns null without history', () => {
-    expect(suggestWeight([], ex(BENCH, 'medium'))).toBeNull()
+  // Since the related-exercise transfer suggestWeight never returns null: no number is source "none".
+  it('has no number without history', () => {
+    expect(suggestWeight([], ex(BENCH, 'medium'))).toMatchObject({ weight: null, source: 'none' })
   })
 
-  it('returns null when the history is about another exercise', () => {
+  it('has no number when the history is about an unrelated exercise', () => {
     const history = [workout('2026-10-01T10:00:00Z', 'присед', [[100, 5]])]
-    expect(suggestWeight(history, ex(BENCH, 'medium'))).toBeNull()
+    expect(suggestWeight(history, ex(BENCH, 'medium'))).toMatchObject({ weight: null, source: 'none' })
   })
 
   it('double progression wins over a lower record-based weight', () => {
@@ -343,7 +344,7 @@ describe('suggestWeight from baselines', () => {
   ]
 
   it('without a third argument behaves as before', () => {
-    expect(suggestWeight([], ex('жим лёжа', 'heavy'))).toBeNull()
+    expect(suggestWeight([], ex('жим лёжа', 'heavy'))).toMatchObject({ weight: null, source: 'none' })
   })
 
   it('reps known: Epley 1RM and the same share as the record branch', () => {
@@ -392,7 +393,7 @@ describe('suggestWeight from baselines', () => {
   })
 
   it('does not take a baseline of a similar exercise', () => {
-    expect(suggestWeight([], ex('жим лёжа 30°', 'heavy'), OWNER)).toBeNull()
+    expect(suggestWeight([], ex('жим лёжа 30°', 'heavy'), OWNER)).toMatchObject({ weight: null, source: 'none' })
   })
 
   it('is ignored entirely once the exercise has history', () => {

@@ -110,7 +110,7 @@ describe('suggestWeight with overrides', () => {
     expect(suggestWeight([], bench, B90)?.weight).toBe(82.5)
     expect(suggestWeight(HISTORY, bench, B90)?.weight).toBe(67.5)
     const s = suggestWeight(HISTORY, bench, B90, O85, TODAY)
-    expect(s).toEqual({ weight: 85, reason: 'ты поставил на сегодня 85 кг', override: O85[0] })
+    expect(s).toMatchObject({ weight: 85, reason: 'ты поставил на сегодня 85 кг', source: 'override', override: O85[0] })
     expect(suggestWeight([], bench, B90, O85, TODAY)?.weight).toBe(85)
   })
 

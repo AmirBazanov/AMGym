@@ -10,7 +10,7 @@ import {
   type ProgramDay,
   type ProgramExercise,
 } from './program'
-import { equipmentStep, findOverride, hasHistory, roundToStep, suggestWeight } from './progression'
+import { equipmentStep, findOverride, hasHistory, roundToStep, suggestWeight, type Suggestion } from './progression'
 import type { Baseline, ExerciseLog, WeightOverride, Workout } from './store'
 
 export type PlanMode = 'adjusted' | 'program'
@@ -29,6 +29,8 @@ export interface AdjustedExercise {
   factor: number
   /** The owner's weight for today from the chat, when `weight` is it. */
   override: WeightOverride | null
+  /** Where the base weight comes from and why (source, «на руку», the hint); null for a bare fallback row. */
+  suggestion: Suggestion | null
   reason: string | null
   /** "3 × 8–12 (по плану 4 × 8–12)" when sets or reps differ, otherwise the usual prescription. */
   target: string
@@ -137,6 +139,35 @@ export function scaleWeight(base: number | null, factor: number, step: number): 
   return factor < 1 ? Math.min(base, Math.max(step, r)) : Math.max(base, r)
 }
 
+export interface WeightFor {
+  suggestion: Suggestion
+  /** The base weight × the factor on the equipment step; the override as is; null for "hint"/"none". */
+  weight: number | null
+  /** Before the factor. */
+  baseWeight: number | null
+  factor: number
+}
+
+/**
+ * The weight for `exercise` today: suggestWeight (override > own history > baseline > related > hint >
+ * none), then the day plan's or the deload's factor on top, never on an override. The same composition
+ * as next_weights.py `suggest`; data/progression_cases.json runs against this function.
+ */
+export function suggestFor(
+  history: Workout[],
+  exercise: ProgramExercise,
+  baselines: readonly Baseline[] = [],
+  overrides: readonly WeightOverride[] = [],
+  today?: string,
+  factor: number | null | undefined = 1,
+): WeightFor {
+  const suggestion = suggestWeight(history, exercise, baselines, overrides, today)
+  const f = safeFactor(factor)
+  const base = suggestion.weight
+  const weight = base == null || suggestion.source === 'override' ? base : scaleWeight(base, f, equipmentStep(exercise.name))
+  return { suggestion, weight, baseWeight: base, factor: f }
+}
+
 function adjustPrescription(p: Prescription, a: DayPlanExercise | undefined): Prescription {
   if (!a) return p
   const sets = a.sets != null && a.sets >= 1 ? Math.round(a.sets) : p.sets
@@ -155,8 +186,7 @@ function unchanged(
   overrides: readonly WeightOverride[],
   today: string,
 ): AdjustedExercise {
-  const s = suggestWeight(history, e, baselines, overrides, today)
-  const weight = s?.weight ?? null
+  const { suggestion, weight } = suggestFor(history, e, baselines, overrides, today)
   const target = formatPrescription(e.prescription)
   return {
     exercise: e,
@@ -165,7 +195,8 @@ function unchanged(
     weight,
     baseWeight: weight,
     factor: 1,
-    override: s?.override ?? null,
+    override: suggestion.override ?? null,
+    suggestion,
     reason: null,
     target,
     changed: false,
@@ -176,7 +207,8 @@ function unchanged(
  * The day as it should be trained: plan corrections applied by exercise name (sets, reps, weight
  * factor, skip, replacement). Without a fitting plan, or when it would skip everything, the program
  * day as written (`applied` false), so the user always has something to train.
- * Weights come from history, else from the owner's baselines; the plan factor applies on top of either.
+ * Weights come from history, else from the owner's baselines, else from a related exercise of the history
+ * (suggestFor); the plan factor applies on top of any of them.
  * An override for `today` (the owner's own number from the chat) wins over both and is used as is: he
  * chose it knowing how he feels, so the plan's factor is not applied to it. It is looked up by the name
  * actually trained, so a replacement does not inherit the barbell number of the exercise it replaces.
@@ -217,11 +249,9 @@ export function applyPlan(
       prescription: { ...prescription, raw: target },
     }
     // A replacement has its own history and baseline: its base weight and step come from its own name.
-    const s = suggestWeight(history, { ...exercise, prescription }, baselines, overrides, today)
-    const baseWeight = s?.weight ?? null
-    const factor = safeFactor(a?.weightFactor)
-    const override = s?.override ?? null
-    const weight = override ? baseWeight : scaleWeight(baseWeight, factor, equipmentStep(exercise.name))
+    const w = suggestFor(history, { ...exercise, prescription }, baselines, overrides, today, a?.weightFactor)
+    const { baseWeight, factor, weight, suggestion } = w
+    const override = suggestion.override ?? null
     exercises.push({
       exercise,
       original,
@@ -230,6 +260,7 @@ export function applyPlan(
       baseWeight,
       factor,
       override,
+      suggestion,
       reason: a?.reason?.trim() || null,
       target,
       changed: replaced || target !== programTarget || (factor !== 1 && !override),
@@ -323,8 +354,7 @@ export function refillSuggestions(
     let next: number | null
     if (o) next = o.weightKg
     else if (was != null ? !started || was === today : !started && !hasHistory(history, log.name)) {
-      const base = suggestWeight(history, prev.exercise, baselines)?.weight ?? null
-      next = scaleWeight(base, prev.factor, equipmentStep(log.name))
+      next = suggestFor(history, prev.exercise, baselines, [], undefined, prev.factor).weight
     } else return log
     const overrideDate = o?.date ?? null
     if (!known || next !== prev.weight || was !== overrideDate) {

@@ -22,7 +22,6 @@ import {
   WEEKDAY_LONG,
   WEEKDAY_SHORT,
   type ProgramDay,
-  type ProgramExercise,
 } from '../program'
 import {
   applyPlan,
@@ -34,7 +33,7 @@ import {
   type AppliedPlan,
   type PlanMode,
 } from '../plan'
-import { overrideReason, suggestWeight } from '../progression'
+import { overrideReason, perHand, shortReason, type Suggestion } from '../progression'
 import { actions, currentRun, isStarted, lastSetsFor, overridesFor, planMode, useStore, type Workout } from '../store'
 import { formatKg } from '../stats'
 import type { Topic } from '../liveCore'
@@ -42,15 +41,20 @@ import { useRemote } from '../useRemote'
 import { confirm, haptic } from '../telegram'
 import { entriesCount, formatWellbeing, groupByDate, localISODate } from '../wellbeing'
 
-/** Why the day's weight is what it is, under the exercise name. */
-function SuggestHint({ history, exercise }: { history: Workout[]; exercise: ProgramExercise }) {
-  const { baselines } = useStore()
-  const s = suggestWeight(history, exercise, baselines)
-  if (!s) return null
+/** "15 кг на руку" for dumbbells (the number is one dumbbell), else "60 кг". */
+function kgText(kg: number, hand: boolean): string {
+  return `${formatKg(kg)} кг${hand ? ' на руку' : ''}`
+}
+
+/**
+ * Why the day's weight is what it is, under the exercise name. Without a number (no history, a cable or
+ * machine hint, nothing transferable) the line says how to pick the weight instead.
+ */
+function SuggestHint({ s }: { s: Suggestion }) {
   return (
     <div className="ex-suggest num">
       {/* The step is already visible in the weight, keep the line short on narrow screens. */}
-      предложено {formatKg(s.weight)} кг: {s.reason.replace(/, \+[\d,]+ кг$/, '')}
+      {s.weight != null ? `предложено ${kgText(s.weight, s.perHand)}: ${shortReason(s)}` : shortReason(s)}
     </div>
   )
 }
@@ -71,18 +75,22 @@ function PlanTarget({ adj }: { adj: AdjustedExercise }) {
  * Weight hint for a day exercise: the owner's own number for today, else with a plan factor the
  * corrected weight, else why the suggestion is what it is.
  */
-function PlanHint({ history, adj }: { history: Workout[]; adj: AdjustedExercise }) {
+function PlanHint({ adj }: { adj: AdjustedExercise }) {
   const note = planNote(adj)
+  const hand = perHand(adj.exercise.name)
   return (
     <>
       {adj.override && adj.weight != null ? (
-        <div className="ex-suggest num">{overrideReason(adj.weight)}</div>
+        <div className="ex-suggest num">
+          {overrideReason(adj.weight)}
+          {hand ? ' на руку' : ''}
+        </div>
       ) : adj.factor !== 1 && adj.weight != null && adj.baseWeight != null ? (
         <div className="ex-suggest num">
-          предложено {formatKg(adj.weight)} кг: {Math.round(adj.factor * 100)} % от {formatKg(adj.baseWeight)} кг
+          предложено {kgText(adj.weight, hand)}: {Math.round(adj.factor * 100)} % от {formatKg(adj.baseWeight)} кг
         </div>
       ) : (
-        <SuggestHint history={history} exercise={adj.exercise} />
+        adj.suggestion && <SuggestHint s={adj.suggestion} />
       )}
       {note && <div className="ex-plan-note">по плану: {note}</div>}
     </>
@@ -343,7 +351,7 @@ function DayPreview({ dp }: { dp: DayPlanState }) {
                     </span>
                   )}
                 </div>
-                <PlanHint history={history} adj={a} />
+                <PlanHint adj={a} />
               </div>
               <IconChevron />
             </button>
@@ -420,6 +428,7 @@ function lookupExercise(built: AppliedPlan | null, day: ProgramDay | undefined, 
     baseWeight: null,
     factor: 1,
     override: null,
+    suggestion: null,
     reason: null,
     target,
     changed: false,
@@ -562,7 +571,7 @@ function ActiveWorkout({ workout, dp }: { workout: Workout; dp: DayPlanState }) 
                   {pe && <IntensityBadge value={pe.intensity} />}
                   {ex.dropset && <DropBadge />}
                 </div>
-                {adj && <PlanHint history={history} adj={adj} />}
+                {adj && <PlanHint adj={adj} />}
               </div>
               <IconChevron />
             </button>
