@@ -474,10 +474,11 @@ async def test_probe_success_reports_usage_and_clears_pause():
     assert h.client.status(h.client.routes[0]).state == OK
 
 
-async def test_probe_failure_reports_class_only():
-    h = Harness([error(401, {"type": "error", "error": {"type": "authentication_error", "message": KEY}})])
+async def test_probe_failure_reports_class_status_and_message_without_secrets():
+    h = Harness([error(401, {"type": "error", "error": {"type": "authentication_error", "message": f"bad key {KEY}"}})])
     probe = await h.client.probe()
-    assert probe.error == "AuthenticationError" and probe.answer is None
+    assert probe.error.startswith("AuthenticationError 401: bad key") and probe.answer is None
+    assert KEY not in probe.error and "[скрыто]" in probe.error
     assert h.client.status(h.client.routes[0]).state == AUTH_FAILED
 
 

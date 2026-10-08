@@ -158,12 +158,12 @@ async def test_probe_reports_route_latency_tokens_cost(tmp_path, db):
     msg.bot.send_chat_action.assert_awaited()  # "typing" while the model thinks
 
 
-async def test_probe_reports_error_class_only(tmp_path, db):
+async def test_probe_reports_the_api_error_message(tmp_path, db):
     llm, _ = make_llm(tmp_path, [httpx2.Response(400, json=CREDITS_400)])
     msg, answers = make_message(42)
     await handler.llm_status(msg, command("test"), llm.s, db, llm)
-    assert answers == ["Проверка anthropic/claude-opus-5-5: ошибка BadRequestError за 0,0 с."]
-    assert "credit" not in answers[0]
+    assert answers[0].startswith("Проверка anthropic/claude-opus-5-5: ошибка BadRequestError 400: ")
+    assert "credit balance" in answers[0].lower()  # the API's own reason, to diagnose without a server shell
 
 
 async def test_counters_roll_over_at_local_midnight(tmp_path, db):

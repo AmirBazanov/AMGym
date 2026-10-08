@@ -217,6 +217,22 @@ def error_type(e: anthropic.APIStatusError) -> str | None:
     return None
 
 
+_SECRET = re.compile(r"sk-ant-[\w-]+|Bearer\s+\S+", re.IGNORECASE)
+
+
+def error_detail(e: anthropic.APIStatusError, limit: int = 300) -> str:
+    """The API's own error message (field paths and reasons, no request content), secrets cut out.
+
+    Logged and shown by /llm test so a rejected request shape can be diagnosed without a server shell."""
+    body = e.body
+    msg = None
+    if isinstance(body, dict) and isinstance(err := body.get("error"), dict):
+        msg = err.get("message")
+    text = msg if isinstance(msg, str) else str(e.message)
+    text = _SECRET.sub("[скрыто]", " ".join(text.split()))
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
 def out_of_credits(e: anthropic.APIStatusError) -> bool:
     """The prepaid API credits are spent: 400 "Your credit balance is too low…" or a 402 billing_error."""
     return e.status_code == 402 or error_type(e) == "billing_error" or "credit balance" in e.message.lower()

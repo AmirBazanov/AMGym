@@ -215,7 +215,7 @@ class Probe:
     seconds: float = 0.0
     answer: str | None = None
     usage: Usage | None = None
-    error: str | None = None  # the exception class, never its text
+    error: str | None = None  # the exception class; for Claude HTTP errors also the API's message (secrets cut)
 
 
 PROBE_TEXT = "Ответь одним словом: ок"
@@ -341,7 +341,7 @@ class OpenRouterClient:
     def _claude_failed(self, route: Route, e: anthropic.APIStatusError) -> bool:
         """Note a Claude HTTP error; True when it is about the route (limits, credits, key), not the request."""
         status = e.status_code
-        log.warning("llm %s failed: %s %s", route.name, status, claude.error_type(e) or "")
+        log.warning("llm %s failed: %s %s: %s", route.name, status, claude.error_type(e) or "", claude.error_detail(e))
         if isinstance(e, anthropic.RateLimitError):
             wait = cooldown_after(e.response)  # type: ignore[arg-type]  # httpx2.Response, same interface
             self._pause(route, wait, RATE_LIMITED)
@@ -492,7 +492,10 @@ class OpenRouterClient:
                 self._claude_failed(route, e)
             elif isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 429:
                 self._pause(route, cooldown_after(e.response), RATE_LIMITED)
-            return Probe(route.name, self._clock() - start, error=type(e).__name__)
+            error = type(e).__name__
+            if isinstance(e, anthropic.APIStatusError):
+                error += f" {e.status_code}: {claude.error_detail(e)}"
+            return Probe(route.name, self._clock() - start, error=error)
         self._cooldown_until.pop(route.name, None)
         self._reason.pop(route.name, None)
         self.stats.answered(route.name)
