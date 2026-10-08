@@ -1268,12 +1268,13 @@ async def test_remember_tap_keeps_the_open_variants(llm, settings, db, find):
 
 async def test_question_is_answered_from_the_diary(llm, settings, db, diary):
     llm.answers = [{"kind": "question", "clarification": "Не знаю."}, "Сегодня жим лёжа 3×8–12, начни с 40 кг."]
-    msg = await send("что у меня сегодня и с каким весом?", llm, settings, db)
+    # "посоветуешь": advice, the model's turn (a plain "что у меня сегодня" is answered in code, test_next_weights_day)
+    msg = await send("что посоветуешь на сегодня и с каким весом?", llm, settings, db)
     assert msg.answer.await_args.args[0] == "Сегодня жим лёжа 3×8–12, начни с 40 кг."
     system, *rest = llm.bodies[-1]["messages"]
     assert "Сводка:" in system["content"] and "План на сегодня" in system["content"]
     assert "response_format" not in llm.bodies[-1]
-    assert [m["content"] for m in rest] == ["что у меня сегодня и с каким весом?"]
+    assert [m["content"] for m in rest] == ["что посоветуешь на сегодня и с каким весом?"]
 
 
 async def test_next_question_sees_previous_answers(llm, settings, db, diary):

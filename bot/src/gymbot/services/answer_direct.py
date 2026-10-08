@@ -11,6 +11,11 @@ still counts in the tonnage, as in the advice summary (gymbot.services.advice) a
 "Last time" for an exercise is the last day BEFORE today when there is one (mid-workout today's sets are
 not "last time"), like the day plan (gymbot.services.plan).
 
+`plan_reply` answers answer_intent.plan_question: the program day (today with the day plan's corrections,
+another day with a running deload) with a weight and its reason per exercise (gymbot.services.next_weights;
+dumbbells per hand), and a recovery note only while the day's groups are still recovering at its start
+(never "skip the day": a program day stays). `weights_block` is the same for the model's summary.
+
 Only reads. Days are local dates in TIMEZONE (Workout.performed_on is one already), weights in kg.
 """
 
@@ -24,15 +29,20 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from gymbot.config import Settings
 from gymbot.db.models import Exercise, User, Workout, WorkoutSet
 from gymbot.services import active_workout, nutrition
-from gymbot.services.advice import epley
+from gymbot.services import next_weights as nw
+from gymbot.services.advice import epley, group_label, recovery_times
 from gymbot.services.answer_intent import (
+    PLAN_WORDS,
     QUESTION_WORDS,
     Intent,
+    PlanQuestion,
     Question,
     head_matches,
     mentions,
+    resolve_day,
     same,
     synonym_targets,
     variants,
@@ -492,3 +502,186 @@ async def reply(
     if q.intent is Intent.WORKOUT:
         return await workout_reply(session, user.id, q.day, today, in_progress, previous=q.previous)
     return await exercise_reply(session, user.id, question, q, today, in_progress)
+
+
+# ---- the program day with weights (gymbot.services.next_weights) ----
+
+WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+PLAN_EXERCISES_MAX = 4  # "с каким весом в сгибаниях" with several matching program exercises
+
+
+def day_label(day: date, today: date) -> str:
+    """'Сегодня, чт 08.10' / 'Завтра, пт 09.10' / 'Пт 09.10'."""
+    short = f"{WEEKDAYS[day.weekday()]} {day:%d.%m}"
+    if day == today:
+        return f"Сегодня, {short}"
+    if day == today + timedelta(days=1):
+        return f"Завтра, {short}"
+    return _cap(short)
+
+
+def sets_text(r: nw.DayRow) -> str:
+    """'3×8–12', '3× дропсет 12-6-6', '3 подх.' (as plan.plan_text)."""
+    if r.drop_reps:
+        return f"{r.sets}× дропсет {'-'.join(map(str, r.drop_reps))}"
+    if r.reps_min is None:
+        return f"{r.sets} подх."
+    reps = f"{r.reps_min}–{r.reps_max}" if r.reps_max and r.reps_max != r.reps_min else str(r.reps_min)
+    return f"{r.sets}×{reps}"
+
+
+def weight_text(s: nw.Suggestion) -> str:
+    """'27,5 кг (reason)', '13,5 кг на руку (reason)', or the reason alone when there is no number."""
+    if s.weight is None:
+        return s.reason
+    reason = s.reason
+    if s.factor != 1 and s.base_weight is not None:
+        pct = round((1 - s.factor) * 100)
+        reason += f"; по плану дня −{pct} % от {kg(s.base_weight)}"
+    return f"{kg(s.weight)} кг{' на руку' if s.per_hand else ''} ({reason})"
+
+
+def row_line(r: nw.DayRow) -> str:
+    title = _cap(r.name) + (f" (вместо «{r.program_name}»)" if r.name != r.program_name else "")
+    if r.suggestion is None:
+        return f"• {title} — пропуск" + (f" ({r.note})" if r.note else "")
+    return f"• {title} {sets_text(r)} — {weight_text(r.suggestion)}"
+
+
+def recovery_note(dw: nw.DayWeights, recovering: dict[str, datetime], tz: ZoneInfo) -> str:
+    """Groups of the day that are still recovering at the start of it: '… восстановятся к пт 09.10 17:00 (48 ч
+    после тренировки) — тренировка после этого времени в самый раз.' A program day is never called off."""
+    groups = list(dict.fromkeys(group_label(r.name) for r in dw.rows if r.suggestion is not None))
+    start = datetime.combine(dw.day, datetime.min.time(), tz)
+    until: dict[datetime, list[str]] = {}
+    for g in groups:
+        at = recovering.get(g)
+        if at is not None and at > start:
+            until.setdefault(at.astimezone(tz), []).append(g)
+    lines = []
+    for at, names in sorted(until.items()):
+        who = _cap(", ".join(names))
+        verb = "восстановится" if len(names) == 1 else "восстановятся"
+        when = f"{WEEKDAYS[at.weekday()]} {at:%d.%m %H:%M}"
+        if at.date() == dw.day:
+            lines.append(f"{who} {verb} к {when} (48 ч после тренировки) — тренировка после {at:%H:%M} в самый раз.")
+        else:
+            lines.append(
+                f"{who} {verb} только к {when} (48 ч после тренировки): тренировка по программе остаётся; "
+                "если мышцы забиты, напиши — план дня станет легче."
+            )
+    return "\n".join(lines)
+
+
+def plan_day_text(dw: nw.DayWeights, today: date, note: str = "", only: list[str] | None = None) -> str:
+    """The direct answer: the day, every exercise with sets × reps, the weight and its reason."""
+    rows = [r for r in dw.rows if only is None or r.program_name in only or r.name in only]
+    head = f"{day_label(dw.day, today)} — тренировка по программе (неделя {dw.week}):"
+    lines = [head]
+    if dw.rest:
+        lines.append("План дня советует отдохнуть" + (f": {dw.summary}" if dw.summary else ".") + " Если всё же идёшь:")
+    elif dw.summary:
+        lines.append(dw.summary)
+    lines += [row_line(r) for r in rows]
+    if any(r.suggestion is not None and r.suggestion.per_hand for r in rows):
+        lines.append("Гантели — вес одной гантели (на руку).")
+    if note:
+        lines.append(note)
+    return "\n".join(lines)
+
+
+def weights_block(dw: nw.DayWeights, today: date) -> str:
+    """For the model: «Веса на пт 09.10 (посчитано дневником): …», the only weights it may name."""
+    label = day_label(dw.day, today).lower()
+    lines = [f"Веса на {label} (посчитано дневником, гантели — на руку):"]
+    if dw.summary:
+        lines.append(dw.summary)
+    lines += [row_line(r) for r in dw.rows]
+    return "\n".join(lines)
+
+
+async def _plan_day(
+    session: AsyncSession, user: User, settings: Settings, tz: ZoneInfo, now_utc: datetime,
+    ref: nw.ProgramRef, day: date,
+) -> tuple[date, nw.DayWeights] | None:
+    """The day's weights; on a rest day the next training day's (within NEXT_DAY_SEARCH)."""
+    dw = await nw.day_weights(session, user, settings, tz, now_utc, day, ref)
+    if dw is not None:
+        return day, dw
+    nxt = nw.training_day_from(ref, day + timedelta(days=1))
+    if nxt is None:
+        return None
+    dw = await nw.day_weights(session, user, settings, tz, now_utc, nxt, ref)
+    return (nxt, dw) if dw is not None else None
+
+
+async def target_day(
+    session: AsyncSession, user: User, settings: Settings, tz: ZoneInfo, now_utc: datetime, pq: PlanQuestion | None
+) -> tuple[date | None, nw.DayWeights] | None:
+    """(the asked day or None, the training day answered) for the model's weights block: the asked day, else
+    today when it is a training day without a workout yet, else the next training day."""
+    ref = await nw.program_ref(session, user, settings)
+    if ref is None:
+        return None
+    today = now_utc.astimezone(tz).date()
+    asked: date | None = None
+    if pq is not None and pq.when is not None:
+        asked = (nw.training_day_from(ref, today + timedelta(days=1)) if pq.when[0] == "next"
+                 else resolve_day(pq.when, today))
+    if asked is None:
+        trained = await last_training_day(session, user.id, today) == today
+        asked_default = today + timedelta(days=1) if trained else today
+        found = await _plan_day(session, user, settings, tz, now_utc, ref, asked_default)
+        return (None, found[1]) if found else None
+    found = await _plan_day(session, user, settings, tz, now_utc, ref, asked)
+    return (asked, found[1]) if found else None
+
+
+async def plan_reply(
+    session: AsyncSession, user: User, settings: Settings, question: str, pq: PlanQuestion, tz: ZoneInfo,
+    now_utc: datetime,
+) -> str | None:
+    """The program day with weights for a PlanQuestion, or None (the model answers: no program, a past date,
+    an exercise that is not in the program)."""
+    ref = await nw.program_ref(session, user, settings)
+    if ref is None:
+        return None
+    today = now_utc.astimezone(tz).date()
+    recovering = await recovery_times(session, user.id, today, now_utc)
+    if pq.when is None:  # "с каким весом в <упражнение>": its next program day
+        names = list(dict.fromkeys(
+            it.name for k in range(nw.NEXT_DAY_SEARCH + 1)
+            if (d := nw.program_day(ref, today + timedelta(days=k))) for it in d[2]
+        ))
+        found = mentions(question, names)
+        if not found:
+            found = head_matches(question, names, skip=PLAN_WORDS)
+            said = [w for w in words(question) if w not in PLAN_WORDS and len(w) >= 3]
+            named = {w for n in found for w in words(n)}
+            if not found or any(not any(same(w, x) for x in named) for w in said):
+                return None
+        found = found[:PLAN_EXERCISES_MAX]
+        for k in range(nw.NEXT_DAY_SEARCH + 1):
+            d = today + timedelta(days=k)
+            day = nw.program_day(ref, d)
+            if day and any(it.name in found for it in day[2]):
+                dw = await nw.day_weights(session, user, settings, tz, now_utc, d, ref)
+                if dw is not None:
+                    return plan_day_text(dw, today, recovery_note(dw, recovering, tz), only=found)
+        return None
+    if pq.when[0] == "next":
+        asked = nw.training_day_from(ref, today + timedelta(days=1))
+        if asked is None:
+            return None
+    else:
+        asked = resolve_day(pq.when, today)
+        if asked is None:
+            return None
+    found_day = await _plan_day(session, user, settings, tz, now_utc, ref, asked)
+    if found_day is None:
+        return f"{day_label(asked, today)}: по программе тренировки нет, и в ближайшие дни тоже."
+    day, dw = found_day
+    text = plan_day_text(dw, today, recovery_note(dw, recovering, tz))
+    if day != asked:
+        text = f"{day_label(asked, today)} по программе отдых. Ближайшая тренировка:\n{text}"
+    return text

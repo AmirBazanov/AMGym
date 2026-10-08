@@ -82,6 +82,7 @@ from gymbot.services import answer as qa
 from gymbot.services import baselines, facts, food_lookup, live, plausibility, workout_events
 from gymbot.services import products as pr
 from gymbot.services.answer_intent import classify as classify_question
+from gymbot.services.answer_intent import plan_question
 from gymbot.services.body_weight import parse_chat as parse_body_weight
 from gymbot.services.chat_settings import is_settings_request
 from gymbot.services.programs import exercise_catalog, normalize
@@ -516,7 +517,7 @@ def _factual_question(text: str, result: ParseResult, prev: Exchange | None) -> 
     t = normalize(text)
     if _RECORD_NUMBERS.search(t) or (result.kind == "unknown" and _RECORD_VERB.search(t)):
         return False
-    return classify_question(text) is not None
+    return classify_question(text) is not None or plan_question(text) is not None
 
 
 async def _active_overlap(tg_id: int, result: ParseResult, settings: Settings, sessionmaker: Sessionmaker) -> str:
@@ -823,6 +824,10 @@ async def _reply_parsed(
     # The model tends to repeat facts it was given: offer only new ones.
     offer = result.remember
     if offer and facts.normalize(offer) in {facts.normalize(k) for k in known}:
+        offer = None
+    # Only what the user said about himself: never a number the model derived (1ПМ, «~50 кг на штанге»).
+    if offer and facts.derived_offer(offer, f"{text}\n{raw}"):
+        log.info("a model-derived fact offer dropped")
         offer = None
     variants: list[Variant] = []
     if (

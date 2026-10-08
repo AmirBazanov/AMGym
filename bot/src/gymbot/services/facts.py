@@ -157,3 +157,39 @@ class FactOut(BaseModel):
 def fact_out(f: UserFact) -> FactOut:
     created = f.created_at if f.created_at.tzinfo else f.created_at.replace(tzinfo=UTC)  # SQLite drops the offset
     return FactOut(id=f.id, text=f.text, category=f.category, createdAt=created.astimezone(UTC), active=f.active)
+
+
+# ---- Offers to remember: model-derived numbers are not facts about the user ----
+
+_DERIVED_WORDS = re.compile(
+    r"(?<!\w)(?:1\s?пм|пм|1\s?rm|rm)(?!\w)|e1rm|эпли|≈|по расчет|расчетн|оценочн|примерный максимум"
+)
+_NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
+# A lift or a working weight: kg, the bar, sets and reps. Food portions («самса ~150 г») are not: the parser
+# is asked to turn "они у нас большие" into a portion, and the user confirms it with the button.
+_LIFT = re.compile(r"(?<!\w)кг(?!\w)|килограм|штанг|гантел|гриф|смит|блок|тренаж|жим|присед|тяг|сгибан|разгибан|"
+                   r"подход|повтор|рабоч|макс")
+
+
+def _numbers(text: str) -> set[float]:
+    return {float(n.replace(",", ".")) for n in _NUMBER.findall(text)}
+
+
+def derived_offer(offer: str, said: str) -> bool:
+    """True when the offered fact («Запомнить? «…»») is a number the model computed, not the user's own words.
+
+    Incident: the diary answer offered «Запомнить: 1ПМ … на штанге ~50 кг», its own estimate, as if the
+    user had said it. Such an offer must not be shown. Compared lower-cased, ё = е.
+
+    - Always derived: 1ПМ / 1RM / e1RM, «Эпли», «≈», «по расчёту», «расчётн…», «оценочн…», «примерный максимум».
+    - With «~» or «%» about a lift or a weight in kg (`_LIFT`): derived only if some number of the offer
+      (12,5 == 12.5) is absent from `said`, the user's own message («жим ~80 кг» after «жму примерно 80»
+      is the user's number). Food portions («самса ~150 г», «творог 5 %») are never derived here.
+    - Anything else is not derived.
+    """
+    text = " ".join(offer.casefold().replace("ё", "е").split())
+    if _DERIVED_WORDS.search(text):
+        return True
+    if ("~" in text or "%" in text) and _LIFT.search(text):
+        return not _numbers(text) <= _numbers(said)
+    return False

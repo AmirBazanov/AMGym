@@ -38,6 +38,7 @@ from gymbot.services.nutrition import _aware, day_summary, user_targets, week_su
 from gymbot.services.plan import muscle_group
 from gymbot.services.profile import GOAL_NAMES
 from gymbot.services.programs import find_day, format_item, load_program, program_position
+from gymbot.services.tg_format import plain
 from gymbot.services.wellbeing import context_lines as wellbeing_lines
 
 FACTS_IN_CONTEXT = 400  # newest active facts that fit; the rest of the summary matters more
@@ -301,6 +302,34 @@ async def muscle_load(session: AsyncSession, user_id: int, today: date, now_utc:
     return "\n".join(lines)
 
 
+async def recovery_times(session: AsyncSession, user_id: int, today: date, now_utc: datetime) -> dict[str, datetime]:
+    """Muscle groups still recovering -> when they recover (UTC): >= RECOVERY_MIN_SETS main sets less than
+    RECOVERY_HOURS ago, the same rule as the «Восстанавливаются» line of `muscle_load` («прочее» never)."""
+    rows = (
+        await session.execute(
+            select(Workout.started_at, Exercise.name, func.count(WorkoutSet.id))
+            .join(WorkoutSet, WorkoutSet.workout_id == Workout.id)
+            .join(Exercise, Exercise.id == WorkoutSet.exercise_id)
+            .where(Workout.user_id == user_id, Workout.performed_on >= today - timedelta(days=LOAD_DAYS - 1),
+                   Workout.performed_on <= today, WorkoutSet.drop_index == 0)
+            .group_by(Workout.id, Workout.started_at, Exercise.name)
+        )
+    ).all()
+    loads: dict[str, _GroupLoad] = {}
+    for at, name, n in rows:
+        label = group_label(name)
+        if label == OTHER or now_utc - (at := _aware(at)) >= timedelta(hours=RECOVERY_HOURS):
+            continue
+        load = loads.setdefault(label, _GroupLoad())
+        load.recent_sets += n
+        load.recent_at = max(load.recent_at or at, at)
+    return {
+        label: load.recent_at + timedelta(hours=RECOVERY_HOURS)
+        for label, load in loads.items()
+        if load.recent_sets >= RECOVERY_MIN_SETS and load.recent_at is not None
+    }
+
+
 # ---- program ----
 
 
@@ -429,7 +458,7 @@ async def generate(
 ) -> str:
     """Advice text for the chat. Raises LLMError when no model answered."""
     context = await build_context(session, user, settings, tz, now_utc)
-    text = await llm.complete_text(build_advice_messages(context), purpose="advice")
+    text = plain(await llm.complete_text(build_advice_messages(context), purpose="advice"))
     if ADVICE_DISCLAIMER.lower() not in text.lower():
         text = f"{text}\n\n{ADVICE_DISCLAIMER}"
     if len(text) > TELEGRAM_MAX:

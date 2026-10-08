@@ -5,12 +5,16 @@ asks again here (`respond`), in three layers against made-up numbers:
 
 1. A factual question (gymbot.services.answer_intent.classify: the day's workout and tonnage, food and
    KBJU left, an exercise's last time and record) is answered in code from the database
-   (gymbot.services.answer_direct), no model at all.
+   (gymbot.services.answer_direct), no model at all. So is a question about a program day and its weights
+   (answer_intent.plan_question: «какая завтра тренировка», «какие веса в пятницу», «с каким весом в
+   смите»): the day with sets × reps and the weights of gymbot.services.next_weights, the same every time.
 2. Anything else goes to the model with the advice summary (gymbot.services.advice, `for_answer`: profile,
    facts, food, the training totals, the muscle load and the groups still recovering, wellbeing, the program
    and its next training day), the day's workout, food and per-exercise records counted here, today's adjusted plan (gymbot.services.plan), the weights set for today from the
-   chat (gymbot.services.overrides), the workout in progress in the Mini App (gymbot.services.active_workout)
-   and the last questions and answers of the dialog. Its answer is checked in code
+   chat (gymbot.services.overrides), the workout in progress in the Mini App (gymbot.services.active_workout),
+   the weights for the asked (else the next) training day counted by gymbot.services.next_weights (the
+   model may name only those) and the last questions and answers of the dialog. Model text is made plain
+   for Telegram (gymbot.services.tg_format: no Markdown tables, ** or #) and then checked in code
    (gymbot.services.answer_check): a claim about the past that the summary does not hold gets one
    regeneration with a correction, then an honest fallback that shows the counted block.
 3. The model answers at ANSWER_TEMPERATURE, and the prompt says to admit what the diary lacks.
@@ -47,8 +51,9 @@ from gymbot.services import active_workout, advice, body_weight, live, nutrition
 from gymbot.services import answer_direct as direct
 from gymbot.services import records as new_records
 from gymbot.services.answer_check import Evidence, correction, violations
-from gymbot.services.answer_intent import classify, mentions
+from gymbot.services.answer_intent import classify, mentions, plan_question
 from gymbot.services.programs import normalize
+from gymbot.services.tg_format import plain
 from gymbot.services.users import active_program, get_or_create_user
 
 log = logging.getLogger(__name__)
@@ -178,9 +183,12 @@ async def gather(
     tz: ZoneInfo,
     now_utc: datetime,
     cache: ContextCache | None = None,
+    question: str = "",
 ) -> Context:
     """The advice summary, the counted blocks and today's plan. Starts the default program like /plan;
-    commits. With `cache` the summary of the last CONTEXT_TTL seconds is reused (see the module doc)."""
+    commits. With `cache` the summary of the last CONTEXT_TTL seconds is reused (see the module doc).
+    The weights block («Веса на … (посчитано дневником)», gymbot.services.next_weights) is for the day the
+    `question` asks about, else the next training day; it is built fresh, never cached."""
     today_local = now_utc.astimezone(tz).date()
     base = cache.get(user.id, today_local) if cache is not None else None
     if base is None:
@@ -191,9 +199,20 @@ async def gather(
     weights = overrides.context_line(await overrides.for_day(session, user.id, today_local))
     in_progress = await active_workout.context_for(session, user.id, now_utc, tz)
     body = await body_weight.context_line(session, user.id, today_local)
-    tail = "".join(f"\n{line}" for line in (weights, in_progress, body) if line)
+    day_weights = await weights_block(session, user, settings, tz, now_utc, question)
+    tail = "".join(f"\n{line}" for line in (day_weights, weights, in_progress, body) if line)
     running = mentions(in_progress, base.catalog, base.aliases) if in_progress else []
     return Context(base.text + tail, base.done, base.food, base.history, running, base.catalog, base.aliases)
+
+
+async def weights_block(
+    session: AsyncSession, user: User, settings: Settings, tz: ZoneInfo, now_utc: datetime, question: str
+) -> str:
+    """«Веса на <day> (посчитано дневником): …» for the model, '' without a program day ahead."""
+    found = await direct.target_day(session, user, settings, tz, now_utc, plan_question(question))
+    if found is None:
+        return ""
+    return direct.weights_block(found[1], now_utc.astimezone(tz).date())
 
 
 async def build_context(
@@ -209,6 +228,8 @@ async def build_context(
 
 
 def _cut(text: str) -> str:
+    """Plain text for Telegram (no Markdown tables, ** or #: gymbot.services.tg_format), cut to ANSWER_MAX."""
+    text = plain(text)
     return text if len(text) <= ANSWER_MAX else text[: ANSWER_MAX - 1].rstrip() + "…"
 
 
@@ -288,9 +309,16 @@ async def respond(
     async with sessionmaker() as session:
         user = await get_or_create_user(session, telegram_id, full_name)
         await session.commit()  # no write lock while the model thinks
+        pq = plan_question(question)
+        if pq is not None:
+            await active_program(session, user, now_utc.astimezone(tz).date())
+            await session.commit()
+            if (text := await direct.plan_reply(session, user, settings, question, pq, tz, now_utc)) is not None:
+                log.info("diary answer: the program day from the database")
+                return Reply(text, DIRECT)
         q = classify(question)
         if q is not None and (text := await direct.reply(session, user, question, q, tz, now_utc)) is not None:
             log.info("diary answer: %s from the database", q.intent.value)
             return Reply(text, DIRECT)
-        ctx = await gather(session, user, settings, llm, tz, now_utc, cache_for(sessionmaker))
+        ctx = await gather(session, user, settings, llm, tz, now_utc, cache_for(sessionmaker), question)
     return await checked_answer(llm, ctx, question, dialog)

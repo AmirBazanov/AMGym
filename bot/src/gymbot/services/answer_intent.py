@@ -18,7 +18,9 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date, timedelta
 from enum import Enum
+from typing import Any
 
 from gymbot.services.programs import normalize
 
@@ -269,3 +271,129 @@ _QUESTION_WORDS = (
     "этот", "тот",
 )
 QUESTION_WORDS = {stem(w) for w in _QUESTION_WORDS}
+
+
+# ---- the program day and its weights ("какая завтра тренировка", "какие веса в пятницу") ----
+
+
+@dataclass(frozen=True)
+class PlanQuestion:
+    """A question about a program day or the weights for it, answered from gymbot.services.next_weights.
+
+    `when`: ("offset", days from today) | ("weekday", 0=Mon..6) | ("date", (day, month)) | ("next", 0) |
+    None (no day said: the exercise's next program day). `exercise`: no day said, the question names
+    exercises (resolved against the program by the caller)."""
+
+    when: tuple[str, Any] | None
+    weights: bool = False
+    exercise: bool = False
+
+
+_WEEKDAY_STEMS = (
+    ("понедельник", 0), ("вторник", 1), ("сред", 2), ("четверг", 3), ("пятниц", 4), ("суббот", 5), ("воскресен", 6),
+)
+_WEEKDAY = _rx(_W + r"(?:(?:в|во|на)\s+)?(понедельник\w*|вторник\w*|сред[ауые]|четверг\w*|пятниц[ауые]|суббот[ауые]|"
+                    r"воскресень[еяю])" + _E)
+_WEEKDAY_SHORT = _rx(_W + r"(?:в|во|на)\s+(пн|вт|ср|чт|пт|сб|вс)" + _E)
+_SHORT_DAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+_OFFSET = _rx(_W + r"(послезавтра|завтра\w*|сегодня\w*)" + _E)
+_DATE_NUM = _rx(_W + r"(?:на\s+)?(\d{1,2})\s*(?:-?го|-?е)?\s+числ\w*|" + _W + r"на\s+(\d{1,2})\s*-?е" + _E)
+_DATE_DOT = _rx(_W + r"(\d{1,2})[./](\d{1,2})(?:[./]\d{2,4})?(?![\d.,])")
+_NEXT = _rx(_W + r"(?:следующ\w*|ближайш\w*)\s+(?:тренировк\w*|трен\w*|занят\w*)" + _E)
+_TRAINING_Q = _rx(
+    _W + r"(?:как\w*|что(?:\s+за)?|чем)\s+(?:[а-я]+\s+){0,3}?(?:тренировк\w*|трен[еяиу]?|упражнени\w*|"
+    r"по\s+программ\w*|по\s+плану|в\s+программ\w*|в\s+плане|день|занимаюсь|занимаемся|качаю|качаем)" + _E
+)
+_WHAT_ON = _rx(r"^(?:а\s+)?что(?:\s+у\s+меня)?(?:\s+будет)?(?:\s+по\s+(?:программ\w*|плану))?$")
+_WEIGHTS_Q = _rx(
+    _W + r"(?:(?:с\s+)?как\w*\s+(?:[а-я]+\s+){0,2}?вес\w*|(?:сколько|какой\s+вес)\s+(?:[а-я]+\s+){0,2}?"
+    r"(?:ставить|брать|вешать|работать))" + _E
+)
+# Advice about the day, not the day itself: the model answers.
+_PLAN_ADVICE = _rx(
+    _W + r"(?:почему|зачем|облегч\w*|замен\w*|подтян\w*|стоит|можно|лучше|думаешь|считаешь|посовет\w*|совет\w*|"
+    r"отдохн\w*|отдыхать|пропуст\w*|перенес\w*|перенест\w*|сдвин\w*|вместо|болит|устал\w*|сколько\s+подход\w*|"
+    r"прибав\w*|добав\w*|увелич\w*|уменьш\w*|снизить|похудеть|ккал|калори\w*|бел(?:ок|ка)|еда|ест?ь|"
+    r"был\w*|делал\w*|сделал\w*|жал|ел|ела|съел\w*)" + _E
+)
+
+
+def _when(t: str) -> tuple[tuple[str, Any] | None, str]:
+    """The day said in `t` and `t` without it."""
+    if m := _NEXT.search(t):
+        return ("next", 0), t[: m.start()] + t[m.end():]
+    if m := _OFFSET.search(t):
+        word = m.group(1)
+        days = 2 if word == "послезавтра" else 1 if word.startswith("завтра") else 0
+        return ("offset", days), t[: m.start()] + t[m.end():]
+    if m := _WEEKDAY.search(t):
+        word = m.group(1)
+        return ("weekday", next(i for stem_, i in _WEEKDAY_STEMS if word.startswith(stem_))), t[: m.start()] + t[m.end():]
+    if m := _WEEKDAY_SHORT.search(t):
+        return ("weekday", _SHORT_DAYS.index(m.group(1))), t[: m.start()] + t[m.end():]
+    if m := _DATE_DOT.search(t):
+        d, mo = int(m.group(1)), int(m.group(2))
+        if 1 <= d <= 31 and 1 <= mo <= 12:
+            return ("date", (d, mo)), t[: m.start()] + t[m.end():]
+    if m := _DATE_NUM.search(t):
+        d = int(m.group(1) or m.group(2))
+        if 1 <= d <= 31:
+            return ("date", (d, None)), t[: m.start()] + t[m.end():]
+    return None, t
+
+
+def plan_question(text: str) -> PlanQuestion | None:
+    """A question about the program day or its weights, or None. A day must be said ("завтра", "в пятницу",
+    "9 числа", "9.10", "следующая тренировка") with a question about the training or the weights; without a
+    day only a weights question that names something (the caller checks it is a program exercise)."""
+    t = " ".join(normalize(text).replace("?", " ").replace(",", " ").split())
+    if not t or _PLAN_ADVICE.search(t):
+        return None
+    when, rest = _when(t)
+    rest = " ".join(rest.split())
+    weights = bool(_WEIGHTS_Q.search(t))
+    if when is not None:
+        if weights or _TRAINING_Q.search(t) or _WHAT_ON.match(rest) or when[0] == "next":
+            return PlanQuestion(when, weights)
+        return None
+    if weights:
+        return PlanQuestion(None, True, exercise=True)
+    return None
+
+
+def resolve_day(when: tuple[str, Any], today: date) -> date | None:
+    """The local date of `when` on or after `today` ("next" is resolved by the caller from the program)."""
+    kind, value = when
+    if kind == "offset":
+        return today + timedelta(days=value)
+    if kind == "weekday":
+        return today + timedelta(days=(value - today.weekday()) % 7)
+    if kind == "date":
+        d, month = value
+        if month is not None:  # "9.10": this year; a past date is a question about the past, not the plan
+            try:
+                candidate = date(today.year, month, d)
+            except ValueError:
+                return None
+            return candidate if candidate >= today else None
+        for k in range(13):
+            y, m = divmod(today.month - 1 + k, 12)
+            try:
+                candidate = date(today.year + y, m + 1, d)
+            except ValueError:
+                continue
+            if candidate >= today:
+                return candidate
+        return None
+    return None
+
+
+# Words of a weights question that never name an exercise (stems, see `words`).
+PLAN_WORDS = {
+    stem(w) for w in (
+        "какие", "какими", "каким", "какой", "какая", "какую", "вес", "веса", "весом", "весами", "весу",
+        "работать", "ставить", "брать", "вешать", "делать", "жать", "тягать", "мне", "меня", "надо", "нужно",
+        "тренировка", "тренировке", "тренировку", "программе", "плану", "будет", "следующей", "следующая",
+        "сейчас", "рабочий", "рабочие", "рабочим", "рабочими", "лучше", "там", "это", "этом", "этой",
+    )
+} | QUESTION_WORDS

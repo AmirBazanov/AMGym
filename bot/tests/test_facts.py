@@ -153,3 +153,60 @@ def test_help_mentions_facts():
     from gymbot.handlers.common import HELP
 
     assert "/facts" in HELP and "запомни" in HELP
+
+
+@pytest.mark.parametrize(
+    "offer",
+    [
+        "1ПМ жим лёжа 100 кг",
+        "1 ПМ в приседе 120 кг",
+        "ПМ жим 90",
+        "1RM жим 100 кг",
+        "rm приседа 120",
+        "e1RM 105 кг",
+        "максимум по Эпли 110 кг",
+        "жим ≈ 100 кг",
+        "максимум по расчёту 100 кг",
+        "расчётный вес 80 кг",
+        "оценочный максимум 90 кг",
+        "примерный максимум 95 кг",
+    ],
+)
+def test_derived_offer_always(offer):
+    assert facts.derived_offer(offer, "что угодно 100 120 90 80 105 110 95") is True
+
+
+@pytest.mark.parametrize(
+    ("offer", "said", "derived"),
+    [
+        ("самса ~150 г", "съел самсу грамм 150", False),
+        ("жим на штанге ~50 кг", "какие веса завтра", True),
+        ("творог 5 %", "ем творог 5%", False),
+        ("молоко 2,5 %", "пью молоко 2.5", False),
+        ("молоко 2.5 %", "пью молоко 2,5", False),
+        ("молоко 3,2 %", "пью молоко 2,5", False),  # food: not a lift number
+        ("Запомнить: на штанге ~50 кг", "жим 50 кг на штанге", False),
+    ],
+)
+def test_derived_offer_with_tilde_or_percent(offer, said, derived):
+    assert facts.derived_offer(offer, said) is derived
+
+
+@pytest.mark.parametrize(
+    ("offer", "said"),
+    [
+        ("не ем свинину", "не ем свинину"),
+        ("тренируюсь по вечерам", "тренируюсь по вечерам"),
+        ("манты ~90 г/шт", "манты штук 5 по 90 грамм"),
+        ("пью кофе без сахара", ""),
+    ],
+)
+def test_derived_offer_ordinary_facts(offer, said):
+    assert facts.derived_offer(offer, said) is False
+
+
+def test_derived_offer_food_portion_estimate_is_still_offered():
+    # The parser's own job: "они у нас большие" -> a portion; the user confirms it with the button.
+    assert not facts.derived_offer("самса ~150 г", "съел 2 самсы, они у нас большие")
+    assert facts.derived_offer("сгибания на штанге ~50 кг", "какая завтра тренировка и какие веса")
+    assert not facts.derived_offer("жим лёжа ~80 кг", "жму примерно 80")
