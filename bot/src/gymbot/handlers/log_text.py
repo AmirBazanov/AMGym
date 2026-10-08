@@ -507,13 +507,14 @@ _RECORD_NUMBERS = re.compile(r"\d+\s*(?:на|x|х|×|\*|по|г|гр|грамм\
 def _factual_question(text: str, result: ParseResult, prev: Exchange | None) -> bool:
     """Whether a message the parser did not take as a question still gets the diary answer from the database
     ("сколько белка осталось" without "?", "что я сегодня делал" called unclear). Never when the parser
-    found a record, an unknown dish to look up, or a pending preview; for "unknown" never when the text
+    found a record, an unknown dish to look up, or a pending preview (a program day question is never
+    about it: "какая завтра тренировка"); for "unknown" never when the text
     reads like a record too (its clarification is about that record); numbers of sets or grams in the text
     keep even a "question" with the parser. In doubt the parser's reply wins."""
     if result.kind not in ("question", "unknown") or result.is_record() or result.unknown_terms:
         return False
     if prev and prev.token:
-        return False
+        return result.kind == "question" and plan_question(text) is not None
     t = normalize(text)
     if _RECORD_NUMBERS.search(t) or (result.kind == "unknown" and _RECORD_VERB.search(t)):
         return False

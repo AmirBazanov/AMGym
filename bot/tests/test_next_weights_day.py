@@ -127,6 +127,10 @@ async def test_model_context_gets_the_weights_block_for_the_asked_day(db, settin
         ("что у меня 3 числа", date(2026, 11, 3)),
         ("какие упражнения 9.10", date(2026, 10, 9)),
         ("какие веса послезавтра", date(2026, 10, 10)),
+        # the owner's voice questions on 08.10 («вражения»: speech-to-text for «упражнения»)
+        ("Завтра зал. У нас какой план на тренировку?", date(2026, 10, 9)),
+        ("Вражения какие завтра у нас?", date(2026, 10, 9)),
+        ("Какие завтра упражнения в зале?", date(2026, 10, 9)),
     ],
 )
 def test_plan_question_days(text, day):

@@ -15,6 +15,7 @@ from gymbot.handlers import log_text
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.llm.prompts import EXAMPLES, MINIAPP_SETUP_ANSWER
 from gymbot.llm.schemas import ParseResult
+from gymbot.services import answer as qa
 from gymbot.services import food_lookup
 from gymbot.services.workouts import WorkoutIn
 
@@ -1335,6 +1336,32 @@ async def test_diary_answer_starts_the_program_and_shows_todays_plan(llm, settin
     system = llm.bodies[-1]["messages"][0]["content"]
     assert "Программа «" in system and "План на сегодня" in system
 
+
+
+async def test_program_day_question_with_a_pending_preview_gets_the_diary_answer(llm, settings, db, diary, monkeypatch):
+    # The owner's 08.10: «левое плечо болит» left a wellbeing preview open, then «какие завтра упражнения?»
+    # got the parser's guess («жим 90») instead of the program day. The preview keeps its buttons.
+    async def plan(sessionmaker, tg_id, name, question, dialog, *args):
+        return qa.Reply("Завтра, пт 09.10 — тренировка по программе", qa.DIRECT)
+
+    monkeypatch.setattr(qa, "respond", plan)
+    llm.answers = [wellbeing("левое плечо"), {"kind": "question", "clarification": "Жим лёжа 90 кг."}]
+    first = await send("левое плечо побаливает", llm, settings, db)
+    token = token_of(first)
+    msg = await send("Какие завтра упражнения в зале?", llm, settings, db, T0 + timedelta(minutes=1))
+    assert msg.answer.await_args.args[0].startswith("Завтра, пт 09.10")
+    assert token in log_text.PENDING
+
+
+async def test_preview_question_still_goes_to_the_parser(llm, settings, db, diary, monkeypatch):
+    async def never(*args):
+        raise AssertionError("the diary answer was asked")
+
+    monkeypatch.setattr(qa, "respond", never)
+    llm.answers = [wellbeing("левое плечо"), {"kind": "question", "clarification": "Да, запишу как боль."}]
+    await send("левое плечо побаливает", llm, settings, db)
+    msg = await send("а плечо тоже запишешь?", llm, settings, db, T0 + timedelta(minutes=1))
+    assert msg.answer.await_args.args[0] == "Да, запишу как боль."
 
 # ---- a Mini App setup request is not a record ----
 
