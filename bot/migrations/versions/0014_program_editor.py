@@ -1,5 +1,12 @@
 """program editor: own copies of programs, day focus, prescription snapshot in workouts
 
+Downgrade is lossy and not a true inverse:
+- users' own copies stay as ordinary programs without an owner (visible to everyone as templates), and
+  their day focus, base_day_id and version are gone;
+- `workouts.targets_json` is KEPT on downgrade (0013 code ignores the extra nullable column). A later
+  upgrade only fills rows where it is NULL: rebuilding snapshots from day items would rewrite the history
+  of workouts whose (copy) day was edited after they were saved.
+
 Revision ID: 0014
 Revises: 0013
 Create Date: 2026-10-08 22:00:00.000000
@@ -48,8 +55,8 @@ def _backfill_targets() -> None:
         for exercise_id, sets, reps_min, reps_max, drop_reps in items:
             target, dropset = _target(sets, reps_min, reps_max, drop_reps)
             snapshot.append({"exerciseId": exercise_id, "target": target, "dropset": dropset})
-        conn.execute(
-            sa.text("UPDATE workouts SET targets_json = :t WHERE program_day_id = :d"),
+        conn.execute(  # rows that kept their snapshot through a downgrade are never rebuilt
+            sa.text("UPDATE workouts SET targets_json = :t WHERE program_day_id = :d AND targets_json IS NULL"),
             {"t": json.dumps(snapshot, ensure_ascii=False), "d": day_id},
         )
 
@@ -75,17 +82,17 @@ def upgrade() -> None:
             ondelete='SET NULL',
         )
 
-    with op.batch_alter_table('workouts', schema=None) as batch_op:
-        batch_op.add_column(sa.Column('targets_json', sa.Text(), nullable=True))
+    # The column survives a downgrade (see the module doc): add it only when it is not there yet.
+    if 'targets_json' not in {c['name'] for c in sa.inspect(op.get_bind()).get_columns('workouts')}:
+        with op.batch_alter_table('workouts', schema=None) as batch_op:
+            batch_op.add_column(sa.Column('targets_json', sa.Text(), nullable=True))
 
     _backfill_targets()
 
 
 def downgrade() -> None:
-    """Downgrade schema. Own copies stay as ordinary programs without an owner."""
-    with op.batch_alter_table('workouts', schema=None) as batch_op:
-        batch_op.drop_column('targets_json')
-
+    """Downgrade schema. Lossy (see the module doc): own copies stay as ordinary programs without an owner;
+    workouts.targets_json is kept on purpose, so the history snapshots survive a downgrade/upgrade."""
     with op.batch_alter_table('program_days', schema=None) as batch_op:
         batch_op.drop_constraint(batch_op.f('fk_program_days_base_day_id_program_days'), type_='foreignkey')
         batch_op.drop_column('base_day_id')

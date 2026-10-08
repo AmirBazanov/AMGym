@@ -546,6 +546,9 @@ async def resolve(session: AsyncSession, snap: Snapshot, actions: list[Any]) -> 
                     else f"вместо «{snap.current.program.name}»"
                 )
                 plan.lines.append(f"Программа «{target.name}»: старт с {_day(start)} ({where}; {was})")
+                if target.id != snap.current.program_id and snap.current.program.owner_user_id is not None:
+                    # The cycle's workouts stay linked to the own copy, so its ✓ marks stay there too.
+                    plan.notes.append(f"Отметки этого цикла останутся в «{snap.current.program.name}».")
 
     # weights for today
     plan.said_weights = dict(weights)

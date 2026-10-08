@@ -45,10 +45,17 @@ async def exercise_catalog(session: AsyncSession) -> list[str]:
 
 async def sync_programs(session: AsyncSession, programs_dir: Path) -> None:
     """Import every program JSON whose slug is not in the DB yet. Existing programs (templates and the users'
-    own copies) are left alone; `backfill_program_meta` fills fields added later into imported templates."""
-    known = set((await session.scalars(select(Program.slug))).all())
+    own copies) are left alone; `backfill_program_meta` fills fields added later into imported templates.
+    Only templates (no owner) count as the JSON's program: a user's copy is never taken for one. Copy slugs
+    end in `.u<user id>` so they cannot collide with a file stem in practice; a file that does is skipped."""
+    rows = (await session.execute(select(Program.slug, Program.owner_user_id))).all()
+    templates = {slug for slug, owner in rows if owner is None}
+    copies = {slug for slug, owner in rows if owner is not None}
     for path in sorted(programs_dir.glob("*.json")):
-        if path.stem in known:
+        if path.stem in templates:
+            continue
+        if path.stem in copies:
+            log.warning("program file %s has the slug of a user's own copy; not imported", path.name)
             continue
         data = json.loads(path.read_text(encoding="utf-8"))
         program = Program(slug=path.stem, name=data["name"], source=data.get("source"))

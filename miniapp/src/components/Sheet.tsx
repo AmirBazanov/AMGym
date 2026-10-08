@@ -1,6 +1,6 @@
 import { useEffect, type ReactNode } from 'react'
 
-export function Sheet({ onClose, children }: { onClose: () => void; children: ReactNode }) {
+export function Sheet({ onClose, children, className }: { onClose: () => void; children: ReactNode; className?: string }) {
   useEffect(() => {
     const prev = document.body.style.overflow
     document.body.style.overflow = 'hidden'
@@ -14,7 +14,7 @@ export function Sheet({ onClose, children }: { onClose: () => void; children: Re
 
   return (
     <div className="sheet-backdrop" onClick={onClose}>
-      <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog">
+      <div className={`sheet ${className ?? ''}`} onClick={(e) => e.stopPropagation()} role="dialog">
         <div className="sheet-grip" />
         {children}
       </div>

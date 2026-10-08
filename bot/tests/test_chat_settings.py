@@ -839,6 +839,31 @@ async def test_program_switch_by_slug_or_name(settings, db, said):
     assert (slug, up.started_on) == ("arms_specialization_8w", date(2026, 9, 28))
 
 
+async def test_leaving_own_copy_warns_that_marks_stay_there(settings, db):
+    llm = FakeLLM(settings)
+    uid = await seed_user(db)
+    async with db() as s:
+        p = Program(slug="arms_specialization_8w.u1", name="Руки · моя", owner_user_id=uid)
+        s.add(p)
+        await s.flush()
+        s.add(UserProgram(user_id=uid, program_id=p.id, started_on=date(2026, 9, 28)))
+        await s.commit()
+    llm.answers.append({"actions": [{"type": "program", "program": "arms_specialization_8w", "start_date": None}]})
+    msg = await run("переключи на программу руки", settings, db, llm)
+    shown = msg.answer.await_args.args[0]
+    assert "вместо «Руки · моя»" in shown
+    assert "Отметки этого цикла останутся в «Руки · моя»." in shown
+
+
+async def test_switching_from_a_template_has_no_copy_warning(settings, db):
+    llm = FakeLLM(settings)
+    uid = await seed_user(db)
+    await other_program(db, uid)
+    llm.answers.append({"actions": [{"type": "program", "program": "arms_specialization_8w", "start_date": None}]})
+    msg = await run("переключи на программу руки", settings, db, llm)
+    assert "Отметки этого цикла" not in msg.answer.await_args.args[0]
+
+
 async def test_program_unknown_name_is_a_note(settings, db):
     llm = FakeLLM(settings)
     llm.answers.append({"actions": [{"type": "program", "program": "пауэрлифтинг", "start_date": None}]})

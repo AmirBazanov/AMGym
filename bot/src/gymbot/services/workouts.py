@@ -161,9 +161,14 @@ async def _planned_day(session: AsyncSession, up: UserProgram, data: WorkoutIn) 
         if data.programDayId in days:
             return days[data.programDayId]
         if program.based_on_id is not None:
-            by_base = {d.base_day_id: d for d in days.values() if d.base_day_id is not None}
-            if data.programDayId in by_base:
-                return by_base[data.programDayId]
+            # Copy days made from that template day; normally one, but a copied week may share the base:
+            # the closest to the workout's week and weekday wins, then the oldest row.
+            made_from = [(w.number, d) for w in program.weeks for d in w.days if d.base_day_id == data.programDayId]
+            if made_from:
+                return min(
+                    made_from,
+                    key=lambda wd: (abs(wd[0] - data.week), abs(wd[1].weekday - data.weekday), wd[1].id),
+                )[1]
     if data.programId == program.slug or (template_slug is not None and data.programId == template_slug):
         return find_day(program, data.week, data.weekday)
     return None

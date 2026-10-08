@@ -1227,3 +1227,161 @@ table.nutrition-table td.over {
   font-weight: 600;
   white-space: nowrap;
 }
+
+/* ---------- program editor (screens/ProgramEdit, ExercisePicker, PrescriptionSheet, ScopeSheet) ---------- */
+.day-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.day-head h2 {
+  flex: 1;
+  min-width: 0;
+}
+.link-btn {
+  flex: none;
+  min-height: 44px;
+  padding: 0 4px;
+  margin-top: 14px;
+  color: var(--link);
+  font-size: 15px;
+  font-weight: 500;
+}
+.sheet.tall {
+  height: 92vh;
+  max-height: 92dvh;
+}
+.sheet.editor {
+  padding-bottom: 0;
+}
+.editor-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.editor-head .grow {
+  flex: 1;
+  min-width: 0;
+}
+.btn.editor-close {
+  width: auto;
+  flex: none;
+  padding: 0 8px;
+}
+.notice.warn {
+  color: var(--text);
+  border-left: 3px solid var(--medium);
+}
+.row.edit-row {
+  padding: 4px 4px 4px 0;
+  gap: 0;
+  align-items: stretch;
+}
+.edit-open {
+  display: block;
+  text-align: left;
+  padding: 10px 8px 10px 16px;
+  min-height: 52px;
+}
+.edit-open .ex-meta {
+  flex-wrap: wrap;
+}
+.edit-row .move {
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+.edit-row .move .icon-btn {
+  font-size: 20px;
+  font-weight: 600;
+}
+.row:disabled,
+.icon-btn:disabled {
+  opacity: 0.4;
+}
+.badge.mark {
+  color: var(--link);
+  background: transparent;
+  border: 1px solid var(--soft);
+}
+.field-error {
+  color: var(--danger);
+  font-size: 13px;
+  margin: 6px 4px 0;
+}
+.sheet-footer {
+  position: sticky;
+  bottom: 0;
+  margin: 16px -16px 0;
+  padding: 10px 16px calc(12px + env(safe-area-inset-bottom));
+  background: linear-gradient(to bottom, transparent, var(--bg) 24%);
+}
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--card);
+  border-radius: 12px;
+  padding: 4px;
+}
+.stepper .icon-btn {
+  width: 52px;
+  height: 52px;
+  font-size: 24px;
+  font-weight: 600;
+  background: var(--soft);
+}
+.stepper .field {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  font-size: 20px;
+  font-weight: 600;
+}
+.reps-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.reps-pair .stepper .icon-btn {
+  width: 44px;
+}
+.drop-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.drop-cell {
+  width: 56px;
+}
+.drop-cell .field {
+  width: 100%;
+  background: var(--card);
+  text-align: center;
+  font-size: 18px;
+  font-weight: 600;
+}
+.drop-row .icon-btn {
+  background: var(--card);
+  font-size: 22px;
+  font-weight: 600;
+}
+.chips.wrap {
+  flex-wrap: wrap;
+  overflow: visible;
+  margin: 0;
+  padding: 0;
+}
+.chip:disabled {
+  opacity: 1;
+}
+.check-mark {
+  color: var(--link);
+  font-weight: 600;
+}
+.scope-preview > * + * {
+  margin-top: 6px;
+}

@@ -2,10 +2,12 @@ import { useEffect, useMemo, useState } from 'react'
 import { useScrollActive } from '../components/useScrollActive'
 import { DropBadge, IntensityBadge } from '../components/Badges'
 import { ExerciseSheet } from '../components/ExerciseSheet'
+import { ProgramEdit } from './ProgramEdit'
 import { IconChevron } from '../components/icons'
 import {
   capitalize,
   dayFocus,
+  findProgram,
   formatPrescription,
   getProgram,
   isDropset,
@@ -25,7 +27,13 @@ type Tab = 'plan' | 'exercises' | 'settings'
 export function ProgramScreen() {
   const [tab, setTab] = useState<Tab>('plan')
   const [sheet, setSheet] = useState<string | null>(null)
+  const [toast, setToast] = useState<string | null>(null)
   const { programId } = useStore()
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 3500)
+    return () => clearTimeout(t)
+  }, [toast])
   const program = getProgram(programId)
 
   return (
@@ -60,18 +68,26 @@ export function ProgramScreen() {
         ))}
       </div>
 
-      {tab === 'plan' && <Plan onOpen={setSheet} />}
+      {tab === 'plan' && <Plan onOpen={setSheet} onSaved={setToast} />}
       {tab === 'exercises' && <Exercises onOpen={setSheet} />}
       {tab === 'settings' && <Choose />}
 
       {sheet && <ExerciseSheet name={sheet} onClose={() => setSheet(null)} />}
+      {toast && (
+        <div className="card notice record-toast" role="status">
+          {toast}
+        </div>
+      )}
     </>
   )
 }
 
-function Plan({ onOpen }: { onOpen: (name: string) => void }) {
+function Plan({ onOpen, onSaved }: { onOpen: (name: string) => void; onSaved: (message: string) => void }) {
   const state = useStore()
-  const { programId, startDate } = state
+  const { programId, startDate, mode } = state
+  const [editing, setEditing] = useState<{ week: number; weekday: number } | null>(null)
+  // The editor needs the server's program (item ids and a version), not the bundled fallback.
+  const canEdit = mode === 'server' && findProgram(programId)?.version != null
   const run = currentRun(state)
   const program = getProgram(programId)
   const current = programPosition(program, startDate).week
@@ -101,10 +117,23 @@ function Plan({ onOpen }: { onOpen: (name: string) => void }) {
         const done = run.some((h) => h.week === week && h.weekday === d.weekday)
         return (
           <div key={d.weekday}>
-            <h2>
-              {WEEKDAY_LONG[d.weekday]} · {dayFocus(d)}
-              {done && ' · ✓'}
-            </h2>
+            <div className="day-head">
+              <h2>
+                {WEEKDAY_LONG[d.weekday]} · {dayFocus(d)}
+                {done && ' · ✓'}
+              </h2>
+              {canEdit && d.id != null && (
+                <button
+                  className="link-btn"
+                  onClick={() => {
+                    haptic.tap()
+                    setEditing({ week, weekday: d.weekday })
+                  }}
+                >
+                  Изменить
+                </button>
+              )}
+            </div>
             <div className="list">
               {d.exercises.map((e) => (
                 <button className="row" key={e.order} onClick={() => onOpen(e.name)}>
@@ -123,6 +152,14 @@ function Plan({ onOpen }: { onOpen: (name: string) => void }) {
           </div>
         )
       })}
+      {mode === 'demo' && (
+        <p className="hint" style={{ padding: '12px 4px' }}>
+          Редактор программы работает в дневнике из Telegram.
+        </p>
+      )}
+      {editing && (
+        <ProgramEdit week={editing.week} weekday={editing.weekday} onClose={() => setEditing(null)} onSaved={onSaved} />
+      )}
     </>
   )
 }

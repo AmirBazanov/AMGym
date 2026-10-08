@@ -1,9 +1,9 @@
 """Migration 0014 (program editor): the history the Mini App gets is the same before and after it.
 
 Golden test: owner-like history saved through the API, /api/state.history captured, then `downgrade -1`
-(drops the prescription snapshots, day focus and copy columns) and `upgrade head` (the backfill rebuilds the
-snapshots from the day items): the history is identical, and equal to what the pre-0014 code computed
-from the live items.
+(drops day focus and the copy columns, keeps the prescription snapshots), the day items changed, and
+`upgrade head` (the backfill only fills rows without a snapshot): the history is identical, and equal to
+what the pre-0014 code computed from the live items.
 """
 
 import json
@@ -141,9 +141,14 @@ async def test_history_is_identical_before_and_after_the_migration(client, auth,
     assert sum(1 for h in before if h["programDayId"] is None) == 2  # "nope" and the chat workout
 
     await migrate(settings, "-1", down=True)
-    async with db() as s:  # 0013: no snapshots, no focus, no copy columns
+    async with db() as s:  # 0013: no focus, no copy columns; the snapshots are kept on purpose
         cols = {r[1] for r in (await s.execute(text("PRAGMA table_info(workouts)"))).all()}
-        assert "targets_json" not in cols
+        assert "targets_json" in cols
+        day_cols = {r[1] for r in (await s.execute(text("PRAGMA table_info(program_days)"))).all()}
+        assert "focus" not in day_cols and "base_day_id" not in day_cols
+        # The days change while downgraded (like an edited copy): the re-upgrade must not rebuild snapshots.
+        await s.execute(text("UPDATE program_items SET sets = 1, reps_min = 5, reps_max = 5, drop_reps = NULL"))
+        await s.commit()
     await migrate(settings, "head", down=False)
 
     after = await history(client, auth)
@@ -177,4 +182,20 @@ async def test_snapshot_keeps_history_when_the_program_changes(client, auth, db,
                 for i in d.items:
                     i.sets, i.reps_min, i.reps_max, i.drop_reps = 1, 5, 5, None
         await s.commit()
+    assert await history(client, auth) == before
+
+
+async def test_reupgrade_fills_only_rows_without_a_snapshot(client, auth, db, settings):
+    await seed_history(client, auth, db, settings)
+    before = await history(client, auth)
+    await migrate(settings, "-1", down=True)
+    async with db() as s:  # a workout saved by the 0013 code: no snapshot
+        first = await s.scalar(text("SELECT id FROM workouts WHERE program_day_id IS NOT NULL ORDER BY id LIMIT 1"))
+        kept = await s.scalar(text("SELECT targets_json FROM workouts WHERE id = :i").bindparams(i=first))
+        await s.execute(text("UPDATE workouts SET targets_json = NULL WHERE id = :i").bindparams(i=first))
+        await s.commit()
+    await migrate(settings, "head", down=False)
+    async with db() as s:
+        refilled = await s.scalar(text("SELECT targets_json FROM workouts WHERE id = :i").bindparams(i=first))
+    assert json.loads(refilled) == json.loads(kept)
     assert await history(client, auth) == before

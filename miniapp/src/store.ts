@@ -11,7 +11,9 @@ import {
   timeoutSignal,
   getProgramOut,
   getPrograms,
+  patchProgram,
   type DayPlan,
+  type ProgramOp,
   type Profile,
   type ProgramSummary,
   type Targets,
@@ -35,6 +37,7 @@ import {
   programFromServer,
   rebuildDecision,
 } from './programSync'
+import { afterEdit, editOutcome, type EditOutcome } from './programEdit'
 import { findOverride, lastSameSession, mergeOverrides, normalizeBaselines } from './progression'
 import {
   activeFingerprint,
@@ -469,6 +472,34 @@ export const actions = {
     }
   },
 
+  /**
+   * PATCH the active program (the day editor). `dryRun`: the server's preview of where the ops land,
+   * nothing is stored. Saved: the server's program goes to the cache (never the local preview: names may
+   * be canonicalized), a new copy becomes the active program (switchedFrom) and a prepared workout nobody
+   * started follows the edit; a started one is never touched. 409 version: the server's newer program is
+   * cached, the editor keeps the draft. Demo and offline: 'failed' without a request.
+   */
+  async editProgram(ops: ProgramOp[], dryRun = false): Promise<EditOutcome> {
+    if (state.mode !== 'server') return { kind: 'failed', message: 'Редактор работает в дневнике из Telegram' }
+    const slug = state.programId
+    const version = findProgram(slug)?.version
+    if (version == null) return { kind: 'failed', message: 'Программа ещё не загрузилась с сервера' }
+    let outcome: EditOutcome
+    try {
+      const res = await patchProgram(slug, { version, dryRun, ops })
+      outcome = editOutcome(res.status, res.body)
+    } catch {
+      return { kind: 'failed', message: 'Нет связи с сервером. Правки остались, попробуй ещё раз' }
+    }
+    if (outcome.kind === 'saved' && !dryRun) applyEdit(programFromServer(outcome.program), outcome.switchedFrom)
+    if (outcome.kind === 'conflict') {
+      if (outcome.program) storeProgram(programFromServer(outcome.program))
+      void syncFromServer()
+    }
+    if (outcome.kind === 'not_active') void syncFromServer()
+    return outcome
+  },
+
   setProgram(programId: string, startDate: string) {
     commit({ ...state, programId, startDate: toMonday(startDate) })
     void pushSettings({ programId, startDate: toMonday(startDate) })
@@ -626,8 +657,25 @@ function storeProgram(program: Program) {
 }
 
 /**
- * After the program `slug` changed in the registry (ensureProgram; phase 2: the «program» event and
- * editProgram): a prepared workout nobody started follows it, a started one is never touched.
+ * A saved edit: `program` is the server's answer. On a fork (`switchedFrom`: the template) the copy becomes
+ * the active program and the current run's workouts move to it, as the server rebound them. Idempotent:
+ * the live «program» sync may have brought the copy first.
+ */
+function applyEdit(program: Program, switchedFrom: string | null) {
+  const a = state.active
+  // The day the prepared workout was built from (the template's on a fork), before the registry changes.
+  const before = a ? findProgram(a.programId) : undefined
+  const oldDay = a && before ? getDay(before, a.week, a.weekday) : undefined
+  const s = afterEdit(state, program, switchedFrom)
+  const keep = [s.programId, s.active?.programId, ...s.pending.map((w) => w.programId)]
+  const programs = cacheProgram(s.programs, program, keep)
+  setServerPrograms(programs)
+  commit(rebuildPrepared({ ...s, programs }, program.id, oldDay))
+}
+
+/**
+ * After the program `slug` changed in the registry (ensureProgram, which the «program» live event
+ * reaches through a sync, and editProgram): a prepared workout nobody started follows it, a started one is never touched.
  */
 function rebuildPrepared(s: State, slug: string, oldDay: ProgramDay | undefined): State {
   const a = s.active

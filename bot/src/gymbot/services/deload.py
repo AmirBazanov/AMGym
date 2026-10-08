@@ -175,19 +175,38 @@ def stalled(sessions: list[SessionStat]) -> bool:
     return False
 
 
-def program_deload_weeks(program: Program, programs_dir: Path | None = None) -> set[int]:
-    """Week numbers the program itself makes a deload: `"deload": true` in its JSON, or only light items."""
+def program_deload_weeks(
+    program: Program, programs_dir: Path | None = None, json_slug: str | None = None
+) -> set[int]:
+    """Week numbers the program itself makes a deload: `"deload": true` in its JSON, or only light items.
+
+    The JSON is `<json_slug or program.slug>.json`. A user's own copy has no file of its own: pass its
+    template's slug (`template_slug`), or nothing is read from JSON for it (week numbers never change in a
+    copy, so the template's deload weeks are the copy's)."""
     out = {
         w.number for w in program.weeks
         if (items := [i for d in w.days for i in d.items]) and all(i.intensity == "light" for i in items)
     }
-    if programs_dir is not None:
+    slug = json_slug or (program.slug if program.owner_user_id is None else None)
+    if programs_dir is not None and slug is not None:
         try:
-            data = json.loads((programs_dir / f"{program.slug}.json").read_text(encoding="utf-8"))
+            data = json.loads((programs_dir / f"{slug}.json").read_text(encoding="utf-8"))
             out |= {w.get("number") for w in data.get("weeks", []) if isinstance(w, dict) and w.get("deload") is True}
         except (OSError, ValueError, AttributeError):
             pass
     return {n for n in out if isinstance(n, int)}
+
+
+async def template_slug(session: AsyncSession, program: Program) -> str | None:
+    """The slug of the JSON file behind `program`: its own for a template, the template's for a user's copy
+    (None when that template is gone)."""
+    if program.owner_user_id is None:
+        return program.slug
+    if program.based_on_id is None:
+        return None
+    return await session.scalar(
+        select(Program.slug).where(Program.id == program.based_on_id, Program.owner_user_id.is_(None))
+    )
 
 
 @dataclass
@@ -241,7 +260,7 @@ async def evaluate(
     if up is not None:
         program = await load_program(session, up.program_id)
         main_ids = {i.exercise_id for w in program.weeks for d in w.days for i in d.items}
-        own = program_deload_weeks(program, programs_dir)
+        own = program_deload_weeks(program, programs_dir, await template_slug(session, program))
         weeks = len(program.weeks)
         if own:
             for ahead in range(PROGRAM_SOON + 1):

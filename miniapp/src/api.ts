@@ -358,3 +358,66 @@ export function getProgramOut(slug: string, init: RequestInit = {}): Promise<Pro
 export function getExercises(): Promise<CatalogExercise[]> {
   return api<CatalogExercise[]>('/exercises')
 }
+
+// ---- Program editor: PATCH /api/programs/{slug} (spec section «API», phase 2: replace/prescribe/add/remove/reorder) ----
+
+/** ProgramItem.id, or the `tempId` of an `add` earlier in the same request. */
+export type ItemRef = number | string
+
+export type OpIntensity = 'heavy' | 'medium' | 'light' | null
+
+/** The full prescription of an `add`/`prescribe`: dropset (dropReps, reps null) or reps min..max. */
+export interface OpPrescription {
+  sets: number
+  repsMin: number | null
+  repsMax: number | null
+  dropReps: number[] | null
+  intensity: OpIntensity
+}
+
+// `weeks`: where else the edit goes (includes `week`); absent: only `week`.
+export type ProgramOp =
+  | { op: 'replace'; week: number; weekday: number; itemId: ItemRef; name: string; weeks?: number[] }
+  | ({ op: 'prescribe'; week: number; weekday: number; itemId: ItemRef; weeks?: number[] } & OpPrescription)
+  | ({ op: 'add'; week: number; weekday: number; tempId: string; name: string; position: number; weeks?: number[] } & OpPrescription)
+  | { op: 'remove'; week: number; weekday: number; itemId: ItemRef; weeks?: number[] }
+  | { op: 'reorder'; week: number; weekday: number; itemIds: ItemRef[]; weeks?: number[] }
+
+export interface ProgramPatch {
+  version: number
+  dryRun?: boolean
+  ops: ProgramOp[]
+}
+
+/** Where op number `op` (index in `ops`) landed and which weeks it skipped, with a reason in Russian. */
+export interface OpResult {
+  op: number
+  weeks: number[]
+  skipped: { week: number; reason: string }[]
+}
+
+export interface ProgramPatchOut {
+  program: ProgramOut
+  switchedFrom: string | null // a copy of this template was created and became the active program
+  results: OpResult[]
+}
+
+/**
+ * PATCH /api/programs/{slug}. Resolves with the status and the parsed body for 200, 409 (`{detail:
+ * "version", program}` or `{detail: "not_active"}`), 422 and 404; rejects on network errors and timeouts.
+ */
+export async function patchProgram(slug: string, body: ProgramPatch): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(`./api/programs/${encodeURIComponent(slug)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData },
+    body: JSON.stringify(body),
+    signal: timeoutSignal(20_000),
+  })
+  let parsed: unknown = null
+  try {
+    parsed = await res.json()
+  } catch {
+    // Not JSON (a proxy error page): the status alone decides.
+  }
+  return { status: res.status, body: parsed }
+}

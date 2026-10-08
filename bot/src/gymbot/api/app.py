@@ -20,7 +20,7 @@ from fastapi import (
     Request,
     Response,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -43,6 +43,7 @@ from gymbot.services import nutrition as nut
 from gymbot.services import overrides as ov
 from gymbot.services import plan as day_plan
 from gymbot.services import profile as prof
+from gymbot.services import program_editor as pe
 from gymbot.services import programs as pg
 from gymbot.services import reminders as rem
 from gymbot.services import wellbeing as wb
@@ -311,6 +312,50 @@ def create_app(
         if program is None:
             raise HTTPException(404, "unknown program")
         return await pg.program_out(session, program, user.id)
+
+    @app.patch(
+        "/api/programs/{slug}",
+        response_model=pe.PatchOut,
+        responses={404: {"description": "unknown or another user's program"},
+                   409: {"description": '{detail: "version", program} or {detail: "not_active"}'},
+                   422: {"description": "{detail: Russian reason}"}},
+    )
+    async def patch_program(slug: str, body: pe.PatchIn, tg: TgUser) -> Response | pe.PatchOut:
+        """Edit the active program (gymbot.services.program_editor). A template gets the user's own copy first,
+        which becomes the active program (`switchedFrom`). Own session, not get_session (it commits after the
+        answer): `dryRun` rolls the whole request back, and live events go out only after the commit."""
+        async with sessionmaker() as session:
+            user, up = await current(session, tg)
+            user_id = user.id  # a rollback expires the ORM objects
+            try:
+                outcome = await pe.edit_program(session, user, up, slug, body.version, body.ops)
+            except LookupError as e:
+                raise HTTPException(404, "unknown program") from e
+            except pe.EditError as e:
+                raise HTTPException(422, str(e)) from e
+            except pe.Conflict as e:
+                if e.program is None:
+                    raise HTTPException(409, e.reason) from e
+                current_out = await pg.program_out(session, e.program, user_id)
+                return JSONResponse(
+                    status_code=409, content={"detail": e.reason, "program": current_out.model_dump(mode="json")}
+                )
+            if body.dryRun:
+                results, switched = outcome.results, outcome.switched_from
+                await session.rollback()  # no copy, no version, no edits; nothing published
+                stored = await pg.visible_program(session, user_id, slug)
+                assert stored is not None
+                return pe.PatchOut(
+                    program=await pg.program_out(session, stored, user_id), switchedFrom=switched, results=results
+                )
+            out = pe.PatchOut(
+                program=await pg.program_out(session, outcome.program, user_id),
+                switchedFrom=outcome.switched_from,
+                results=outcome.results,
+            )
+            await session.commit()
+        live.publish(user_id, "program", "plan", "state")
+        return out
 
     @app.get("/api/exercises")
     async def list_exercises(session: Session, tg: TgUser) -> list[pg.CatalogExercise]:
