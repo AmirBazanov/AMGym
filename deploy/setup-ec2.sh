@@ -12,6 +12,8 @@ BRANCH="${1:-main}"
 REPO="https://github.com/AmirBazanov/AMGym.git"
 APP_DIR="$HOME/amgym"
 SERVICE=gymbot
+TMP="$(mktemp -d)"  # downloads and rendered configs; removed on exit
+trap 'rm -rf "$TMP"' EXIT
 
 env_value() {  # last KEY=value from .env, quotes and CR stripped; never `source` it (JSON lists break the shell)
   [ -f "$APP_DIR/.env" ] || return 0
@@ -21,8 +23,8 @@ env_value() {  # last KEY=value from .env, quotes and CR stripped; never `source
 install_caddy_binary() {  # last resort: the official static build + the unit from Caddy's own packages
   local arch
   case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) arch="$(uname -m)" ;; esac
-  curl -fsSL -o /tmp/caddy "https://caddyserver.com/api/download?os=linux&arch=$arch"
-  sudo install -m 755 /tmp/caddy /usr/bin/caddy
+  curl -fsSL -o "$TMP/caddy" "https://caddyserver.com/api/download?os=linux&arch=$arch"
+  sudo install -m 755 "$TMP/caddy" /usr/bin/caddy
   getent group caddy >/dev/null || sudo groupadd --system caddy
   id caddy >/dev/null 2>&1 || sudo useradd --system --gid caddy --create-home --home-dir /var/lib/caddy \
     --shell /usr/sbin/nologin caddy
@@ -55,11 +57,11 @@ UNIT
 install_cloudflared() {  # only for the quick tunnel (no PUBLIC_URL)
   command -v cloudflared >/dev/null && return 0
   if [ "$PM" = dnf ]; then
-    curl -fsSL -o /tmp/cloudflared.rpm "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(uname -m).rpm"
-    sudo dnf install -y -q /tmp/cloudflared.rpm >/dev/null
+    curl -fsSL -o "$TMP/cloudflared.rpm" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(uname -m).rpm"
+    sudo dnf install -y -q "$TMP/cloudflared.rpm" >/dev/null
   else
-    curl -fsSL -o /tmp/cloudflared.deb "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(dpkg --print-architecture).deb"
-    sudo dpkg -i /tmp/cloudflared.deb >/dev/null
+    curl -fsSL -o "$TMP/cloudflared.deb" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(dpkg --print-architecture).deb"
+    sudo dpkg -i "$TMP/cloudflared.deb" >/dev/null
   fi
 }
 
@@ -124,7 +126,7 @@ else
 fi
 
 echo "== python deps"
-"$HOME/.local/bin/uv" sync --project "$APP_DIR/bot" -q
+"$HOME/.local/bin/uv" sync --frozen --project "$APP_DIR/bot" -q
 
 echo "== mini app deps + build (npm ci keeps package-lock.json untouched so git pull stays fast-forward)"
 (cd "$APP_DIR/miniapp" && npm ci --silent && npm run build --silent)
@@ -153,10 +155,10 @@ if [ -n "$PUBLIC_URL" ]; then
     PORT="$(env_value API_PORT)"; PORT="${PORT:-8000}"
     echo "== caddy: https://$DOMAIN -> 127.0.0.1:$PORT"
     install_caddy
-    sed "s#__DOMAIN__#$DOMAIN#g; s#__PORT__#$PORT#g" "$APP_DIR/deploy/Caddyfile" > /tmp/Caddyfile.gymbot
-    caddy validate --adapter caddyfile --config /tmp/Caddyfile.gymbot >/dev/null 2>&1 \
-      || { caddy validate --adapter caddyfile --config /tmp/Caddyfile.gymbot; exit 1; }
-    sudo install -m 644 /tmp/Caddyfile.gymbot /etc/caddy/Caddyfile
+    sed "s#__DOMAIN__#$DOMAIN#g; s#__PORT__#$PORT#g" "$APP_DIR/deploy/Caddyfile" > "$TMP/Caddyfile.gymbot"
+    caddy validate --adapter caddyfile --config "$TMP/Caddyfile.gymbot" >/dev/null 2>&1 \
+      || { caddy validate --adapter caddyfile --config "$TMP/Caddyfile.gymbot"; exit 1; }
+    sudo install -m 644 "$TMP/Caddyfile.gymbot" /etc/caddy/Caddyfile
     sudo systemctl enable --now caddy >/dev/null
     sudo systemctl reload-or-restart caddy
   else
@@ -168,6 +170,13 @@ else
   echo "== no PUBLIC_URL in .env: gymbot.dev with a Cloudflare quick tunnel"
   install_cloudflared
   MODULE=gymbot.dev
+fi
+
+if [ "$(env_value BOT_MODE)" = webhook ]; then
+  IDS="$(env_value ALLOWED_USER_IDS)"; IDS="${IDS//[[:space:]]/}"
+  if [ -z "$IDS" ] || [ "$IDS" = "[]" ]; then
+    echo "!! ALLOWED_USER_IDS is empty: the first Telegram user who writes to the bot becomes the owner"
+  fi
 fi
 
 echo "== systemd service ($MODULE)"

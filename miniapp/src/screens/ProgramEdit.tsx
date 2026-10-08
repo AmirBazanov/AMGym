@@ -5,7 +5,7 @@ import { PrescriptionSheet } from '../components/PrescriptionSheet'
 import { ScopeSheet } from '../components/ScopeSheet'
 import { Sheet } from '../components/Sheet'
 import { IconPlus } from '../components/icons'
-import { capitalize, dayFocus, findProgram, formatPrescription, getDay, isDropset, WEEKDAY_LONG, type ProgramDay } from '../program'
+import { capitalize, dayFocus, findProgram, formatPrescription, getDay, isDropset, plural, WEEKDAY_LONG, type ProgramDay } from '../program'
 import {
   addItem,
   draftFromDay,
@@ -281,7 +281,7 @@ export function ProgramEdit({
             setScope(true)
           }}
         >
-          {ops.length ? `Сохранить (${ops.length} ${ops.length === 1 ? 'изменение' : ops.length < 5 ? 'изменения' : 'изменений'})` : 'Сохранить'}
+          {ops.length ? `Сохранить (${plural(ops.length, ['изменение', 'изменения', 'изменений'])})` : 'Сохранить'}
         </button>
       </div>
 

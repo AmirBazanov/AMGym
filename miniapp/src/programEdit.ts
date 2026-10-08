@@ -706,6 +706,8 @@ export function editOutcome(status: number, body: unknown): EditOutcome {
   if (status === 409) return { kind: 'conflict', program: isProgramOut(b.program) ? b.program : null }
   if (status === 422) return { kind: 'invalid', message: detailText(b.detail) ?? 'Сервер не принял правку' }
   if (status === 404) return { kind: 'failed', message: 'Программа не найдена на сервере' }
+  if (status === 401 || status === 403)
+    return { kind: 'failed', message: 'Не получилось войти. Закрой дневник и открой его заново из бота.' }
   return { kind: 'failed', message: 'Не получилось сохранить. Правки остались, попробуй ещё раз' }
 }
 

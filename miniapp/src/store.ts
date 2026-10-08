@@ -38,6 +38,7 @@ import {
   rebuildDecision,
 } from './programSync'
 import { afterEdit, editOutcome, type EditOutcome } from './programEdit'
+import { newId } from './id'
 import { findOverride, lastSameSession, mergeOverrides, normalizeBaselines } from './progression'
 import {
   activeFingerprint,
@@ -307,7 +308,7 @@ export const actions = {
     const day = program && getDay(program, week, weekday)
     if (!day) return
     // Started now, so trained today: today's overrides count whatever program day it is.
-    const built = buildPrepared(crypto.randomUUID(), state.programId, week, day, new Date().toISOString(), {
+    const built = buildPrepared(newId(), state.programId, week, day, new Date().toISOString(), {
       history: state.history,
       today: localDate(),
       baselines: state.baselines,
@@ -632,6 +633,9 @@ export function ensureProgram(): Promise<void> {
 }
 
 function storeProgram(program: Program) {
+  // A late answer (a slow GET, an older 409 body) must not roll the cache back to an older version.
+  const cached = state.programs[program.id]?.version
+  if (cached != null && program.version != null && program.version < cached) return
   const a = state.active
   // The day the prepared workout was built from, read before the registry changes.
   const before = a && a.programId === program.id ? findProgram(a.programId) : undefined

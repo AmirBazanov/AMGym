@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=(ROOT / ".env", ".env", ROOT / ".env.local"), extra="ignore")
 
     bot_token: str
-    # Telegram user ids allowed to use the bot (personal app). Empty = allow everyone.
+    # Telegram user ids allowed to use the bot (personal app). Empty = the first user who writes becomes the owner (services/access.py).
     allowed_user_ids: list[int] = []
 
     database_url: str = f"sqlite+aiosqlite:///{ROOT / 'data' / 'gym.db'}"

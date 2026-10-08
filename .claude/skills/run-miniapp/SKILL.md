@@ -11,6 +11,7 @@ description: Запуск и проверка Telegram Mini App GymAPP (React + 
 2. Проверки перед сдачей: `npm run typecheck && npm run build`.
 3. В браузере: `npm run dev` → http://localhost:5173. Вне Telegram `window.Telegram.WebApp.initData` пустой, API ответит 401; для вёрстки этого достаточно.
 4. Внутри Telegram нужен HTTPS:
+   - запусти dev-сервер так: `VITE_HOST=0.0.0.0 npm run dev` (по умолчанию он слушает только localhost);
    - подними туннель на порт 5173 (`cloudflared tunnel --url http://localhost:5173` или `ngrok http 5173`);
    - впиши URL в `.env` как `MINIAPP_URL` и перезапусти бота; кнопка «Открыть дневник» появится по `/start`;
    - либо задай URL через @BotFather → Bot Settings → Menu Button.

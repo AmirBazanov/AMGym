@@ -10,11 +10,22 @@ Environment=PATH=__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
 # setup-ec2.sh fills __MODULE__:
 #   gymbot.main - PUBLIC_URL is set (fixed domain behind Caddy): migrations, program import, bot, HTTP;
 #   gymbot.dev  - no PUBLIC_URL: the same plus a Cloudflare quick tunnel for the Mini App.
-ExecStart=__HOME__/.local/bin/uv run --project bot python -m __MODULE__
+ExecStart=__HOME__/.local/bin/uv run --frozen --no-sync --project bot python -m __MODULE__
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
 TimeoutStopSec=30
+# Hardening. The app lives in __HOME__ (setup-ec2.sh: APP_DIR=$HOME/amgym), so ProtectHome is deliberately not set:
+# it would hide the code, the venv and uv itself. ProtectSystem=full makes /usr, /boot and /etc read-only; `strict`
+# would need every writable path listed (data/, uv and cloudflared caches), which is not worth a broken deploy.
+# TODO: run the service as a dedicated unprivileged user instead of the login user.
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { IconHistory, IconNutrition, IconProgram, IconProgress, IconToday } from './components/icons'
 import { ConfirmHost } from './components/ConfirmHost'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { History } from './screens/History'
 import { Nutrition } from './screens/Nutrition'
 import { ProgramScreen } from './screens/Program'
@@ -29,11 +30,14 @@ export default function App() {
   return (
     <>
       <main className="app">
-        {tab === 'today' && <Today />}
-        {tab === 'program' && <ProgramScreen />}
-        {tab === 'history' && <History />}
-        {tab === 'progress' && <Progress />}
-        {tab === 'nutrition' && <Nutrition />}
+        {/* Keyed by tab: switching tabs clears a caught error. */}
+        <ErrorBoundary key={tab}>
+          {tab === 'today' && <Today />}
+          {tab === 'program' && <ProgramScreen />}
+          {tab === 'history' && <History />}
+          {tab === 'progress' && <Progress />}
+          {tab === 'nutrition' && <Nutrition />}
+        </ErrorBoundary>
       </main>
       <nav className="tabbar">
         <div className="tabbar-inner">

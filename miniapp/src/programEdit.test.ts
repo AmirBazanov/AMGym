@@ -1489,6 +1489,14 @@ describe('editOutcome', () => {
     expect(editOutcome(200, { program: { id: 'x' } }).kind).toBe('failed')
   })
 
+  it('401 and 403: reopen from the bot', () => {
+    for (const status of [401, 403])
+      expect(editOutcome(status, { detail: 'bad init data' })).toEqual({
+        kind: 'failed',
+        message: 'Не получилось войти. Закрой дневник и открой его заново из бота.',
+      })
+  })
+
   it('409 not_active', () => {
     expect(editOutcome(409, { detail: 'not_active' })).toEqual({ kind: 'not_active' })
   })

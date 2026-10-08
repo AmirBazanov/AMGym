@@ -42,8 +42,9 @@ export function ProgramScreen() {
         <div className="eyebrow">Программа</div>
         <h1 style={{ fontSize: 24 }}>{program.name}</h1>
         <div className="hint">
-          {plural(program.weeks.length, ['неделя', 'недели', 'недель'])} · {program.weeks[0].days.length} тренировки в
-          неделю · {plural(programExerciseNames(program).length, ['упражнение', 'упражнения', 'упражнений'])}
+          {plural(program.weeks.length, ['неделя', 'недели', 'недель'])} ·{' '}
+          {plural(program.weeks[0]?.days.length ?? 0, ['тренировка', 'тренировки', 'тренировок'])} в неделю ·{' '}
+          {plural(programExerciseNames(program).length, ['упражнение', 'упражнения', 'упражнений'])}
         </div>
       </div>
       <div className="spacer" />
@@ -91,9 +92,11 @@ function Plan({ onOpen, onSaved }: { onOpen: (name: string) => void; onSaved: (m
   const run = currentRun(state)
   const program = getProgram(programId)
   const current = programPosition(program, startDate).week
-  const [week, setWeek] = useState(current)
+  const [picked, setWeek] = useState(current)
+  // A shorter program may have replaced the one the week was picked in: fall back to its first week.
+  const w = program.weeks.find((x) => x.number === picked) ?? program.weeks[0]
+  const week = w.number
   const chipsRef = useScrollActive<HTMLDivElement>(week)
-  const w = program.weeks.find((x) => x.number === week)!
 
   return (
     <>
@@ -216,19 +219,13 @@ function Choose() {
             <div className="grow">
               <div className="title">{p.name}</div>
               <div className="sub">
-                {p.weeks} недель{p.source ? ` · из ${p.source}` : ''}
+                {plural(p.weeks, ['неделя', 'недели', 'недель'])}{p.source ? ` · из ${p.source}` : ''}
                 {p.own ? ' · моя' : ''}
               </div>
             </div>
             {p.id === programId && <span style={{ color: 'var(--link)', fontWeight: 600 }}>✓</span>}
           </button>
         ))}
-        <div className="row">
-          <div className="grow">
-            <div className="title muted">Своя программа</div>
-            <div className="sub">Загрузка xlsx появится вместе с сервером</div>
-          </div>
-        </div>
       </div>
 
       <h2>Дата старта (понедельник 1-й недели)</h2>

@@ -19,11 +19,19 @@ export class ApiError extends Error {
 export async function apiWithStatus<T>(path: string, init: RequestInit = {}): Promise<{ status: number; data: T }> {
   const res = await fetch(`./api${path}`, {
     ...init,
+    // Without a caller's signal a hung request would never settle: give up after API_TIMEOUT_MS.
+    signal: init.signal ?? timeoutSignal(API_TIMEOUT_MS),
     headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData, ...init.headers },
   })
   if (!res.ok) throw new ApiError(res.status, `${res.status} ${await res.text()}`)
   return { status: res.status, data: (res.status === 204 ? undefined : await res.json()) as T }
 }
+
+/** Default timeout of api() and apiWithStatus() when the caller passes no `signal`. */
+export const API_TIMEOUT_MS = 15_000
+
+/** The day plan may wait for the LLM (several routes with failover): longer than API_TIMEOUT_MS. */
+const PLAN_TIMEOUT_MS = 60_000
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await apiWithStatus<T>(path, init)).data
@@ -264,11 +272,11 @@ export interface DayPlan {
 
 /** 404 when today is not a training day. Never cached offline. */
 export function getTodayPlan(): Promise<DayPlan> {
-  return api<DayPlan>('/plan/today')
+  return api<DayPlan>('/plan/today', { signal: timeoutSignal(PLAN_TIMEOUT_MS) })
 }
 
 export function regenerateTodayPlan(): Promise<DayPlan> {
-  return api<DayPlan>('/plan/today/regenerate', { method: 'POST' })
+  return api<DayPlan>('/plan/today/regenerate', { method: 'POST', signal: timeoutSignal(PLAN_TIMEOUT_MS) })
 }
 
 // ---- Body weight: one value per day (upsert), from the chat, the Mini App or MCP. Never cached offline. ----

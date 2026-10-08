@@ -20,6 +20,12 @@ interface TgWebApp {
   showConfirm?(message: string, cb: (ok: boolean) => void): void
   enableClosingConfirmation?(): void
   disableClosingConfirmation?(): void
+  BackButton?: {
+    show(): void
+    hide(): void
+    onClick(cb: () => void): void
+    offClick(cb: () => void): void
+  }
 }
 
 export const tg: TgWebApp | undefined = (window as unknown as { Telegram?: { WebApp?: TgWebApp } }).Telegram

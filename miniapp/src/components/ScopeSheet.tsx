@@ -19,6 +19,8 @@ import { actions } from '../store'
 import { confirm, haptic } from '../telegram'
 import { Sheet } from './Sheet'
 
+const DRY_RUN_DELAY_MS = 300
+
 const KIND_TITLE: Record<OpKind, string> = {
   structure: 'Замена и состав дня',
   prescribe: 'Подходы и повторы',
@@ -64,13 +66,21 @@ export function ScopeSheet({
   useEffect(() => {
     if (!several || !local.ok) return
     const n = ++seq.current
-    void actions.editProgram(ops, true).then((out) => {
-      if (n !== seq.current) return
-      if (out.kind === 'saved') setServer({ key: opsKey, results: out.results })
-      else if (out.kind === 'conflict' || out.kind === 'not_active') onDone(out)
-      else if (out.kind === 'invalid') setServer({ key: opsKey, error: out.message })
-      else setServer({ key: opsKey }) // offline: the local estimate stays
-    })
+    // Debounced: tapping through weeks sends one dryRun for the last choice.
+    const t = setTimeout(() => {
+      void actions.editProgram(ops, true).then((out) => {
+        if (n !== seq.current) return
+        if (out.kind === 'saved') setServer({ key: opsKey, results: out.results })
+        else if (out.kind === 'conflict' || out.kind === 'not_active') onDone(out)
+        else if (out.kind === 'invalid') setServer({ key: opsKey, error: out.message })
+        else setServer({ key: opsKey }) // offline: the local estimate stays
+      })
+    }, DRY_RUN_DELAY_MS)
+    return () => {
+      clearTimeout(t)
+      // A late answer after the choice changed or the sheet closed must not reach onDone.
+      seq.current++
+    }
     // `ops` is described by opsKey.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opsKey, several])

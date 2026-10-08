@@ -6,5 +6,15 @@ __DOMAIN__ {
 	# in its buffer. reverse_proxy itself flushes text/event-stream right away, no flush_interval needed.
 	@compress not path /api/live
 	encode @compress gzip
+	request_body {
+		max_size 1MB
+	}
+	# No X-Frame-Options: Telegram embeds the Mini App in a frame, frame-ancestors allows only Telegram.
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		Content-Security-Policy "frame-ancestors https://web.telegram.org https://*.telegram.org"
+		Strict-Transport-Security "max-age=31536000"
+	}
 	reverse_proxy 127.0.0.1:__PORT__
 }
