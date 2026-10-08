@@ -84,18 +84,26 @@ export function ScopeSheet({
   const summary = summarize(ops, results, (op) => opLabel(op, base, draft))
   const blocking = !local.ok ? local.error : (fresh?.error ?? null)
 
+  // Set before the confirm: a double tap must not open two dialogs and send two saves.
+  const busy = useRef(false)
   const save = async () => {
-    if (fork && !(await confirm(`Создам твою копию «${program.name} · моя». Оригинал останется, история сохранится.`))) return
-    setSaving(true)
-    setError(null)
-    const out = await actions.editProgram(ops)
-    setSaving(false)
-    if (out.kind === 'invalid' || out.kind === 'failed') {
-      haptic.error()
-      setError(out.message)
-      return
+    if (busy.current) return
+    busy.current = true
+    try {
+      if (fork && !(await confirm(`Создам твою копию «${program.name} · моя». Оригинал останется, история сохранится.`))) return
+      setSaving(true)
+      setError(null)
+      const out = await actions.editProgram(ops)
+      setSaving(false)
+      if (out.kind === 'invalid' || out.kind === 'failed') {
+        haptic.error()
+        setError(out.message)
+        return
+      }
+      onDone(out)
+    } finally {
+      busy.current = false
     }
-    onDone(out)
   }
 
   const option = (k: OpKind, c: ScopeChoice, label: string) => (

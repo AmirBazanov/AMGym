@@ -4,7 +4,9 @@ phase-1 review fixes around copies: sync_programs, the deload JSON, programDayId
 
 Dates are always derived from today (the suite also runs with a shifted clock)."""
 
+import asyncio
 import json
+import logging
 import shutil
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -26,7 +28,9 @@ from gymbot.db.models import (
 )
 from gymbot.services import baselines, deload
 from gymbot.services import next_weights as nw
+from gymbot.services import program_editor as pe
 from gymbot.services.programs import load_program, monday_of, sync_programs
+from gymbot.services.users import active_program, get_or_create_user
 
 TEMPLATE = "arms_specialization_8w"
 OTHER = 777
@@ -214,10 +218,13 @@ async def test_second_copy_gets_numbered_slug_and_name(client, auth, db, setting
     assert second["program"]["name"].endswith(" · моя 2")
 
 
-async def test_dry_run_on_the_template_makes_no_copy(client, auth, db, settings):
+async def test_dry_run_on_the_template_makes_no_copy(client, auth, db, settings, caplog):
     _, template = await seed(client, auth, db, settings)
     before = await state(client, auth)
-    out = await first_edit(client, auth, template, dryRun=True)
+    with caplog.at_level(logging.DEBUG, logger="gymbot.services.program_editor"):
+        out = await first_edit(client, auth, template, dryRun=True)
+    (rec,) = [r for r in caplog.records if r.name == "gymbot.services.program_editor"]
+    assert rec.levelno == logging.DEBUG and "would be copied to" in rec.getMessage()
     assert out["switchedFrom"] == TEMPLATE
     assert out["program"]["id"] == TEMPLATE  # the stored program, unchanged
     assert out["results"] == [{"op": 0, "weeks": [8], "skipped": []}]
@@ -346,3 +353,61 @@ async def test_other_user_cannot_patch_my_copy(client, auth, db, settings):
         {"op": "remove", "week": 1, "weekday": 1, "itemId": day_of(out["program"], 1, 1)["exercises"][0]["id"]}
     ]}, headers=other)
     assert r.status_code == 404
+
+
+def first_edit_op(p: dict) -> dict:
+    item = day_of(p, 8, 5)["exercises"][0]
+    return {"op": "prescribe", "week": 8, "weekday": 5, "itemId": item["id"], "sets": 4, "repsMin": 9}
+
+
+async def test_two_first_edits_from_the_same_stale_state_make_one_copy(client, auth, db, settings):
+    """Both requests load the user's choice (the template) before either commits: the one that commits first
+    makes the copy, the other gets 409 `version` with that copy, never a second copy (`.uN-2`)."""
+    await start_program(client, auth, monday_of(today(settings)))
+    p = await program(client, auth, TEMPLATE)
+    op = first_edit_op(p)
+    async with db() as s1, db() as s2:
+        u1 = await get_or_create_user(s1, 42)
+        up1 = await active_program(s1, u1, today(settings))
+        u2 = await get_or_create_user(s2, 42)
+        up2 = await active_program(s2, u2, today(settings))  # stale once s1 commits
+        assert up1.id == up2.id
+
+        won = await pe.edit_program(s1, u1, up1, TEMPLATE, 1, [op])
+        winner = won.program.slug
+        await s1.commit()
+
+        with pytest.raises(pe.Conflict) as e:
+            await pe.edit_program(s2, u2, up2, TEMPLATE, 1, [op])
+        assert e.value.reason == "version"
+        assert e.value.program is not None and e.value.program.slug == winner
+        await s2.rollback()
+
+    async with db() as s:
+        user = await s.scalar(select(User).where(User.telegram_id == 42))
+        copies = (await s.scalars(select(Program.slug).where(Program.owner_user_id == user.id))).all()
+        assert copies == [winner]
+        latest = await s.scalar(
+            select(UserProgram).where(UserProgram.user_id == user.id).order_by(UserProgram.id.desc()).limit(1)
+        )
+        assert latest.program_id == (await s.scalar(select(Program.id).where(Program.slug == winner)))
+        assert (await s.scalar(select(Program.version).where(Program.slug == TEMPLATE))) == 1
+    assert (await state(client, auth))["programId"] == winner
+
+
+async def test_concurrent_first_edits_over_http_make_one_copy(client, auth, db, settings):
+    await start_program(client, auth, monday_of(today(settings)))
+    p = await program(client, auth, TEMPLATE)
+    op = first_edit_op(p)
+
+    async def send():
+        return await client.patch(f"/api/programs/{TEMPLATE}", json={"version": 1, "ops": [op]}, headers=auth)
+
+    a, b = await asyncio.gather(send(), send())
+    assert sorted([a.status_code, b.status_code]) == [200, 409], (a.text, b.text)
+    won, lost = (a, b) if a.status_code == 200 else (b, a)
+    copy = won.json()["program"]
+    assert lost.json()["detail"] == "version" and lost.json()["program"]["id"] == copy["id"]
+    assert (await state(client, auth))["programId"] == copy["id"]
+    async with db() as s:
+        assert await s.scalar(select(func.count(Program.id)).where(Program.owner_user_id.is_not(None))) == 1

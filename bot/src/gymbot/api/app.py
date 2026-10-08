@@ -328,7 +328,9 @@ def create_app(
             user, up = await current(session, tg)
             user_id = user.id  # a rollback expires the ORM objects
             try:
-                outcome = await pe.edit_program(session, user, up, slug, body.version, body.ops)
+                outcome = await pe.edit_program(
+                    session, user, up, slug, body.version, body.ops, dry_run=body.dryRun
+                )
             except LookupError as e:
                 raise HTTPException(404, "unknown program") from e
             except pe.EditError as e:

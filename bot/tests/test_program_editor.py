@@ -325,6 +325,24 @@ async def test_prescribe_without_intensity_keeps_it(client, auth):
     assert (changed["intensity"], changed["prescription"]["sets"]) == ("light", 4)
 
 
+async def test_prescribe_over_all_weeks_without_intensity_keeps_each_weeks_own(client, auth):
+    """The Mini App sends no `intensity` when the user did not touch it: heavy and medium weeks stay as they were."""
+    template = await get_program(client, auth)
+    before = {w: item_of(template, w, 1, REAR_DELT)["intensity"] for w in ALL_WEEKS}
+    assert set(before.values()) == {"heavy", "medium"}
+    body = await ok(
+        client, auth, TEMPLATE, 1,
+        [{"op": "prescribe", "week": 1, "weekday": 1, "itemId": item_id(template, 1, 1, REAR_DELT),
+          **rx(5, 11), "weeks": ALL_WEEKS}],
+    )
+    (result,) = body["results"]
+    assert result["weeks"] == ALL_WEEKS and result["skipped"] == []
+    for week in ALL_WEEKS:
+        item = item_of(body["program"], week, 1, REAR_DELT)
+        assert item["intensity"] == before[week], week
+        assert (item["prescription"]["sets"], item["prescription"]["raw"]) == (5, "5х11")
+
+
 @pytest.mark.parametrize(
     "bad",
     [

@@ -203,6 +203,7 @@ class Fork:
     program: Program  # the new copy, tree loaded
     items: dict[int, int]  # template ProgramItem.id -> the copy's
     days: dict[int, int]  # template ProgramDay.id -> the copy's
+    relinked: int  # the current cycle's workouts moved to the copy
 
 
 async def _copy_slug(session: AsyncSession, base: str, user_id: int) -> str:
@@ -289,9 +290,7 @@ async def fork_program(session: AsyncSession, user: User, up: UserProgram, templ
     session.add(UserProgram(user_id=user.id, program_id=copy.id, started_on=up.started_on))
     await _retarget_active(session, user.id, template.slug, copy.slug, days)
     await session.flush()
-    log.info("program %s copied to %s for user %s, %d workouts re-linked", template.slug, copy.slug, user.id,
-             len(rows))
-    return Fork(await _reload(session, copy.id), items, days)
+    return Fork(await _reload(session, copy.id), items, days, len(rows))
 
 
 async def _retarget_active(
@@ -585,31 +584,75 @@ class Outcome:
     results: list[OpResult]
 
 
+async def _not_active(session: AsyncSession, user: User, program: Program, active_id: int) -> Conflict:
+    """The 409 for a PATCH of `program` while `active_id` is the user's active program."""
+    active = await session.get(Program, active_id)
+    if (
+        program.owner_user_id is None
+        and active is not None
+        and active.based_on_id == program.id
+        and active.owner_user_id == user.id
+    ):
+        # A client still on the template whose copy is already active (made from another device, or by a
+        # concurrent PATCH): never a second copy; the client gets the copy and checks its draft.
+        return Conflict("version", await load_program(session, active.id))
+    return Conflict("not_active")
+
+
+async def _lock_choice(session: AsyncSession, user: User, up: UserProgram, program: Program) -> None:
+    """Before a fork: make sure `up` is still the user's latest choice, under a lock that holds until the commit.
+
+    The template's version never changes, so the optimistic check cannot tell two first edits apart; without
+    this both would fork (a duplicate slug -> 500, or a second copy `-2` that takes over while the cycle's
+    workouts stay on the first one). The no-op UPDATE of the `up` row is the lock: on SQLite the first write
+    takes the database write lock (a concurrent fork waits for our commit), on Postgres the row lock does the
+    same for this row. The SELECT after it then sees the winner's committed UserProgram."""
+    await session.execute(
+        update(UserProgram)
+        .where(UserProgram.id == up.id)
+        .values(started_on=UserProgram.started_on)
+        .execution_options(synchronize_session=False)
+    )
+    latest = (
+        await session.execute(
+            select(UserProgram.id, UserProgram.program_id)
+            .where(UserProgram.user_id == user.id)
+            .order_by(UserProgram.id.desc())
+            .limit(1)
+        )
+    ).one_or_none()
+    if latest is None or latest.id == up.id:
+        return
+    if latest.program_id == program.id:
+        raise Conflict("version", program)  # the template chosen again in between: reload and retry
+    raise await _not_active(session, user, program, latest.program_id)
+
+
 async def edit_program(
-    session: AsyncSession, user: User, up: UserProgram, slug: str, version: int, raw_ops: Any
+    session: AsyncSession,
+    user: User,
+    up: UserProgram,
+    slug: str,
+    version: int,
+    raw_ops: Any,
+    *,
+    dry_run: bool = False,
 ) -> Outcome:
     """PATCH /api/programs/{slug} without the commit. Raises LookupError (unknown or another user's program),
-    EditError (422), Conflict (409). `up` is the user's active program choice."""
+    EditError (422), Conflict (409). `up` is the user's active program choice. `dry_run` only changes the log:
+    the caller rolls the session back."""
     program = await visible_program(session, user.id, slug)
     if program is None:
         raise LookupError(slug)
     ops = parse_ops(raw_ops)
     if program.id != up.program_id:
-        active = await session.get(Program, up.program_id)
-        if (
-            program.owner_user_id is None
-            and active is not None
-            and active.based_on_id == program.id
-            and active.owner_user_id == user.id
-        ):
-            # A client still on the template whose copy is already active (made from another device):
-            # never a second copy; the client gets the copy and checks its draft.
-            raise Conflict("version", await load_program(session, active.id))
-        raise Conflict("not_active")
+        raise await _not_active(session, user, program, up.program_id)
     if version != program.version:
         raise Conflict("version", program)
 
+    fork: Fork | None = None
     if program.owner_user_id is None:
+        await _lock_choice(session, user, up, program)
         fork = await fork_program(session, user, up, program)
         target, items, switched = fork.program, fork.items, program.slug
     else:
@@ -623,4 +666,10 @@ async def edit_program(
             raise Conflict("version", await _reload(session, program.id))
         target, items, switched = program, {}, None
     results = await apply_ops(session, target, ops, items)
+    if fork is not None:  # after apply_ops: a request that fails with 422 copied nothing
+        log.log(
+            logging.DEBUG if dry_run else logging.INFO,
+            "program %s %s %s for user %s, %d workouts re-linked",
+            program.slug, "would be copied to" if dry_run else "copied to", target.slug, user.id, fork.relinked,
+        )
     return Outcome(await _reload(session, target.id), switched, results)

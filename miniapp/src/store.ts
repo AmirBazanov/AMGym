@@ -480,24 +480,10 @@ export const actions = {
    * cached, the editor keeps the draft. Demo and offline: 'failed' without a request.
    */
   async editProgram(ops: ProgramOp[], dryRun = false): Promise<EditOutcome> {
-    if (state.mode !== 'server') return { kind: 'failed', message: 'Редактор работает в дневнике из Telegram' }
-    const slug = state.programId
-    const version = findProgram(slug)?.version
-    if (version == null) return { kind: 'failed', message: 'Программа ещё не загрузилась с сервера' }
-    let outcome: EditOutcome
-    try {
-      const res = await patchProgram(slug, { version, dryRun, ops })
-      outcome = editOutcome(res.status, res.body)
-    } catch {
-      return { kind: 'failed', message: 'Нет связи с сервером. Правки остались, попробуй ещё раз' }
-    }
-    if (outcome.kind === 'saved' && !dryRun) applyEdit(programFromServer(outcome.program), outcome.switchedFrom)
-    if (outcome.kind === 'conflict') {
-      if (outcome.program) storeProgram(programFromServer(outcome.program))
-      void syncFromServer()
-    }
-    if (outcome.kind === 'not_active') void syncFromServer()
-    return outcome
+    if (dryRun) return requestEdit(ops, true)
+    // A second save while one is on its way (a double tap) gets the same answer, no second request.
+    if (!editInflight) editInflight = requestEdit(ops, false).finally(() => (editInflight = null))
+    return editInflight
   },
 
   setProgram(programId: string, startDate: string) {
@@ -654,6 +640,34 @@ function storeProgram(program: Program) {
   const programs = cacheProgram(state.programs, program, keep)
   setServerPrograms(programs)
   commit(rebuildPrepared({ ...state, programs }, program.id, oldDay))
+}
+
+let editInflight: Promise<EditOutcome> | null = null
+
+/** actions.editProgram without the in-flight guard. */
+async function requestEdit(ops: ProgramOp[], dryRun: boolean): Promise<EditOutcome> {
+  if (state.mode !== 'server') return { kind: 'failed', message: 'Редактор работает в дневнике из Telegram' }
+  const slug = state.programId
+  const version = findProgram(slug)?.version
+  if (version == null) return { kind: 'failed', message: 'Программа ещё не загрузилась с сервера' }
+  let outcome: EditOutcome
+  try {
+    const res = await patchProgram(slug, { version, dryRun, ops })
+    outcome = editOutcome(res.status, res.body)
+  } catch {
+    return { kind: 'failed', message: 'Нет связи с сервером. Правки остались, попробуй ещё раз' }
+  }
+  if (outcome.kind === 'saved' && !dryRun) applyEdit(programFromServer(outcome.program), outcome.switchedFrom)
+  if (outcome.kind === 'conflict') {
+    const p = outcome.program ? programFromServer(outcome.program) : null
+    // The template already has the owner's copy (made on another device, or a save that timed out here but
+    // went through): switch to it now, as a fork does, instead of waiting for the sync.
+    if (p && p.id !== slug && p.basedOn === slug) applyEdit(p, slug)
+    else if (p) storeProgram(p)
+    void syncFromServer()
+  }
+  if (outcome.kind === 'not_active') void syncFromServer()
+  return outcome
 }
 
 /**

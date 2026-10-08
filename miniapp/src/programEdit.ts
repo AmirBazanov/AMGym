@@ -2,7 +2,7 @@
 // the draft (the day as it should become), draft -> ops, the scope -> weeks, client-side checks with the
 // server's bounds, a local application of ops (preview, rebase after 409) and the response outcome.
 // Node-safe: type-only imports from api/store (api.ts reads window); store.ts wires it to the request.
-import type { ItemRef, OpPrescription, OpResult, ProgramOp, ProgramOut } from './api'
+import type { ItemRef, OpIntensity, OpPrescription, OpResult, ProgramOp, ProgramOut } from './api'
 import type { Intensity, Prescription, Program, ProgramDay, ProgramExercise } from './program'
 import type { Workout } from './store'
 
@@ -265,11 +265,74 @@ function simulatedOrder(base: ProgramDay, draft: Draft): ItemKey[] {
   return cur
 }
 
+/** A replace of an exercise of the day: its id, the old and the new name (normalized) and the name as sent. */
+interface Rename {
+  id: number
+  from: string
+  to: string
+  name: string
+}
+
+function renamesOf(byId: ReadonlyMap<number, ProgramExercise>, draft: Draft): Rename[] {
+  const out: Rename[] = []
+  for (const item of draft) {
+    const e = isTempKey(item.key) ? undefined : byId.get(item.key)
+    if (e && normalizeName(e.name) !== normalizeName(item.name))
+      out.push({ id: e.id!, from: normalizeName(e.name), to: normalizeName(item.name), name: cleanName(item.name) })
+  }
+  return out
+}
+
+/**
+ * The draft as it is sent. The server checks every op against the day as it is at that moment, so:
+ * a cycle of replaces (a swap A↔B: no order frees the names) sends one of its exercises as remove + add
+ * (a fresh tempId); a day emptied by removes whose names all come back keeps one of them (the added
+ * exercise with its name takes its id: a prescribe instead of remove + add).
+ */
+function sendableDraft(base: ProgramDay, draft: Draft): Draft {
+  const byId = new Map(base.exercises.filter((e) => e.id != null).map((e) => [e.id!, e]))
+  let work = draft
+  // Each name is unique in a day, so every replace waits for at most one other (the one freeing its new name).
+  for (let guard = 0; guard <= draft.length; guard++) {
+    const renames = renamesOf(byId, work)
+    const byFrom = new Map(renames.map((r) => [r.from, r]))
+    const looped = renames.find((r) => {
+      let cur = byFrom.get(r.to)
+      for (let n = 0; cur && n < renames.length; n++, cur = byFrom.get(cur.to)) if (cur === r) return true
+      return false
+    })
+    if (!looped) break
+    const key = newTempId(work)
+    work = work.map((i) => (i.key === looped.id ? { ...i, key } : i))
+  }
+  const inDraft = new Set(work.map((i) => i.key))
+  const removed = base.exercises.filter((e) => e.id != null && !inDraft.has(e.id))
+  const kept = work.some((i) => !isTempKey(i.key) && byId.has(i.key))
+  if (!kept && removed.length) {
+    const added = new Map(work.filter((i) => isTempKey(i.key)).map((i) => [normalizeName(i.name), i.key]))
+    if (added.size && removed.every((e) => added.has(normalizeName(e.name)))) {
+      const back = removed[0]
+      const key = added.get(normalizeName(back.name))
+      work = work.map((i) => (i.key === key ? { ...i, key: back.id! } : i))
+    }
+  }
+  return work
+}
+
+/** A prescribe's fields: the intensity only when it changed, so other weeks keep their own (spec: key absent = unchanged). */
+function prescribeFields(e: ProgramExercise, rx: Rx): Omit<OpPrescription, 'intensity'> & { intensity?: OpIntensity } {
+  const { intensity, ...rest } = opPrescription(rx)
+  return intensity === (e.intensity ?? null) ? rest : { ...rest, intensity }
+}
+
 /**
  * The ops turning `base` (day `weekday` of `week`) into `draft`, folded: one replace and one prescribe
  * per exercise at most, an added one carries its prescription, add-then-remove is nothing. Order:
- * removes (free names first), replaces, prescribes, adds by final position, then one reorder if the
- * adds and removes alone do not give the draft's order.
+ * removes (free names first), replaces (one freeing a name before the one taking it), prescribes, adds
+ * by final position, then one reorder if the adds and removes alone do not give the draft's order.
+ * When the removes would empty the day (the server refuses to remove the last exercise), one removed
+ * exercise whose name is not added again stays until the first add is in: the day never goes over
+ * its limit and the order still comes out as the draft's.
  */
 export function draftOps(week: number, weekday: number, base: ProgramDay, draft: Draft, scope: ScopeWeeks = {}): ProgramOp[] {
   const s = weeksParam(scope.structure, week)
@@ -277,25 +340,42 @@ export function draftOps(week: number, weekday: number, base: ProgramDay, draft:
   const w = <T extends object>(o: T, weeks: number[] | undefined): T => (weeks ? { ...o, weeks } : o)
   const at = { week, weekday }
   const byId = new Map(base.exercises.filter((e) => e.id != null).map((e) => [e.id!, e]))
-  const inDraft = new Set(draft.map((i) => i.key))
+  const work = sendableDraft(base, draft)
+  const inDraft = new Set(work.map((i) => i.key))
   const ops: ProgramOp[] = []
-  for (const e of base.exercises) if (e.id != null && !inDraft.has(e.id)) ops.push(w({ op: 'remove', ...at, itemId: e.id }, s))
-  for (const item of draft) {
-    const e = isTempKey(item.key) ? undefined : byId.get(item.key)
-    if (e && normalizeName(e.name) !== normalizeName(item.name))
-      ops.push(w({ op: 'replace', ...at, itemId: e.id!, name: cleanName(item.name) }, s))
+
+  const removed = base.exercises.filter((e) => e.id != null && !inDraft.has(e.id))
+  const adds = work.filter((i) => isTempKey(i.key))
+  const emptied = removed.length > 0 && !work.some((i) => !isTempKey(i.key) && byId.has(i.key))
+  const addedNames = new Set(adds.map((i) => normalizeName(i.name)))
+  const pivot = emptied && adds.length ? removed.find((e) => !addedNames.has(normalizeName(e.name))) : undefined
+  const remove = (e: ProgramExercise) => ops.push(w({ op: 'remove', ...at, itemId: e.id! }, s))
+  for (const e of removed) if (e !== pivot) remove(e)
+
+  const renames = renamesOf(byId, work)
+  const byFrom = new Map(renames.map((r) => [r.from, r]))
+  const emitted = new Set<Rename>()
+  const rename = (r: Rename) => {
+    if (emitted.has(r)) return
+    emitted.add(r)
+    const first = byFrom.get(r.to)
+    if (first) rename(first)
+    ops.push(w({ op: 'replace', ...at, itemId: r.id, name: r.name }, s))
   }
-  for (const item of draft) {
+  renames.forEach(rename)
+
+  for (const item of work) {
     const e = isTempKey(item.key) ? undefined : byId.get(item.key)
-    if (e && !sameRx(rxOf(e), item.rx)) ops.push(w({ op: 'prescribe', ...at, itemId: e.id!, ...opPrescription(item.rx) }, p))
+    if (e && !sameRx(rxOf(e), item.rx)) ops.push(w({ op: 'prescribe', ...at, itemId: e.id!, ...prescribeFields(e, item.rx) }, p))
   }
-  draft.forEach((item, i) => {
-    if (isTempKey(item.key))
-      ops.push(w({ op: 'add', ...at, tempId: item.key, name: cleanName(item.name), position: i + 1, ...opPrescription(item.rx) }, s))
+  work.forEach((item, i) => {
+    if (!isTempKey(item.key)) return
+    ops.push(w({ op: 'add', ...at, tempId: item.key, name: cleanName(item.name), position: i + 1, ...opPrescription(item.rx) }, s))
+    if (pivot && item === adds[0]) remove(pivot)
   })
   // Only exercises the server knows (an id of the day or a tempId above).
-  const keys = draft.filter((i) => isTempKey(i.key) || byId.has(i.key)).map((i) => i.key)
-  const sim = simulatedOrder(base, draft)
+  const keys = work.filter((i) => isTempKey(i.key) || byId.has(i.key)).map((i) => i.key)
+  const sim = simulatedOrder(base, work)
   if (sim.length !== keys.length || sim.some((k, i) => k !== keys[i])) ops.push(w({ op: 'reorder', ...at, itemIds: keys }, s))
   return ops
 }
@@ -462,7 +542,7 @@ export function applyOps(program: Program, ops: readonly ProgramOp[]): ApplyResu
           e.name = name
         } else if (op.op === 'prescribe') {
           e.prescription = prescriptionOf(rxFromOp(op))
-          e.intensity = op.intensity
+          if ('intensity' in op) e.intensity = op.intensity ?? null
         } else {
           if (day.exercises.length <= 1) {
             if (day === src) return fail(i, 'Нельзя убрать последнее упражнение дня')
@@ -480,8 +560,8 @@ export function applyOps(program: Program, ops: readonly ProgramOp[]): ApplyResu
   return { ok: true, program: prog, results }
 }
 
-function rxFromOp(op: OpPrescription): Rx {
-  return { sets: op.sets, repsMin: op.repsMin, repsMax: op.repsMax, dropReps: op.dropReps, intensity: op.intensity }
+function rxFromOp(op: Omit<OpPrescription, 'intensity'> & { intensity?: OpIntensity }): Rx {
+  return { sets: op.sets, repsMin: op.repsMin, repsMax: op.repsMax, dropReps: op.dropReps, intensity: op.intensity ?? null }
 }
 
 /** Orders 1..n in place: the exercises are applyOps' own clones, and tempIds refer to these objects. */
@@ -499,23 +579,43 @@ function capitalizeFirst(s: string): string {
  * The draft carried over to a newer version of the day (409: the program changed elsewhere): what the
  * owner changed (the same ops, this week only) is applied to the new day. Null when it no longer fits
  * (an edited exercise is gone): the editor starts over from the new day.
+ * `byName`: the new day is another program's (the template's copy, made on another device or by a save
+ * that timed out here but went through), its ids differ; the old day's exercises are matched to it by
+ * name (unique in a day).
  */
-export function rebaseDraft(oldDay: ProgramDay, newDay: ProgramDay, draft: Draft, week: number): Draft | null {
-  const ops = draftOps(week, newDay.weekday, oldDay, draft)
+export function rebaseDraft(oldDay: ProgramDay, newDay: ProgramDay, draft: Draft, week: number, byName = false): Draft | null {
+  let from = oldDay
+  let mine = draft
+  if (byName) {
+    const idOf = new Map(newDay.exercises.filter((e) => e.id != null).map((e) => [normalizeName(e.name), e.id!]))
+    const map = new Map<number, number>()
+    let gone = 0 // not in the new day: negative ids, which no server id can be
+    for (const e of oldDay.exercises) if (e.id != null) map.set(e.id, idOf.get(normalizeName(e.name)) ?? --gone)
+    from = { ...oldDay, exercises: oldDay.exercises.map((e) => (e.id != null ? { ...e, id: map.get(e.id) } : e)) }
+    mine = draft.map((i) => (isTempKey(i.key) ? i : { ...i, key: map.get(i.key) ?? --gone }))
+  }
+  const ops = draftOps(week, newDay.weekday, from, mine)
   if (!ops.length) return draftFromDay(newDay)
   const program: Program = { id: '', name: '', source: '', weeks: [{ number: week, days: [newDay] }] }
   const applied = applyOps(program, ops)
   if (!applied.ok) return null
   const day = applied.program.weeks[0].days[0]
-  // Back to keys: server ids stay, added exercises get their tempIds again (by name, unique in a day).
-  const added = new Map(draft.filter((i) => isTempKey(i.key)).map((i) => [normalizeName(i.name), i.key]))
+  // Back to keys: server ids stay; an exercise added by the ops gets its draft key again (by name, unique
+  // in a day): the tempId of an added one, or the id of one sent as remove + add (a swap of names).
+  const keyOf = new Map(mine.map((i) => [normalizeName(i.name), i.key]))
   const out: Draft = []
   for (const e of day.exercises) {
-    const key = e.id ?? added.get(normalizeName(e.name))
+    const key = e.id ?? keyOf.get(normalizeName(e.name))
     if (key == null) return null
     out.push({ key, name: e.name, rx: rxOf(e) })
   }
   return out
+}
+
+/** The day already is the draft (names in order, prescriptions): e.g. a save that timed out but went through. */
+export function draftMatchesDay(day: ProgramDay, draft: Draft): boolean {
+  const ex = day.exercises
+  return ex.length === draft.length && ex.every((e, i) => normalizeName(e.name) === normalizeName(draft[i].name) && sameRx(rxOf(e), draft[i].rx))
 }
 
 // ---------- results for the scope sheet ----------

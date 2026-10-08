@@ -8,6 +8,7 @@ import {
   defaultDrops,
   defaultScope,
   draftFromDay,
+  draftMatchesDay,
   draftOps,
   editOutcome,
   formatWeeks,
@@ -481,12 +482,13 @@ describe('draftOps', () => {
 
   it('prescribe only: repsMax is filled from repsMin', () => {
     const ops = draftOps(1, 1, base(), setRx(draft0(), 102, rx({ sets: 4, repsMin: 10, repsMax: null })))
-    expect(ops).toEqual([{ op: 'prescribe', week: 1, weekday: 1, itemId: 102, sets: 4, repsMin: 10, repsMax: 10, dropReps: null, intensity: null }])
+    expect(ops).toEqual([{ op: 'prescribe', week: 1, weekday: 1, itemId: 102, sets: 4, repsMin: 10, repsMax: 10, dropReps: null }])
+    expect(ops[0]).not.toHaveProperty('intensity') // unchanged intensity: the key is left out
   })
 
   it('prescribe a dropset: reps are null', () => {
     const ops = draftOps(1, 1, base(), setRx(draft0(), 103, rx({ sets: 4, repsMin: null, repsMax: null, dropReps: [10, 5, 5] })))
-    expect(ops).toEqual([{ op: 'prescribe', week: 1, weekday: 1, itemId: 103, sets: 4, repsMin: null, repsMax: null, dropReps: [10, 5, 5], intensity: null }])
+    expect(ops).toEqual([{ op: 'prescribe', week: 1, weekday: 1, itemId: 103, sets: 4, repsMin: null, repsMax: null, dropReps: [10, 5, 5] }])
   })
 
   it('an intensity change is a prescribe', () => {
@@ -1027,12 +1029,13 @@ describe('applyOps: draftOps round trip', () => {
       let d = d0()
       for (let step = 0; step < 6; step++) {
         const k = rnd(5)
-        if (k === 0 && d.length > 1) d = removeItem(d, d[rnd(d.length)].key)
+        if (k === 0 && d.length) d = removeItem(d, d[rnd(d.length)].key)
         else if (k === 1) d = addItem(d, `доп ${round}-${step}`, rx({ sets: 1 + rnd(8) })).draft
-        else if (k === 2) d = setRx(d, d[rnd(d.length)].key, rx({ sets: 1 + rnd(8) }))
-        else if (k === 3) d = replaceItem(d, d[rnd(d.length)].key, `замена ${round}-${step}`)
-        else d = moveItem(d, rnd(d.length), rnd(2) ? 1 : -1)
+        else if (k === 2 && d.length) d = setRx(d, d[rnd(d.length)].key, rx({ sets: 1 + rnd(8) }))
+        else if (k === 3 && d.length) d = replaceItem(d, d[rnd(d.length)].key, `замена ${round}-${step}`)
+        else if (d.length) d = moveItem(d, rnd(d.length), rnd(2) ? 1 : -1)
       }
+      if (!d.length) continue // an empty day is refused before any request (validateDraft)
       const ops = draftOps(1, 1, mon(), d)
       const r = applied(buildProgram(), ops)
       const day = dayOf(r.program, 1)
@@ -1114,6 +1117,253 @@ describe('rebaseDraft', () => {
     draft = moveItem(draft, 0, 1) // [102, 101, new1, 103]: needs a reorder with the tempId
     const out = rebaseDraft(oldDay(), oldDay(), draft, 1)
     expect(out?.map((i) => i.key)).toEqual([102, 101, 'new1', 103])
+  })
+})
+
+// ---------- 7b. review fixes: op order the server accepts, intensity, rebase onto the copy ----------
+
+/** A program of one week with one Monday of these exercises. */
+function oneDay(exercises: ProgramExercise[]): Program {
+  return { id: 'one', name: 'One', source: 'test', version: 1, weeks: [{ number: 1, days: [{ id: 1, weekday: 1, title: 'понедельник', exercises }] }] }
+}
+
+/** draftOps of `draft` applied the way the server does: the day comes out as the draft. */
+function sends(program: Program, draft: Draft, week = 1, weekday = 1): ProgramOp[] {
+  const ops = draftOps(week, weekday, dayOf(program, week, weekday), draft)
+  const day = dayOf(applied(program, ops).program, week, weekday)
+  expect(day.exercises.map((e) => normalizeName(e.name))).toEqual(draft.map((i) => normalizeName(i.name)))
+  day.exercises.forEach((e, i) => expect(sameRx(rxOf(e), draft[i].rx)).toBe(true))
+  expect(day.exercises.map((e) => e.order)).toEqual(draft.map((_, i) => i + 1))
+  return ops
+}
+
+const shape = (ops: ProgramOp[]) => ops.map((o) => `${o.op}:${'itemId' in o ? o.itemId : 'tempId' in o ? o.tempId : ''}`)
+
+describe('draftOps: removes that would empty the day', () => {
+  it('[A] -> [B]: the add goes before the remove of the last exercise', () => {
+    const p = oneDay([ex(1, 'a', 1, 3, 10, 12)])
+    const d = addItem(removeItem(draftFromDay(dayOf(p, 1)), 1), 'b').draft
+    expect(shape(sends(p, d))).toEqual(['add:new1', 'remove:1'])
+  })
+
+  it('every exercise replaced with new ones: removes but one, the first add, the last remove, the other adds', () => {
+    const p = buildProgram()
+    let d = draftFromDay(dayOf(p, 1, 3)) // [111 приседания, 112 румынская тяга]
+    d = removeItem(removeItem(d, 111), 112)
+    d = addItem(addItem(d, 'x').draft, 'y').draft
+    expect(shape(sends(p, d, 1, 3))).toEqual(['remove:112', 'add:new1', 'remove:111', 'add:new2'])
+  })
+
+  it('a removed exercise added back under its name is kept (a prescribe), not removed and added', () => {
+    const p = oneDay([ex(1, 'жим лёжа', 1, 3, 10, 12)])
+    const d = addItem(removeItem(draftFromDay(dayOf(p, 1)), 1), 'Жим Лежа', rx({ sets: 5 })).draft
+    const ops = sends(p, d)
+    expect(ops).toEqual([{ op: 'prescribe', week: 1, weekday: 1, itemId: 1, sets: 5, repsMin: 10, repsMax: 12, dropReps: null }])
+  })
+
+  it('the pivot is a removed exercise whose name is not added back', () => {
+    const p = oneDay([ex(1, 'a', 1, 3, 10, 12), ex(2, 'b', 2, 3, 10, 12)])
+    let d = removeItem(removeItem(draftFromDay(dayOf(p, 1)), 1), 2)
+    d = addItem(addItem(d, 'b').draft, 'c').draft // "b" comes back as a new exercise
+    expect(shape(sends(p, d))).toEqual(['remove:2', 'add:new1', 'remove:1', 'add:new2'])
+  })
+
+  it('3 exercises replaced with 18 new ones never go over the day limit', () => {
+    const p = oneDay([ex(1, 'a', 1, 3, 10, 12), ex(2, 'b', 2, 3, 10, 12), ex(3, 'c', 3, 3, 10, 12)])
+    let d: Draft = []
+    for (let i = 0; i < 18; i++) d = addItem(d, `new ${i}`).draft
+    sends(p, d)
+  })
+
+  it('20 exercises replaced with 20 new ones', () => {
+    const p = oneDay(Array.from({ length: 20 }, (_, i) => ex(i + 1, `old ${i}`, i + 1, 3, 10, 12)))
+    let d: Draft = []
+    for (let i = 0; i < 20; i++) d = addItem(d, `new ${i}`).draft
+    sends(p, d)
+  })
+
+  it('the same on several weeks: the other weeks follow', () => {
+    const p = buildProgram()
+    let d = draftFromDay(dayOf(p, 1, 3))
+    d = addItem(removeItem(removeItem(d, 111), 112), 'x').draft
+    const ops = draftOps(1, 3, dayOf(p, 1, 3), d, { structure: WEEKS })
+    const r = applied(p, ops)
+    for (const n of WEEKS) expect(names(dayOf(r.program, n, 3))).toEqual(['x'])
+  })
+
+  it('random edits that may empty a day and fill it again (seeded) always go through', () => {
+    let seed = 777
+    const rnd = (n: number) => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff
+      return seed % n
+    }
+    const p = buildProgram()
+    for (let round = 0; round < 60; round++) {
+      let d = draftFromDay(dayOf(p, 1, 3))
+      for (let step = 0; step < 5; step++) {
+        const k = rnd(4)
+        if (k <= 1 && d.length) d = removeItem(d, d[rnd(d.length)].key)
+        else if (k === 2) d = addItem(d, rnd(3) ? `доп ${round}-${step}` : 'приседания', rx({ sets: 1 + rnd(8) })).draft
+        else if (d.length) d = moveItem(d, rnd(d.length), rnd(2) ? 1 : -1)
+        if (new Set(d.map((i) => normalizeName(i.name))).size !== d.length) d = d.slice(0, -1) // the picker hides names in the day
+      }
+      if (d.length) sends(p, d, 1, 3)
+    }
+  })
+})
+
+describe('draftOps: chains and cycles of replaces', () => {
+  it('B -> C, then A -> B: the replace freeing a name goes first', () => {
+    let d = replaceItem(draftFromDay(mon()), 102, 'тяга гантели') // B -> C
+    d = replaceItem(d, 101, 'тяга блока') // A -> B
+    const ops = sends(buildProgram(), d)
+    expect(ops.map((o) => (o.op === 'replace' ? o.itemId : null))).toEqual([102, 101])
+  })
+
+  it('a chain of three in any draft order', () => {
+    let d = replaceItem(draftFromDay(mon()), 103, 'шраги') // C -> D
+    d = replaceItem(d, 102, 'отведения на дельты') // B -> C
+    d = replaceItem(d, 101, 'тяга блока') // A -> B
+    const ops = sends(buildProgram(), d)
+    expect(ops.map((o) => (o.op === 'replace' ? o.itemId : null))).toEqual([103, 102, 101])
+  })
+
+  it('a swap (A <-> B, possible through the picker) goes as remove + add for one of them', () => {
+    const p = buildProgram()
+    let d = draftFromDay(dayOf(p, 1, 3)) // [111 приседания, 112 румынская тяга]
+    d = replaceItem(d, 112, 'x')
+    d = replaceItem(d, 111, 'румынская тяга')
+    d = replaceItem(d, 112, 'приседания')
+    const ops = sends(p, d, 1, 3)
+    expect(ops.filter((o) => o.op === 'replace')).toHaveLength(1)
+    expect(ops.some((o) => o.op === 'remove') && ops.some((o) => o.op === 'add')).toBe(true)
+  })
+
+  it('a three-way rotation keeps the prescriptions with their rows', () => {
+    let d = draftFromDay(mon())
+    d = replaceItem(d, 101, 'tmp')
+    d = replaceItem(d, 103, 'жим лёжа') // C -> A
+    d = replaceItem(d, 102, 'отведения на дельты') // B -> C
+    d = replaceItem(d, 101, 'тяга блока') // A -> B
+    d = setRx(d, 101, rx({ sets: 7 }))
+    sends(buildProgram(), d)
+  })
+
+  it('a rebase of a swap keeps the draft keys', () => {
+    const wed = dayOf(buildProgram(), 1, 3)
+    let d = draftFromDay(wed)
+    d = replaceItem(replaceItem(replaceItem(d, 112, 'x'), 111, 'румынская тяга'), 112, 'приседания')
+    const out = rebaseDraft(wed, wed, d, 1)
+    expect(out?.map((i) => [i.key, i.name])).toEqual([
+      [111, 'румынская тяга'],
+      [112, 'приседания'],
+    ])
+  })
+})
+
+describe('draftOps / applyOps: intensity only when it changed', () => {
+  // Item 1 is heavy in week 1 and light in week 2.
+  const program = () => {
+    const p = buildProgram()
+    dayOf(p, 2).exercises[0].intensity = 'light'
+    return p
+  }
+
+  it('sets only on all weeks: each week keeps its own intensity', () => {
+    const p = program()
+    const d = setRx(draftFromDay(dayOf(p, 1)), 101, { ...rxOf(dayOf(p, 1).exercises[0]), sets: 6 })
+    const ops = draftOps(1, 1, dayOf(p, 1), d, { prescribe: WEEKS })
+    expect(ops).toHaveLength(1)
+    expect(ops[0]).not.toHaveProperty('intensity')
+    const r = applied(p, ops)
+    expect(dayOf(r.program, 1).exercises[0]).toMatchObject({ intensity: 'heavy', prescription: { sets: 6 } })
+    expect(dayOf(r.program, 2).exercises[0]).toMatchObject({ intensity: 'light', prescription: { sets: 6 } })
+  })
+
+  it('a changed intensity is sent and lands in every week', () => {
+    const p = program()
+    const d = setRx(draftFromDay(dayOf(p, 1)), 101, { ...rxOf(dayOf(p, 1).exercises[0]), intensity: 'medium' })
+    const ops = draftOps(1, 1, dayOf(p, 1), d, { prescribe: WEEKS })
+    expect(ops[0]).toMatchObject({ op: 'prescribe', intensity: 'medium' })
+    const r = applied(p, ops)
+    for (const n of [1, 2]) expect(dayOf(r.program, n).exercises[0].intensity).toBe('medium')
+  })
+
+  it('a cleared intensity is sent as null and clears it', () => {
+    const p = program()
+    const d = setRx(draftFromDay(dayOf(p, 1)), 101, { ...rxOf(dayOf(p, 1).exercises[0]), intensity: null })
+    const ops = draftOps(1, 1, dayOf(p, 1), d, { prescribe: WEEKS })
+    expect(ops[0]).toHaveProperty('intensity', null)
+    const r = applied(p, ops)
+    for (const n of [1, 2]) expect(dayOf(r.program, n).exercises[0].intensity).toBeNull()
+  })
+
+  it('an add always carries its intensity', () => {
+    const { draft } = addItem(draftFromDay(mon()), 'x')
+    expect(draftOps(1, 1, mon(), draft)[0]).toHaveProperty('intensity', null)
+  })
+})
+
+describe('rebaseDraft onto the template copy (byName)', () => {
+  // The copy: the same day under new ids (9000 + the template's).
+  const copyOf = (d: ProgramDay): ProgramDay => ({ ...d, id: 999, exercises: d.exercises.map((e) => ({ ...e, id: 9000 + e.id! })) })
+
+  it('edits survive, keys become the copy ids, added items keep their tempIds', () => {
+    const old = mon()
+    let d = replaceItem(draftFromDay(old), 101, 'жим гантелей')
+    d = setRx(d, 102, rx({ sets: 6 }))
+    d = removeItem(d, 103)
+    d = addItem(d, 'подтягивания', rx({ sets: 4 })).draft
+    const out = rebaseDraft(old, copyOf(old), d, 1, true)!
+    expect(out.map((i) => i.key)).toEqual([9101, 9102, 'new1'])
+    expect(out.map((i) => i.name)).toEqual(['жим гантелей', 'тяга блока', 'подтягивания'])
+    expect(out[1].rx.sets).toBe(6)
+    expect(out[2].rx.sets).toBe(4)
+  })
+
+  it('by id the copy does not fit at all', () => {
+    const old = mon()
+    expect(rebaseDraft(old, copyOf(old), setRx(draftFromDay(old), 102, rx({ sets: 6 })), 1)).toBeNull()
+  })
+
+  it('a change made in the copy elsewhere is kept under the draft', () => {
+    const old = mon()
+    const copy = copyOf(old)
+    copy.exercises[2].prescription = { sets: 5, reps_min: null, reps_max: null, drop_reps: [10, 5], raw: 'дропсет 5х 10-5' }
+    const out = rebaseDraft(old, copy, setRx(draftFromDay(old), 102, rx({ sets: 6 })), 1, true)!
+    expect(out.map((i) => i.key)).toEqual([9101, 9102, 9103])
+    expect(out[1].rx.sets).toBe(6)
+    expect(out[2].rx.dropReps).toEqual([10, 5])
+  })
+
+  it('an edited exercise gone from the copy (by name) -> null', () => {
+    const old = mon()
+    const copy = copyOf(old)
+    copy.exercises[1].name = 'тяга гантели'
+    expect(rebaseDraft(old, copy, setRx(draftFromDay(old), 102, rx({ sets: 6 })), 1, true)).toBeNull()
+  })
+
+  it('no edits: the copy as a draft', () => {
+    const old = mon()
+    expect(rebaseDraft(old, copyOf(old), draftFromDay(old), 1, true)).toEqual(draftFromDay(copyOf(old)))
+  })
+})
+
+describe('draftMatchesDay', () => {
+  it('the copy already holding the edits matches (a save that timed out but went through)', () => {
+    const old = mon()
+    const d = setRx(replaceItem(draftFromDay(old), 101, 'жим гантелей'), 102, rx({ sets: 6 }))
+    const r = applied(buildProgram(), draftOps(1, 1, old, d))
+    expect(draftMatchesDay(dayOf(r.program, 1), d)).toBe(true)
+    expect(draftMatchesDay(old, d)).toBe(false)
+  })
+
+  it('order, length and prescriptions count', () => {
+    const old = mon()
+    expect(draftMatchesDay(old, draftFromDay(old))).toBe(true)
+    expect(draftMatchesDay(old, moveItem(draftFromDay(old), 0, 1))).toBe(false)
+    expect(draftMatchesDay(old, removeItem(draftFromDay(old), 103))).toBe(false)
+    expect(draftMatchesDay(old, setRx(draftFromDay(old), 101, { ...rxOf(old.exercises[0]), intensity: 'light' }))).toBe(false)
   })
 })
 

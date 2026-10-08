@@ -375,10 +375,13 @@ export interface OpPrescription {
   intensity: OpIntensity
 }
 
-// `weeks`: where else the edit goes (includes `week`); absent: only `week`.
+// `weeks`: where else the edit goes (includes `week`); absent: only `week`. A prescribe without the
+// `intensity` key keeps each week's own intensity; null clears it.
 export type ProgramOp =
   | { op: 'replace'; week: number; weekday: number; itemId: ItemRef; name: string; weeks?: number[] }
-  | ({ op: 'prescribe'; week: number; weekday: number; itemId: ItemRef; weeks?: number[] } & OpPrescription)
+  | ({ op: 'prescribe'; week: number; weekday: number; itemId: ItemRef; weeks?: number[] } & Omit<OpPrescription, 'intensity'> & {
+        intensity?: OpIntensity
+      })
   | ({ op: 'add'; week: number; weekday: number; tempId: string; name: string; position: number; weeks?: number[] } & OpPrescription)
   | { op: 'remove'; week: number; weekday: number; itemId: ItemRef; weeks?: number[] }
   | { op: 'reorder'; week: number; weekday: number; itemIds: ItemRef[]; weeks?: number[] }

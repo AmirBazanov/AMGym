@@ -9,6 +9,7 @@ import { capitalize, dayFocus, findProgram, formatPrescription, getDay, isDropse
 import {
   addItem,
   draftFromDay,
+  draftMatchesDay,
   draftOps,
   isTempKey,
   itemChange,
@@ -28,9 +29,11 @@ import {
   type ItemKey,
 } from '../programEdit'
 import { useStore } from '../store'
-import { confirm, haptic } from '../telegram'
+import { confirm, haptic, setClosingConfirmation } from '../telegram'
 
 type Picker = { kind: 'add' } | { kind: 'replace'; key: ItemKey }
+
+const SAVED_ALREADY = 'Правки уже сохранены'
 
 function useOnline(): boolean {
   const [online, setOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine !== false)
@@ -68,8 +71,13 @@ export function ProgramEdit({
   const day = program ? getDay(program, week, weekday) : undefined
   const online = useOnline()
 
-  // The day the draft is based on; a newer one (409, a live update) is taken over with rebaseDraft.
+  // The program the editor was opened on. It may become its copy (the first save, or one made on another
+  // device); any other program (409 not_active, a switch elsewhere) is not this draft's: saving is blocked.
+  const [opened] = useState(programId)
+  const switched = programId !== opened && program?.basedOn !== opened
+  // The day the draft is based on and its program; a newer one (409, a live update) is taken over with rebaseDraft.
   const [base, setBase] = useState<ProgramDay | undefined>(day)
+  const [baseFrom, setBaseFrom] = useState(programId)
   const [draft, setDraft] = useState<Draft>(() => (day ? draftFromDay(day) : []))
   const [notice, setNotice] = useState<string | null>(null)
   const [open, setOpen] = useState<ItemKey | null>(null)
@@ -77,29 +85,45 @@ export function ProgramEdit({
   const [scope, setScope] = useState(false)
 
   useEffect(() => {
-    if (!day || day === base) return
-    const rebased = base ? rebaseDraft(base, day, draft, week) : null
-    if (base && !rebased && draftOps(week, weekday, base, draft).length)
-      setNotice('Программа изменилась, и часть правок к ней уже не подходит. Начни заново с новой версии.')
+    if (!day || day === base || switched) return
+    const edited = !!base && draftOps(week, weekday, base, draft).length > 0
+    if (edited && draftMatchesDay(day, draft)) {
+      setNotice(SAVED_ALREADY)
+      setDraft(draftFromDay(day))
+    } else {
+      const rebased = base ? rebaseDraft(base, day, draft, week, baseFrom !== programId) : null
+      if (edited && !rebased) setNotice('Программа изменилась, и часть правок к ней уже не подходит. Начни заново с новой версии.')
+      setDraft(rebased ?? draftFromDay(day))
+    }
     setBase(day)
-    setDraft(rebased ?? draftFromDay(day))
+    setBaseFrom(programId)
     setOpen(null)
     // Only a new day from the store triggers this; draft and base are read at that moment.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [day])
+  }, [day, switched])
 
   const ops = useMemo(() => (base ? draftOps(week, weekday, base, draft) : []), [base, draft, week, weekday])
+
+  // Unsaved edits: Telegram asks before the Mini App is closed by a swipe or ✕.
+  const dirty = ops.length > 0
+  useEffect(() => {
+    setClosingConfirmation(dirty)
+    return () => setClosingConfirmation(false)
+  }, [dirty])
+
   const check = useMemo(() => (base ? validateDraft(base, draft) : null), [base, draft])
   const done = useMemo(() => new Set(history.flatMap((w) => w.exercises.map((e) => normalizeName(e.name)))), [history])
 
   const editable = mode === 'server' && program?.version != null && !!base && base.exercises.every((e) => e.id != null)
-  const blocked = mode !== 'server'
-    ? 'Редактор работает в дневнике из Telegram'
-    : !editable
-      ? 'Программа ещё не загрузилась с сервера. Открой редактор чуть позже'
-      : !online
-        ? 'Нет связи: правки можно набросать, сохранить — когда появится сеть'
-        : null
+  const blocked = switched
+    ? 'Программа сменилась — закрой редактор'
+    : mode !== 'server'
+      ? 'Редактор работает в дневнике из Telegram'
+      : !editable
+        ? 'Программа ещё не загрузилась с сервера. Открой редактор чуть позже'
+        : !online
+          ? 'Нет связи: правки можно набросать, сохранить — когда появится сеть'
+          : null
 
   const close = async () => {
     if (ops.length && !(await confirm('Выйти без сохранения? Правки пропадут.'))) return
@@ -113,6 +137,14 @@ export function ProgramEdit({
       onSaved(out.switchedFrom ? 'Теперь активна твоя версия программы' : 'Программа сохранена')
       onClose()
     } else if (out.kind === 'conflict') {
+      // The store has cached the server's program (switched to it if it is the copy) before answering.
+      const p = out.program ? findProgram(out.program.id) : undefined
+      const now = p ? getDay(p, week, weekday) : undefined
+      if (now && draftMatchesDay(now, draft)) {
+        haptic.success()
+        setNotice(SAVED_ALREADY)
+        return
+      }
       haptic.error()
       setNotice('Программа изменилась на другом устройстве. Проверь правки и сохрани ещё раз.')
     } else if (out.kind === 'not_active') {
@@ -121,10 +153,13 @@ export function ProgramEdit({
     }
   }
 
-  if (!program || !day || !base) {
+  // Switched: the draft stays on screen (its own day), nothing goes to the other program.
+  const shown = switched ? undefined : program
+  const view = switched ? base : day
+  if (!view || !base || (!switched && !program)) {
     return (
       <Sheet onClose={onClose} className="tall">
-        <div className="empty">Этого дня в программе больше нет</div>
+        <div className="empty">{switched ? 'Программа сменилась — закрой редактор' : 'Этого дня в программе больше нет'}</div>
       </Sheet>
     )
   }
@@ -136,18 +171,18 @@ export function ProgramEdit({
     <Sheet onClose={() => void close()} className="tall editor">
       <div className="editor-head">
         <div className="grow">
-          <div className="eyebrow">{program.editable ? 'Моя программа' : 'Редактор'}</div>
+          <div className="eyebrow">{shown?.editable ? 'Моя программа' : 'Редактор'}</div>
           <h1 style={{ fontSize: 22 }}>
             Неделя {week} · {WEEKDAY_LONG[weekday]}
           </h1>
-          <div className="hint">{dayFocus(day)}</div>
+          <div className="hint">{dayFocus(view)}</div>
         </div>
         <button className="btn ghost editor-close" onClick={() => void close()}>
           Закрыть
         </button>
       </div>
-      {!program.editable && (
-        <div className="card notice">Сохранение создаст твою копию «{program.name} · моя». Оригинал останется, история сохранится.</div>
+      {shown && !shown.editable && (
+        <div className="card notice">Сохранение создаст твою копию «{shown.name} · моя». Оригинал останется, история сохранится.</div>
       )}
       {notice && <div className="card notice warn">{notice}</div>}
       {blocked && <div className="card notice">{blocked}</div>}
@@ -271,9 +306,9 @@ export function ProgramEdit({
         />
       )}
 
-      {picker && (
+      {picker && shown && (
         <ExercisePicker
-          program={program}
+          program={shown}
           title={picker.kind === 'add' ? 'Добавить упражнение' : 'Заменить на'}
           dayNames={draft.map((i) => i.name)}
           current={picker.kind === 'replace' ? draft.find((i) => i.key === picker.key)?.name : undefined}
@@ -291,8 +326,8 @@ export function ProgramEdit({
         />
       )}
 
-      {scope && (
-        <ScopeSheet program={program} week={week} base={base} draft={draft} onClose={() => setScope(false)} onDone={finish} />
+      {scope && shown && (
+        <ScopeSheet program={shown} week={week} base={base} draft={draft} onClose={() => setScope(false)} onDone={finish} />
       )}
     </Sheet>
   )

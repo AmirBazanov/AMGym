@@ -18,6 +18,8 @@ interface TgWebApp {
     selectionChanged(): void
   }
   showConfirm?(message: string, cb: (ok: boolean) => void): void
+  enableClosingConfirmation?(): void
+  disableClosingConfirmation?(): void
 }
 
 export const tg: TgWebApp | undefined = (window as unknown as { Telegram?: { WebApp?: TgWebApp } }).Telegram
@@ -89,6 +91,16 @@ export const haptic = {
   select: () => tg?.HapticFeedback?.selectionChanged(),
   success: () => tg?.HapticFeedback?.notificationOccurred('success'),
   error: () => tg?.HapticFeedback?.notificationOccurred('error'),
+}
+
+/** While on, Telegram asks before the Mini App is closed (swipe down, ✕). Older clients: no-op. */
+export function setClosingConfirmation(on: boolean) {
+  try {
+    if (on) tg?.enableClosingConfirmation?.()
+    else tg?.disableClosingConfirmation?.()
+  } catch {
+    // Unsupported in this client version.
+  }
 }
 
 export function confirm(message: string): Promise<boolean> {
