@@ -43,6 +43,7 @@ from gymbot.services import nutrition as nut
 from gymbot.services import overrides as ov
 from gymbot.services import plan as day_plan
 from gymbot.services import profile as prof
+from gymbot.services import programs as pg
 from gymbot.services import reminders as rem
 from gymbot.services import wellbeing as wb
 from gymbot.services import workouts as ws
@@ -58,6 +59,9 @@ NUTRITION_MIN_DATE = date(2000, 1, 1)
 
 class StateOut(BaseModel):
     programId: str
+    # Programs.version of the active program: the Mini App refetches GET /api/programs/{programId} only
+    # when the slug or this changes.
+    programVersion: int
     startDate: date
     restSeconds: int
     targets: nut.Targets
@@ -237,6 +241,7 @@ def create_app(
         history = [ws.serialize(w, up, weeks, tz) for w in await ws.list_workouts(session, user)]
         return StateOut(
             programId=up.program.slug,
+            programVersion=up.program.version,
             startDate=up.started_on,
             restSeconds=user.rest_seconds,
             targets=nut.user_targets(user),
@@ -291,6 +296,27 @@ def create_app(
         if body.programId or body.startDate:
             live.publish(user.id, "plan")  # another program day; the burst merges into one event
         return out
+
+    # Programs: the server is their source of truth (templates from data/programs and the user's own copies).
+    @app.get("/api/programs")
+    async def list_programs(session: Session, tg: TgUser) -> list[pg.ProgramSummary]:
+        user = await get_or_create_user(session, tg.id, tg.name)
+        return await pg.program_summaries(session, user.id)
+
+    @app.get("/api/programs/{slug}")
+    async def get_program(slug: str, session: Session, tg: TgUser) -> pg.ProgramOut:
+        """The whole program, weeks, days and exercises sorted. Another user's copy is 404."""
+        user = await get_or_create_user(session, tg.id, tg.name)
+        program = await pg.visible_program(session, user.id, slug)
+        if program is None:
+            raise HTTPException(404, "unknown program")
+        return await pg.program_out(session, program, user.id)
+
+    @app.get("/api/exercises")
+    async def list_exercises(session: Session, tg: TgUser) -> list[pg.CatalogExercise]:
+        """Exercises to pick from: in the user's programs or logged by them; most logged sets first."""
+        user = await get_or_create_user(session, tg.id, tg.name)
+        return await pg.exercise_choices(session, user.id)
 
     def owner_sender(chat_id: int) -> workout_events.Send | None:
         if bot is None:

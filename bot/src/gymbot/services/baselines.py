@@ -43,13 +43,21 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gymbot.db.models import Exercise, ExerciseBaseline, ProgramItem, UserFact
+from gymbot.db.models import (
+    Exercise,
+    ExerciseBaseline,
+    Program,
+    ProgramDay,
+    ProgramItem,
+    ProgramWeek,
+    UserFact,
+)
 from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.prompts import build_baseline_messages
 from gymbot.services import live
 from gymbot.services import profile as prof
-from gymbot.services.programs import normalize
+from gymbot.services.programs import normalize, visible_to
 
 log = logging.getLogger(__name__)
 
@@ -204,10 +212,18 @@ def parse_answer(data: dict, catalog: list[str], year: int) -> Extraction:
     return out
 
 
-async def catalog(session: AsyncSession) -> list[str]:
-    """Names of exercises in the programs: the ones the Mini App can start with a weight."""
+async def catalog(session: AsyncSession, user_id: int | None) -> list[str]:
+    """Names of exercises in the programs the user sees (templates and their own copies; None: templates
+    only): the ones the Mini App can start with a weight."""
     rows = await session.scalars(
-        select(Exercise.name).join(ProgramItem, ProgramItem.exercise_id == Exercise.id).distinct().order_by(Exercise.name)
+        select(Exercise.name)
+        .join(ProgramItem, ProgramItem.exercise_id == Exercise.id)
+        .join(ProgramDay, ProgramDay.id == ProgramItem.day_id)
+        .join(ProgramWeek, ProgramWeek.id == ProgramDay.week_id)
+        .join(Program, Program.id == ProgramWeek.program_id)
+        .where(visible_to(user_id))
+        .distinct()
+        .order_by(Exercise.name)
     )
     return list(rows)
 
@@ -269,7 +285,7 @@ async def _process(
             if marked:
                 live.publish(user_id, "facts")
             return FREE if marked else SKIPPED
-        names = await catalog(session)
+        names = await catalog(session, user_id)
     # No session (and no SQLite write lock) while the model thinks.
     if before_model is not None:
         await before_model()

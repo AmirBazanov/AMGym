@@ -151,7 +151,7 @@ async def state_baselines(client, auth) -> list[dict]:
 
 async def test_hardcoded_catalog_equals_the_program_catalog(db):
     async with db() as s:
-        assert await baselines.catalog(s) == CATALOG
+        assert await baselines.catalog(s, None) == CATALOG
 
 
 @pytest.mark.parametrize(

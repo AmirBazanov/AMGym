@@ -41,7 +41,7 @@ from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services import baselines, live
 from gymbot.services.access import is_allowed
 from gymbot.services.backup import backup_loop
-from gymbot.services.programs import sync_programs
+from gymbot.services.programs import backfill_program_meta, sync_programs
 from gymbot.services.reminders import reminder_loop
 from gymbot.services.users import get_or_create_user
 
@@ -169,6 +169,7 @@ async def run() -> None:
     await upgrade_head(engine)
     async with sessionmaker() as session:
         await sync_programs(session, settings.programs_dir)
+        await backfill_program_meta(session, settings.programs_dir)  # day focus of templates imported before it
 
     if not settings.miniapp_dist.is_dir():
         log.warning("%s not found: run `npm run build` in miniapp/ to serve the Mini App", settings.miniapp_dist)

@@ -80,7 +80,13 @@ class Program(Base):
     slug: Mapped[str] = mapped_column(String(100), unique=True)  # data/programs/<slug>.json
     name: Mapped[str] = mapped_column(String(200))
     source: Mapped[str | None] = mapped_column(String(200))
-    weeks: Mapped[list[ProgramWeek]] = relationship(back_populates="program", cascade="all, delete-orphan")
+    # NULL: a template imported from data/programs/*.json (never edited); else the user's own copy.
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    based_on_id: Mapped[int | None] = mapped_column(ForeignKey("programs.id", ondelete="SET NULL"))  # template
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")  # optimistic locking of edits
+    weeks: Mapped[list[ProgramWeek]] = relationship(
+        back_populates="program", cascade="all, delete-orphan", order_by="ProgramWeek.number"
+    )
 
 
 class ProgramWeek(Base):
@@ -89,7 +95,9 @@ class ProgramWeek(Base):
     program_id: Mapped[int] = mapped_column(ForeignKey("programs.id", ondelete="CASCADE"))
     number: Mapped[int] = mapped_column(Integer)
     program: Mapped[Program] = relationship(back_populates="weeks")
-    days: Mapped[list[ProgramDay]] = relationship(back_populates="week", cascade="all, delete-orphan")
+    days: Mapped[list[ProgramDay]] = relationship(
+        back_populates="week", cascade="all, delete-orphan", order_by="ProgramDay.weekday"
+    )
 
 
 class ProgramDay(Base):
@@ -97,8 +105,13 @@ class ProgramDay(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     week_id: Mapped[int] = mapped_column(ForeignKey("program_weeks.id", ondelete="CASCADE"))
     weekday: Mapped[int] = mapped_column(Integer)  # 1=Mon .. 7=Sun
+    focus: Mapped[str | None] = mapped_column(String(64))  # day label ("Руки и плечи", "База"); moves with the day
+    # The template day a copy's day was made from (re-linking workouts, "reset to original", old programIds).
+    base_day_id: Mapped[int | None] = mapped_column(ForeignKey("program_days.id", ondelete="SET NULL"))
     week: Mapped[ProgramWeek] = relationship(back_populates="days")
-    items: Mapped[list[ProgramItem]] = relationship(back_populates="day", cascade="all, delete-orphan")
+    items: Mapped[list[ProgramItem]] = relationship(
+        back_populates="day", cascade="all, delete-orphan", order_by="ProgramItem.order"
+    )
 
 
 class ProgramItem(Base):
@@ -142,6 +155,9 @@ class Workout(Base):
     client_id: Mapped[str | None] = mapped_column(String(64), unique=True)
     program_day_id: Mapped[int | None] = mapped_column(ForeignKey("program_days.id"))
     note: Mapped[str | None] = mapped_column(Text)
+    # Snapshot of the day's prescriptions when the workout was saved, JSON [{exerciseId, target, dropset}]
+    # (gymbot.services.workouts): later program edits never change how a past workout is shown.
+    targets_json: Mapped[str | None] = mapped_column(Text)
     program_day: Mapped[ProgramDay | None] = relationship()
     sets: Mapped[list[WorkoutSet]] = relationship(
         back_populates="workout", cascade="all, delete-orphan", order_by="WorkoutSet.set_index"

@@ -27,9 +27,11 @@ from typing import Any, Literal
 
 log = logging.getLogger(__name__)
 
-Topic = Literal["state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts", "weight", "records"]
+Topic = Literal[
+    "state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts", "weight", "records", "program"
+]
 TOPICS: frozenset[str] = frozenset(
-    {"state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts", "weight", "records"}
+    {"state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts", "weight", "records", "program"}
 )
 MAX_RECORDS = 5  # records carried by one event (gymbot.services.records announces at most 5 lines)
 

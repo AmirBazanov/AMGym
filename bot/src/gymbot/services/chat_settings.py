@@ -30,7 +30,7 @@ from gymbot.db.models import Program, ProgramWeek, Reminder, User, UserProgram
 from gymbot.services import baselines, overrides
 from gymbot.services import nutrition as nut
 from gymbot.services import reminders as rem
-from gymbot.services.programs import monday_of, normalize, program_position
+from gymbot.services.programs import monday_of, normalize, program_position, visible_to
 from gymbot.services.users import active_program, set_program
 
 # ---- routing ----
@@ -277,14 +277,15 @@ class Snapshot:
 
 async def load_snapshot(session: AsyncSession, user: User, today: date) -> Snapshot:
     current = await active_program(session, user, today)
-    programs = list(await session.scalars(select(Program).order_by(Program.id)))
+    # Templates and the user's own copies ("… · моя"), never another user's copy.
+    programs = list(await session.scalars(select(Program).where(visible_to(user.id)).order_by(Program.id)))
     reminders = list(
         await session.scalars(
             select(Reminder).where(Reminder.user_id == user.id).order_by(Reminder.minute_of_day, Reminder.id)
         )
     )
     weights = {o.exercise: o.weightKg for o in await overrides.for_day(session, user.id, today)}
-    return Snapshot(user, today, current, programs, reminders, await baselines.catalog(session), weights)
+    return Snapshot(user, today, current, programs, reminders, await baselines.catalog(session, user.id), weights)
 
 
 def _day(d: date) -> str:

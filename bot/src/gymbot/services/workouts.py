@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -11,9 +12,24 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from gymbot.db.models import ProgramDay, ProgramItem, ProgramWeek, User, UserProgram, Workout, WorkoutSet
+from gymbot.db.models import (
+    Program,
+    ProgramDay,
+    ProgramWeek,
+    User,
+    UserProgram,
+    Workout,
+    WorkoutSet,
+)
 from gymbot.llm.schemas import ParseResult
-from gymbot.services.programs import find_day, get_or_create_exercise, load_program, program_position
+from gymbot.services.programs import (
+    find_day,
+    get_or_create_exercise,
+    item_target,
+    load_program,
+    program_position,
+    targets_snapshot,
+)
 
 # ---- Mini App wire format (mirrors miniapp/src/store.ts) ----
 
@@ -39,6 +55,9 @@ class WorkoutIn(BaseModel):
     startedAt: datetime
     finishedAt: datetime | None = None
     exercises: list[ExerciseDTO]
+    # ProgramDay.id the workout was prepared from (GET /api/programs/{slug} days[].id). Wins over
+    # programId/week/weekday when the day belongs to the active program or its template.
+    programDayId: int | None = None
 
 
 class WorkoutOut(WorkoutIn):
@@ -51,31 +70,37 @@ def _aware(dt: datetime) -> datetime:
     return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
-def _item_target(item: ProgramItem | None) -> tuple[str, bool]:
-    if item is None:
-        return "", False
-    if item.drop_reps:
-        return f"дропсет {item.sets}х {'-'.join(map(str, item.drop_reps))}", True
-    return f"{item.sets}х{item.reps_min}-{item.reps_max}", False
-
-
 def _workout_options():  # type: ignore[no-untyped-def]
     return (
         selectinload(Workout.sets).selectinload(WorkoutSet.exercise),
         selectinload(Workout.program_day).selectinload(ProgramDay.week).selectinload(ProgramWeek.program),
-        selectinload(Workout.program_day).selectinload(ProgramDay.items).selectinload(ProgramItem.exercise),
+        selectinload(Workout.program_day).selectinload(ProgramDay.items),
     )
+
+
+def _targets(w: Workout) -> dict[int, tuple[str, bool]]:
+    """exercise_id -> (target, dropset) from the workout's snapshot; the live day items only for a row
+    without one (every workout with a day got it in migration 0014 or on save)."""
+    if w.targets_json is not None:
+        try:
+            snapshot = json.loads(w.targets_json)
+            return {int(t["exerciseId"]): (str(t["target"]), bool(t["dropset"])) for t in snapshot}
+        except (ValueError, TypeError, KeyError):
+            pass
+    if w.program_day is None:
+        return {}
+    return {i.exercise_id: item_target(i) for i in w.program_day.items}
 
 
 def serialize(w: Workout, up: UserProgram, weeks: int, tz: ZoneInfo) -> WorkoutOut:
     if w.program_day is not None:
         program_slug = w.program_day.week.program.slug
         week, weekday = w.program_day.week.number, w.program_day.weekday
-        items = {i.exercise_id: i for i in w.program_day.items}
     else:
         # Chat workouts have no planned day: place them by date within the active program.
         pos = program_position(up.started_on, weeks, w.performed_on)
-        program_slug, week, weekday, items = up.program.slug, pos.week, pos.weekday, {}
+        program_slug, week, weekday = up.program.slug, pos.week, pos.weekday
+    targets = _targets(w)
     exercises: list[ExerciseDTO] = []
     by_ex: dict[int, ExerciseDTO] = {}
     for s in w.sets:
@@ -83,7 +108,7 @@ def serialize(w: Workout, up: UserProgram, weeks: int, tz: ZoneInfo) -> WorkoutO
             continue
         ex = by_ex.get(s.exercise_id)
         if ex is None:
-            target, dropset = _item_target(items.get(s.exercise_id))
+            target, dropset = targets.get(s.exercise_id, ("", False))
             ex = ExerciseDTO(name=s.exercise.name, target=target, dropset=dropset, sets=[])
             by_ex[s.exercise_id] = ex
             exercises.append(ex)
@@ -96,6 +121,7 @@ def serialize(w: Workout, up: UserProgram, weeks: int, tz: ZoneInfo) -> WorkoutO
         startedAt=_aware(w.started_at),
         finishedAt=_aware(w.finished_at) if w.finished_at else None,
         exercises=exercises,
+        programDayId=w.program_day_id,
         source=w.source,
         clientId=w.client_id,
     )
@@ -116,6 +142,33 @@ async def get_workout(session: AsyncSession, user: User, workout_id: int) -> Wor
     return await session.scalar(stmt)
 
 
+async def _planned_day(session: AsyncSession, up: UserProgram, data: WorkoutIn) -> ProgramDay | None:
+    """The active program's day a Mini App workout belongs to, None when it is not one of them.
+
+    1. `programDayId` of a day of the active program, or of its template (then the copy's day made from it,
+       by base_day_id): the day the workout was prepared from, even if the day has moved since.
+    2. Else the old rule: slug, week and weekday in the active program. The template's slug of an active
+       copy counts as the copy (an offline queue or a workout in progress from before the copy was made).
+    """
+    program = await load_program(session, up.program_id)
+    template_slug = (
+        await session.scalar(select(Program.slug).where(Program.id == program.based_on_id))
+        if program.based_on_id
+        else None
+    )
+    if data.programDayId is not None:
+        days = {d.id: d for w in program.weeks for d in w.days}
+        if data.programDayId in days:
+            return days[data.programDayId]
+        if program.based_on_id is not None:
+            by_base = {d.base_day_id: d for d in days.values() if d.base_day_id is not None}
+            if data.programDayId in by_base:
+                return by_base[data.programDayId]
+    if data.programId == program.slug or (template_slug is not None and data.programId == template_slug):
+        return find_day(program, data.week, data.weekday)
+    return None
+
+
 async def save_from_miniapp(
     session: AsyncSession, user: User, up: UserProgram, data: WorkoutIn, tz: ZoneInfo
 ) -> Workout:
@@ -124,8 +177,7 @@ async def save_from_miniapp(
     )
     if existing is not None:  # retry of an already saved workout
         return existing
-    program = await load_program(session, up.program_id)
-    day = find_day(program, data.week, data.weekday) if program.slug == data.programId else None
+    day = await _planned_day(session, up, data)
     started = _aware(data.startedAt)
     w = Workout(
         user_id=user.id,
@@ -135,6 +187,7 @@ async def save_from_miniapp(
         source="miniapp",
         client_id=data.id,
         program_day_id=day.id if day else None,
+        targets_json=targets_snapshot(day) if day else None,
     )
     idx = 0
     for ex in data.exercises:

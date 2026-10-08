@@ -380,11 +380,7 @@ def build_mcp(
             if day is None:
                 out["planned"] = "день отдыха"
                 return dumps(out)
-            names = day_plan.day_names(settings.programs_dir, program.slug, pos.week, pos.weekday)
-            out["planned"] = [
-                f"{names.get(i.order, i.exercise.name)} {format_item(i)}"
-                for i in sorted(day.items, key=lambda i: i.order)
-            ]
+            out["planned"] = [f"{i.exercise.name} {format_item(i)}" for i in day.items]
             inputs = await day_plan.collect_inputs(session, user, settings, tz, now)
             if inputs is None:
                 return dumps(out)
@@ -478,7 +474,7 @@ def build_mcp(
         название из программы (program_status); повтор для того же упражнения заменяет вес, weight_kg=null
         убирает выставленный на сегодня вес."""
         async with owner_session() as (session, user):
-            catalog = await baselines.catalog(session)
+            catalog = await baselines.catalog(session, user.id)
             name = baselines.match_exercise(exercise, catalog)
             if name is None:
                 raise ToolError(f"Упражнения «{exercise}» нет в программе. Есть: {', '.join(catalog)}.")

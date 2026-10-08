@@ -252,7 +252,7 @@ async def all_overrides(db) -> list[WeightOverride]:
 @pytest.fixture
 async def catalog(db) -> list[str]:
     async with db() as s:
-        return await baselines.catalog(s)
+        return await baselines.catalog(s, None)
 
 
 # ---- 1. routing ----

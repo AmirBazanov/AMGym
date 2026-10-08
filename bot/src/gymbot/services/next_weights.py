@@ -37,7 +37,6 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
-from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -49,7 +48,6 @@ from gymbot.db.models import DayPlan, Exercise, Program, User, UserProgram, Work
 from gymbot.services import baselines, deload, overrides, plan
 from gymbot.services.advice import NEXT_DAY_SEARCH
 from gymbot.services.nutrition import _aware
-from gymbot.services.plan import day_names
 from gymbot.services.programs import find_day, load_program, normalize, program_position
 
 Source = Literal["override", "history", "baseline", "related", "hint", "none"]
@@ -721,7 +719,6 @@ async def history(session: AsyncSession, user_id: int, before: date) -> list[His
 class ProgramRef:
     program: Program
     started_on: date
-    programs_dir: Path
 
 
 async def program_ref(session: AsyncSession, user: User, settings: Settings) -> ProgramRef | None:
@@ -731,7 +728,7 @@ async def program_ref(session: AsyncSession, user: User, settings: Settings) -> 
     )
     if up is None:
         return None
-    return ProgramRef(await load_program(session, up.program_id), up.started_on, settings.programs_dir)
+    return ProgramRef(await load_program(session, up.program_id), up.started_on)
 
 
 @dataclass
@@ -752,11 +749,9 @@ def program_day(ref: ProgramRef, day: date) -> tuple[int, int, list[_Item]] | No
     found = find_day(ref.program, pos.week, pos.weekday)
     if found is None or not found.items:
         return None
-    names = day_names(ref.programs_dir, ref.program.slug, pos.week, pos.weekday)
     items = [
-        _Item(names.get(i.order, i.exercise.name), i.intensity, i.sets, i.reps_min, i.reps_max,
-              tuple(i.drop_reps) if i.drop_reps else None)
-        for i in sorted(found.items, key=lambda i: i.order)
+        _Item(i.exercise.name, i.intensity, i.sets, i.reps_min, i.reps_max, tuple(i.drop_reps) if i.drop_reps else None)
+        for i in found.items  # sorted by order (relationship order_by)
     ]
     return pos.week, pos.weekday, items
 

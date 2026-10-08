@@ -13,8 +13,8 @@ The stored plan is reused while `inputs_hash` matches: the hash covers the input
 depends on the time: a session older than 48 h stops counting) and PLAN_VERSION. A fallback to the
 draft (model down, invalid answer) is cached too; "regenerate" (force) is the explicit retry.
 
-Names in the plan are exactly the names of the program JSON (data/programs/<slug>.json), which the Mini
-App matches with ===, never the model's spelling. `summary` is only the reason: the Mini App and /plan
+Names in the plan are exactly the program's exercise names (Exercise.name of the day's items, the names
+GET /api/programs/{slug} gives the Mini App, which matches them with ===), never the model's spelling. `summary` is only the reason: the Mini App and /plan
 put "Сегодня лучше отдохнуть: " / "План скорректирован: " in front themselves.
 """
 
@@ -29,7 +29,6 @@ import re
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -138,21 +137,6 @@ class PlanInputs:
     deload_until: date | None = None  # last day of the deload week running today (gymbot.services.deload)
 
 
-def day_names(programs_dir: Path, slug: str, week: int, weekday: int) -> dict[int, str]:
-    """order -> exercise name as written in data/programs/<slug>.json (the Mini App's source)."""
-    path = programs_dir / f"{slug}.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    for w in data.get("weeks", []):
-        if w.get("number") == week:
-            for d in w.get("days", []):
-                if d.get("weekday") == weekday:
-                    return {e["order"]: e["name"] for e in d.get("exercises", [])}
-    return {}
-
-
 async def _program_day(
     session: AsyncSession, user: User, settings: Settings, today: date
 ) -> tuple[list[DayItem], int, int] | None:
@@ -170,11 +154,9 @@ async def _program_day(
     day = find_day(program, pos.week, pos.weekday)
     if day is None:
         return None
-    names = day_names(settings.programs_dir, program.slug, pos.week, pos.weekday)
     items = [
-        DayItem(i.order, names.get(i.order, i.exercise.name), i.sets, i.reps_min, i.reps_max,
-                list(i.drop_reps) if i.drop_reps else None)
-        for i in sorted(day.items, key=lambda i: i.order)
+        DayItem(i.order, i.exercise.name, i.sets, i.reps_min, i.reps_max, list(i.drop_reps) if i.drop_reps else None)
+        for i in day.items  # sorted by order (relationship order_by)
     ]
     return items, pos.week, pos.weekday
 

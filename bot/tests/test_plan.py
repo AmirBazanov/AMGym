@@ -16,6 +16,7 @@ from gymbot.handlers import plan as plan_handler
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services import plan
 from gymbot.services.plan import DayItem, Pain, PlanInputs, RecentSets
+from gymbot.services.programs import load_program
 
 MSK = ZoneInfo("Europe/Moscow")
 MON = date(2026, 10, 5)
@@ -295,17 +296,25 @@ def test_summary_prefix_is_stripped():
     assert out.summary == "Спал 3 ч."
 
 
-# ---- names come from the program JSON the Mini App uses ----
+# ---- names come from the program in the DB (Exercise.name), the same names as its JSON ----
 
 
-def test_day_names_match_program_json(settings):
-    path = settings.programs_dir / "arms_specialization_8w.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    for w in data["weeks"]:
-        for d in w["days"]:
-            names = plan.day_names(settings.programs_dir, "arms_specialization_8w", w["number"], d["weekday"])
-            assert names == {e["order"]: e["name"] for e in d["exercises"]}
-    assert plan.day_names(settings.programs_dir, "missing", 1, 1) == {}
+async def test_db_names_match_program_json(db, settings):
+    """plan, next_weights and MCP name items by Exercise.name (no JSON reads): for the template every name
+    must equal the name in data/programs, the names the Mini App and the history knew."""
+    data = json.loads((settings.programs_dir / "arms_specialization_8w.json").read_text(encoding="utf-8"))
+    async with db() as s:
+        program_id = await s.scalar(select(Program.id).where(Program.slug == "arms_specialization_8w"))
+        program = await load_program(s, program_id)
+    db_names = {
+        (w.number, d.weekday, i.order): i.exercise.name for w in program.weeks for d in w.days for i in d.items
+    }
+    json_names = {
+        (w["number"], d["weekday"], e["order"]): e["name"]
+        for w in data["weeks"] for d in w["days"] for e in d["exercises"]
+    }
+    assert len(json_names) == 128
+    assert db_names == json_names
 
 
 # ---- DB: collect, cache, regenerate ----
