@@ -176,6 +176,14 @@ def format_facts(facts: list[str], max_chars: int = FACTS_MAX_CHARS) -> str:
     return line
 
 
+def parser_system(text: str, catalog: list[str], history: list[tuple[str, str]] | None = None) -> str:
+    """The parser's rules, with or without the catalog line (`needs_catalog`), before any user facts: the part
+    of the system prompt that stays the same between messages (Claude caches it)."""
+    if needs_catalog(text, catalog, history):
+        return SYSTEM_PROMPT.replace("{catalog}", ", ".join(catalog) or "пусто")
+    return SYSTEM_PROMPT.replace(CATALOG_LINE, "")
+
+
 def build_messages(
     text: str,
     catalog: list[str],
@@ -190,10 +198,7 @@ def build_messages(
     so the examples stay the same. The catalog line is left out when the message cannot be a workout
     (`needs_catalog`).
     """
-    if needs_catalog(text, catalog, history):
-        system = SYSTEM_PROMPT.replace("{catalog}", ", ".join(catalog) or "пусто")
-    else:
-        system = SYSTEM_PROMPT.replace(CATALOG_LINE, "")
+    system = parser_system(text, catalog, history)
     if line := format_facts(facts or []):
         system += f"\n{line}.\nФакты важнее общих правил и порций выше; уже известный факт в remember не повторяй.\n"
     msgs = [{"role": "system", "content": system}]

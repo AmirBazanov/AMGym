@@ -30,7 +30,7 @@ from gymbot.db.session import Sessionmaker
 from gymbot.handlers import products as product_cards
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.schemas import ParseResult
-from gymbot.services import facts, live, plausibility
+from gymbot.services import facts, live, plausibility, workout_events
 from gymbot.services import saved_edits as se
 from gymbot.services.programs import exercise_catalog
 from gymbot.services.users import get_or_create_user
@@ -321,7 +321,9 @@ async def confirm(cb: CallbackQuery, settings: Settings, sessionmaker: Sessionma
     try:
         async with sessionmaker() as session:
             user = await get_or_create_user(session, cb.from_user.id, cb.from_user.full_name)
-            await se.apply(session, user.id, offer.unit, offer.action, offer.after, offer.raw, utcnow(), tz)
+            raised = await se.apply(
+                session, user.id, offer.unit, offer.action, offer.after, offer.raw, utcnow(), tz
+            )
             await session.commit()
     except se.Stale:
         if cb.message:
@@ -342,6 +344,13 @@ async def confirm(cb: CallbackQuery, settings: Settings, sessionmaker: Sessionma
             text = f"Исправлено ✅\n{shown}"
         await cb.message.edit_text(text)  # type: ignore[union-attr]
     await cb.answer()
+    if raised and cb.message:  # a corrected set may be a new record (no deload offer for a fix)
+        message = cb.message
+
+        async def send(text: str, kb: InlineKeyboardMarkup | None) -> object:
+            return await message.answer(text, reply_markup=kb)  # type: ignore[union-attr]
+
+        await workout_events.after_save(sessionmaker, user.id, raised, send, tz, check_deload=False)
 
 
 @router.callback_query(F.data.startswith("fixno:"))

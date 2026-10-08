@@ -2,7 +2,7 @@
 // POST /api/live/token (initData) -> short-lived token -> EventSource GET /api/live?token=...
 // The stream is open only while the page is visible; the logic lives in liveCore.ts.
 import { api, ApiError } from './api'
-import { createLive, emitRemoteRefresh, type LiveController } from './liveCore'
+import { createLive, emitRecords, emitRemoteRefresh, type LiveController } from './liveCore'
 import { getState } from './store'
 import { onBackground, onForeground } from './telegram'
 
@@ -34,6 +34,7 @@ export function startLive(refresh: () => Promise<void>): void {
       if (route.sync) void refresh()
       emitRemoteRefresh(route.remote)
     },
+    records: (notes) => emitRecords(notes),
     resync: () => {
       void refresh()
       emitRemoteRefresh('all')

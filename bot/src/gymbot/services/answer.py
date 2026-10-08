@@ -45,6 +45,7 @@ from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.prompts import build_answer_messages
 from gymbot.services import active_workout, advice, body_weight, live, nutrition, overrides, plan
 from gymbot.services import answer_direct as direct
+from gymbot.services import records as new_records
 from gymbot.services.answer_check import Evidence, correction, violations
 from gymbot.services.answer_intent import classify, mentions
 from gymbot.services.programs import normalize
@@ -161,8 +162,9 @@ async def _base(
     history = await direct.exercise_history(session, user.id, today_local)
     catalog, aliases = await direct.known_exercises(session)
     records = direct.records_block(history, await direct.last_training_day(session, user.id, today_local))
+    fresh = await new_records.recent_line(session, user.id, today_local)  # new records of the last 14 days
     text = (
-        f"{summary}\n{done}\n{food}\n{records}\n"
+        f"{summary}\n{done}\n{food}\n{records}\n{fresh}\n"
         f"План на сегодня ({now_utc.astimezone(tz):%d.%m}):\n{today}"
     )
     return _Base(text, done, food, history, catalog, aliases)

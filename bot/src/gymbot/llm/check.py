@@ -1,10 +1,11 @@
-"""Try the configured LLM routes (Groq, then OpenRouter) on sample messages.
+"""Try the configured LLM routes (Claude, Groq, then OpenRouter) on sample messages.
 
 `python -m gymbot.llm.check ["текст" ...]` parses each text on its own;
 `python -m gymbot.llm.check --dialog "три куриные самсы" "три штуки"` sends each next text with the
 previous exchange as history, like the bot does; `--fact "самса ~150 г"` (repeatable) adds a user fact
 to the system prompt, like active facts in the bot. Every request prints its provider/model, whether it
-asked for json mode and the HTTP status (headers are never printed: they carry the API key).
+asked for json mode and the HTTP status (headers are never printed: they carry the API key). Claude goes
+through the anthropic SDK, so its requests are not printed here; its usage and cost are in the log line.
 """
 
 import asyncio

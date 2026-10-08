@@ -9,7 +9,17 @@ from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -20,7 +30,7 @@ from starlette.routing import BaseRoute
 
 from gymbot.api.auth import InitDataError, TelegramUser, validate_init_data
 from gymbot.config import Settings
-from gymbot.db.models import FoodEntry, Reminder, User, UserFact, UserProgram, WellbeingEntry
+from gymbot.db.models import FoodEntry, Reminder, User, UserFact, UserProgram, WellbeingEntry, Workout
 from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.mcp_server import MCP_PATH, BearerGuard, mcp_http
@@ -28,7 +38,7 @@ from gymbot.services import active_workout as aw
 from gymbot.services import baselines as bl
 from gymbot.services import body_weight as bwt
 from gymbot.services import facts as fx
-from gymbot.services import live
+from gymbot.services import live, workout_events
 from gymbot.services import nutrition as nut
 from gymbot.services import overrides as ov
 from gymbot.services import plan as day_plan
@@ -163,7 +173,8 @@ def create_app(
     bot: Bot | None = None,
 ) -> FastAPI:
     """`llm` is the process-wide client (main.py shares it with the bot); without it one is made on first use.
-    `bot` is the running bot (None with RUN_BOT=false); the MCP tool send_message uses it.
+    `bot` is the running bot (None with RUN_BOT=false); the MCP tool send_message and the messages after a
+    saved workout (new records, the deload offer: gymbot.services.workout_events) use it.
 
     `routers` are extra routes (the Telegram webhook); they go before the Mini App mount at "/",
     which would otherwise swallow them.
@@ -281,9 +292,23 @@ def create_app(
             live.publish(user.id, "plan")  # another program day; the burst merges into one event
         return out
 
+    def owner_sender(chat_id: int) -> workout_events.Send | None:
+        if bot is None:
+            return None
+
+        async def send(text: str, kb: object) -> object:
+            return await bot.send_message(chat_id, text, reply_markup=kb)  # type: ignore[arg-type]
+
+        return send
+
     @app.post("/api/workouts")
-    async def post_workout(body: ws.WorkoutIn, session: Session, tg: TgUser) -> ws.WorkoutOut:
+    async def post_workout(
+        body: ws.WorkoutIn, session: Session, tg: TgUser, background: BackgroundTasks
+    ) -> ws.WorkoutOut:
         user, up = await current(session, tg)
+        retry = await session.scalar(
+            select(Workout.id).where(Workout.client_id == body.id, Workout.user_id == user.id)
+        )
         try:
             saved = await ws.save_from_miniapp(session, user, up, body, tz)
         except ValueError as e:
@@ -291,6 +316,11 @@ def create_app(
         await aw.clear(session, user.id, body.id)  # finished: no longer in progress (retries included)
         await session.commit()
         live.publish(user.id, "workouts", "state")
+        if retry is None:  # records and the deload offer once, after the answer (best-effort)
+            background.add_task(
+                workout_events.after_save, sessionmaker, user.id, [s.id for s in saved.sets],
+                owner_sender(tg.id), tz, key=f"workout:{saved.id}", programs_dir=settings.programs_dir,
+            )
         w = await ws.get_workout(session, user, saved.id)
         assert w is not None
         weeks = len((await load_program(session, up.program_id)).weeks)

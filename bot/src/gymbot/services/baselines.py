@@ -214,7 +214,8 @@ async def catalog(session: AsyncSession) -> list[str]:
 
 async def extract(llm: OpenRouterClient, text: str, names: list[str], year: int) -> Extraction:
     """Lifts and body data in one fact text. Raises LLMError when no model answered."""
-    return parse_answer(await llm.complete_json(build_baseline_messages(text, names)), names, year)
+    answer = await llm.complete_json(build_baseline_messages(text, names), purpose="baselines")
+    return parse_answer(answer, names, year)
 
 
 # ---- processing a fact ----

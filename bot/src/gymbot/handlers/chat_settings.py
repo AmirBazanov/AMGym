@@ -120,7 +120,9 @@ async def stage_settings(
             context = cs.prompt_context(snap)
             await session.commit()  # no write lock while the model thinks
             await message.bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
-            data = await llm.complete_json(build_settings_messages(text, context), prefer="actions")
+            data = await llm.complete_json(
+                build_settings_messages(text, context), prefer="actions", purpose="settings"
+            )
             actions, invalid = cs.parse_actions(data)
             if cs.REPS.search(normalize(text)):  # "жим 80 8 раз": sets done, not a weight for today
                 actions = [a for a in actions if not isinstance(a, cs.WeightAction)]

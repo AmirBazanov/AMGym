@@ -894,7 +894,7 @@ async def test_program_same_start_is_a_note(settings, db):
 async def test_llm_error_in_settings_call_falls_through_to_parser(settings, db, monkeypatch):
     llm = FakeLLM(settings)
 
-    async def broken(messages, prefer="kind"):
+    async def broken(messages, prefer="kind", **_kw):
         raise LLMError("all models failed")
 
     monkeypatch.setattr(llm.client, "complete_json", broken)

@@ -292,6 +292,22 @@ class DayPlan(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+# --- Auto deload (gymbot.services.deload): the deload week and when to offer one again ---
+
+class DeloadState(Base):
+    """One row per user. A deload runs on local days `started_on`..`until` (inclusive); the last one stays
+    stored after it ends (the "6 weeks without a deload" count and stall detection start after it).
+    `ask_after`: no offer before this moment (an offer was sent, «Позже», «Нет», or a deload ran)."""
+
+    __tablename__ = "deload_states"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    started_on: Mapped[date | None] = mapped_column(Date)  # local date in TIMEZONE
+    until: Mapped[date | None] = mapped_column(Date)  # last local day of the deload, inclusive
+    ask_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    offered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 # --- Body weight: one measurement per local day, from the chat or the Mini App (gymbot.services.body_weight) ---
 
 class BodyWeight(Base):

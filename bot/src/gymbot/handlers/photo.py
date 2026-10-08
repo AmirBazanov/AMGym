@@ -29,7 +29,7 @@ from aiogram.types import Message, PhotoSize
 from gymbot.config import Settings
 from gymbot.db.session import Sessionmaker
 from gymbot.handlers import products as product_cards
-from gymbot.handlers.log_text import reply_with_result, with_typing
+from gymbot.handlers.log_text import keep_typing, reply_with_result, with_typing
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.schemas import ParseResult, PhotoParse
 from gymbot.services import barcode, facts, plausibility
@@ -109,9 +109,10 @@ async def log_photo(
     code = await barcode.decode_async(data)
     small = await asyncio.to_thread(barcode.downscale, data, MAX_SIDE)
     image_b64 = base64.b64encode(small).decode("ascii")
-    seen, off = await asyncio.gather(
-        _vision(llm, image_b64, caption, known), _off(code, llm) if code else _nothing()
-    )
+    async with keep_typing(message):  # Claude looks at a photo for several seconds
+        seen, off = await asyncio.gather(
+            _vision(llm, image_b64, caption, known), _off(code, llm) if code else _nothing()
+        )
     raw_text = f"[photo] {caption}".rstrip()
     decision = pr.combine(off, seen.label if seen else None, code)
     plate = seen is not None and seen.label is None and bool(seen.result.foods or seen.result.unknown_terms)

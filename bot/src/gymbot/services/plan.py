@@ -5,6 +5,10 @@ workouts of 7 days, active facts) -> rule_draft (deterministic rules, no model) 
 when the rules made the day light or rest, a pain touches today's exercises, or there are training or
 health facts) -> stored in day_plans per user and local day.
 
+A deload week (gymbot.services.deload) lightens every exercise: weight × deload.WEIGHT_FACTOR, a third
+fewer sets; readiness stays "normal" and the summary names it. Rest still wins; on a light day the
+lighter of both applies. The model may not undo it (the factor is capped at the draft's).
+
 The stored plan is reused while `inputs_hash` matches: the hash covers the inputs, the rule draft (it
 depends on the time: a session older than 48 h stops counting) and PLAN_VERSION. A fallback to the
 draft (model down, invalid answer) is cached too; "regenerate" (force) is the explicit retry.
@@ -38,7 +42,7 @@ from gymbot.config import Settings
 from gymbot.db.models import DayPlan, Exercise, User, UserProgram, Workout, WorkoutSet
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.prompts import build_plan_messages, format_facts
-from gymbot.services import live
+from gymbot.services import deload, live
 from gymbot.services.facts import active_facts
 from gymbot.services.nutrition import _aware, day_summary
 from gymbot.services.programs import find_day, load_program, normalize, program_position
@@ -46,7 +50,7 @@ from gymbot.services.wellbeing import parse_pains, recent_entries
 
 log = logging.getLogger(__name__)
 
-PLAN_VERSION = 2  # bump when the rules change: stored plans are rebuilt (2: the model can only lighten)
+PLAN_VERSION = 3  # bump when the rules change: stored plans are rebuilt (2: the model can only lighten; 3: deload)
 SHORT_SLEEP_REST, SHORT_SLEEP_LIGHT = 4, 6  # hours
 LOW_KCAL = 0.7  # yesterday's kcal below this share of the norm: light day
 LIGHT_FACTOR, PAIN_FACTOR, MILD_PAIN_FACTOR, SORE_FACTOR = 0.9, 0.7, 0.85, 0.85
@@ -131,6 +135,7 @@ class PlanInputs:
     kcal_target: int | None = None
     recent: list[RecentSets] = field(default_factory=list)  # earlier days only: today's sets must not move the plan
     facts: list[tuple[str, str]] = field(default_factory=list)  # (text, category), newest first
+    deload_until: date | None = None  # last day of the deload week running today (gymbot.services.deload)
 
 
 def day_names(programs_dir: Path, slug: str, week: int, weekday: int) -> dict[int, str]:
@@ -213,6 +218,7 @@ async def collect_inputs(
         kcal_target=user.kcal_target,
         recent=[RecentSets(_aware(at), name, n, day) for at, day, name, n in rows],
         facts=[(f.text, f.category) for f in await active_facts(session, user.id)],
+        deload_until=await deload.active_until(session, user.id, today),
     )
 
 
@@ -368,6 +374,7 @@ class Draft:
     exercises: list[PlanExercise]
     protected: frozenset[int] = frozenset()  # positions lightened for pain: the model may not make them heavier
     adjusted: bool = False
+    deload: bool = False  # a deload week: the model may not make any exercise heavier
 
 
 def _changed(e: PlanExercise, it: DayItem) -> bool:
@@ -381,6 +388,7 @@ def _is_adjusted(readiness: str, exercises: list[PlanExercise], items: list[DayI
 
 def rule_draft(inputs: PlanInputs, now_utc: datetime) -> Draft:
     readiness, reasons = rule_readiness(inputs)
+    in_deload = inputs.deload_until is not None and readiness != "rest"
     sore = _sore_groups(inputs, now_utc)
     exercises: list[PlanExercise] = []
     protected: set[int] = set()
@@ -388,6 +396,8 @@ def rule_draft(inputs: PlanInputs, now_utc: datetime) -> Draft:
         sets, factor, skip, reason = it.sets, 1.0, readiness == "rest", None
         if readiness == "light":
             sets, factor = max(min(it.sets, 2), it.sets - 1), LIGHT_FACTOR
+        if in_deload:  # the lighter of the light day and the deload
+            sets, factor = min(sets, deload.deload_sets(it.sets)), min(factor, deload.WEIGHT_FACTOR)
         for p in inputs.pains:
             if loads(p.place, it.name):
                 if p.severity is not None and p.severity >= 4:
@@ -409,14 +419,19 @@ def rule_draft(inputs: PlanInputs, now_utc: datetime) -> Draft:
         )
     adjusted = _is_adjusted(readiness, exercises, inputs.items)
     summary = None
+    deload_note = deload.summary(inputs.deload_until) if in_deload and inputs.deload_until else None
     if readiness == "rest":
         summary = _cap(", ".join(reasons)) + ". Сон и восстановление сегодня важнее зала."
     elif readiness == "light":
-        summary = _cap(", ".join(reasons)) + f". Вес −{round((1 - LIGHT_FACTOR) * 100)} %, на подход меньше."
+        if deload_note:  # the deload's numbers are the lighter ones and apply: one text, no −10 % vs −15 %
+            summary = _cap(", ".join(reasons)) + f". {deload_note}"
+        else:
+            summary = _cap(", ".join(reasons)) + f". Вес −{round((1 - LIGHT_FACTOR) * 100)} %, на подход меньше."
     elif adjusted:
         notes = list(dict.fromkeys(e.reason for e in exercises if e.reason))
-        summary = _cap("; ".join(notes)) + " — эти упражнения легче."
-    return Draft(readiness, summary, exercises, frozenset(protected), adjusted)
+        pains = _cap("; ".join(notes)) + " — эти упражнения легче." if notes else None
+        summary = " ".join(x for x in (deload_note, pains) if x) or None
+    return Draft(readiness, summary, exercises, frozenset(protected), adjusted, in_deload)
 
 
 def needs_model(inputs: PlanInputs, draft: Draft) -> bool:
@@ -478,6 +493,8 @@ def apply_refinement(draft: Draft, data: Any, inputs: PlanInputs) -> Draft:
     summary = draft.summary
     if (text := _text(data.get("summary"), 300)) and (text := _PREFIX.sub("", text).strip()):
         summary = _cap(text)
+        if draft.deload and inputs.deload_until and "разгруз" not in text.casefold():
+            summary = f"{deload.summary(inputs.deload_until)} {summary}"
     if draft.readiness == "rest":
         return replace(draft, summary=summary)
     out: list[PlanExercise] = []
@@ -495,7 +512,7 @@ def apply_refinement(draft: Draft, data: Any, inputs: PlanInputs) -> Draft:
                 reps_max = _not_above(reps_max, d.repsMax)
             if reps_min is not None and reps_max is not None and reps_max < reps_min:
                 reps_max = reps_min
-        cap = d.weightFactor if protected or draft.readiness != "normal" else 1.0
+        cap = d.weightFactor if protected or draft.deload or draft.readiness != "normal" else 1.0
         factor = min(_factor(item.get("weightFactor"), d.weightFactor), cap)
         replacement = _text(item.get("replaceWith"), 80)
         if replacement and (
@@ -515,7 +532,8 @@ def apply_refinement(draft: Draft, data: Any, inputs: PlanInputs) -> Draft:
                 reason=_text(item.get("reason"), 120) or d.reason,
             )
         )
-    return Draft(draft.readiness, summary, out, draft.protected, _is_adjusted(draft.readiness, out, inputs.items))
+    adjusted = _is_adjusted(draft.readiness, out, inputs.items)
+    return Draft(draft.readiness, summary, out, draft.protected, adjusted, draft.deload)
 
 
 def _fmt_reps(it: DayItem) -> str:
@@ -558,7 +576,7 @@ async def refine_with_llm(llm: OpenRouterClient, inputs: PlanInputs, draft: Draf
         {"summary": draft.summary, "exercises": [e.model_dump() for e in draft.exercises]}, ensure_ascii=False
     )
     try:
-        data = await llm.complete_json(build_plan_messages(model_context(inputs, draft), template))
+        data = await llm.complete_json(build_plan_messages(model_context(inputs, draft), template), purpose="plan")
     except LLMError as e:
         log.warning("plan: model failed, using the rule draft: %s", e)
         return draft

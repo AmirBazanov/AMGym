@@ -12,6 +12,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, W
 
 from gymbot.config import Settings
 from gymbot.db.session import Sessionmaker
+from gymbot.handlers import deload as deload_chat
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services import plan
 from gymbot.services.users import active_program, get_or_create_user
@@ -60,6 +61,7 @@ async def show_plan(
         await message.answer(NO_TRAINING)
         return
     await message.answer(plan.plan_text(built), reply_markup=open_diary_kb(settings))
+    await deload_chat.offer_after_plan(message, settings, sessionmaker)
 
 
 async def send_after_wellbeing(

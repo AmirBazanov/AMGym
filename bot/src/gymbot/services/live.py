@@ -2,8 +2,12 @@
 
 One process serves the bot, the API and MCP, so an in-memory hub is enough: whatever changes data from
 the chat, MCP or the API calls `publish(user_id, *topics)` after its commit, and every open stream of that
-user gets `event: change` with the topics; the Mini App refetches them. Publishing is best-effort and never
-raises: a lost event only means the Mini App shows the change on the next refresh.
+user gets `event: change` with the topics; the Mini App refetches them. New personal records
+(gymbot.services.records) go out with `publish_records`: topic "records" plus the records themselves
+(`{"topics": ["records"], "records": [{"exercise", "weight", "reps", "text"}]}`), so the Mini App can show
+a toast without a request; events without records keep the plain `{"topics": [...]}` payload.
+Publishing is best-effort and never raises: a lost event only means the Mini App shows the change on the
+next refresh.
 
 EventSource cannot send headers, so the stream is opened with a short-lived token from
 POST /api/live/token (`make_token` / `verify_token`), HMAC-signed with a key derived from BOT_TOKEN.
@@ -19,14 +23,15 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Iterable
-from typing import Literal
+from typing import Any, Literal
 
 log = logging.getLogger(__name__)
 
-Topic = Literal["state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts", "weight"]
+Topic = Literal["state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts", "weight", "records"]
 TOPICS: frozenset[str] = frozenset(
-    {"state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts", "weight"}
+    {"state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts", "weight", "records"}
 )
+MAX_RECORDS = 5  # records carried by one event (gymbot.services.records announces at most 5 lines)
 
 TOKEN_TTL = 60  # seconds; only needed to open the stream, which then lives on
 MAX_STREAMS_PER_USER = 3  # a 4th stream closes the oldest one (Mini App reopened, stale tabs)
@@ -102,17 +107,23 @@ class Subscriber:
     def __init__(self, user_id: int) -> None:
         self.user_id = user_id
         self.topics: set[str] = set()
+        self.records: list[dict[str, Any]] = []  # carried with the "records" topic until taken
         self.wake = asyncio.Event()
         self.closed = False
 
-    def push(self, topics: Iterable[str]) -> None:
+    def push(self, topics: Iterable[str], records: Iterable[dict[str, Any]] = ()) -> None:
         self.topics.update(topics)
+        self.records = [*self.records, *records][-MAX_RECORDS:]
         self.wake.set()
 
     def take(self) -> list[str]:
         topics, self.topics = sorted(self.topics), set()
         self.wake.clear()
         return topics
+
+    def take_records(self) -> list[dict[str, Any]]:
+        records, self.records = self.records, []
+        return records
 
     def close(self) -> None:
         self.closed = True
@@ -146,12 +157,13 @@ class Hub:
         if not subs:
             del self._subs[sub.user_id]
 
-    def publish(self, user_id: int, topics: Iterable[str]) -> None:
+    def publish(self, user_id: int, topics: Iterable[str], records: Iterable[dict[str, Any]] = ()) -> None:
         wanted = [t for t in topics if t in TOPICS]
         if not wanted:
             return
+        records = list(records)
         for sub in self._subs.get(user_id, ()):
-            sub.push(wanted)
+            sub.push(wanted, records)
 
     def count(self, user_id: int | None = None) -> int:
         if user_id is not None:
@@ -185,6 +197,17 @@ def publish(user_id: int | None, *topics: Topic) -> None:
     _changes[user_id] = _changes.get(user_id, 0) + 1
     try:
         hub.publish(user_id, topics)
+    except Exception:
+        log.warning("live publish failed", exc_info=True)
+
+
+def publish_records(user_id: int | None, records: list[dict[str, Any]]) -> None:
+    """Topic "records" with the new records (exercise, weight, reps, text) for the Mini App's toast. Never raises."""
+    if user_id is None or not records:
+        return
+    _changes[user_id] = _changes.get(user_id, 0) + 1
+    try:
+        hub.publish(user_id, ("records",), records[:MAX_RECORDS])
     except Exception:
         log.warning("live publish failed", exc_info=True)
 
@@ -229,7 +252,11 @@ async def events(
             if sub.closed:
                 break
             topics = sub.take()
+            records = sub.take_records()
             if topics:
-                yield sse("change", {"topics": topics})
+                payload: dict[str, Any] = {"topics": topics}
+                if records and "records" in topics:
+                    payload["records"] = records
+                yield sse("change", payload)
     finally:
         h.unsubscribe(sub)

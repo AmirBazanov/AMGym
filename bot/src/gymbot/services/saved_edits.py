@@ -820,8 +820,11 @@ async def _set_rows(session: AsyncSession, user_id: int, ids: tuple[int, ...]) -
 async def apply(
     session: AsyncSession, user_id: int, unit: Unit, action: Action, after: ParseResult | None,
     edit_raw: str, now: datetime, tz: ZoneInfo,
-) -> None:
-    """Delete or update the unit's rows (no commit). Raises Stale if they are not what the preview showed."""
+) -> list[int]:
+    """Delete or update the unit's rows (no commit). Raises Stale if they are not what the preview showed.
+
+    Returns the ids of workout sets the edit raised (heavier, more reps, another exercise, or added), for
+    the records check (gymbot.services.records); [] for anything else."""
     today = now.astimezone(tz).date()
     if unit.kind == "food":
         rows = await _food_rows(session, user_id, unit.ids)
@@ -830,7 +833,7 @@ async def apply(
         if action == "delete":
             for e in rows:
                 await session.delete(e)
-            return
+            return []
         assert after is not None
         first = rows[0]
         trail = _trail(first.raw_text, edit_raw)
@@ -844,7 +847,7 @@ async def apply(
             session.add(e)
         for e in rows[len(after.foods):]:
             await session.delete(e)
-        return
+        return []
     if unit.kind == "wellbeing":
         rows = list(await session.scalars(
             select(WellbeingEntry).where(WellbeingEntry.user_id == user_id, WellbeingEntry.id.in_(unit.ids))
@@ -854,7 +857,7 @@ async def apply(
         e = rows[0]
         if action == "delete":
             await session.delete(e)
-            return
+            return []
         assert after is not None and after.wellbeing is not None
         w = after.wellbeing
         pains = [{"place": p.place, "severity": p.severity} for p in w.pains]
@@ -862,7 +865,7 @@ async def apply(
         e.sleep_quality, e.energy, e.mood, e.note = w.sleep_quality, w.energy, w.mood, w.note
         e.pains = json.dumps(pains, ensure_ascii=False) if pains else None
         e.raw_text = _trail(e.raw_text, edit_raw)
-        return
+        return []
     sets = await _set_rows(session, user_id, unit.ids)
     sets.sort(key=lambda s: s.set_index)
     _check(sets, unit, _sets_record(sets) if sets else ParseResult(kind="workout"),
@@ -877,7 +880,7 @@ async def apply(
             if {s.id for s in workout.sets} != set(unit.ids):  # a set was added or removed since the preview
                 raise Stale
             await session.delete(workout)
-            return
+            return []
         for s in sets:
             await session.delete(s)
         await session.flush()
@@ -886,7 +889,7 @@ async def apply(
         )
         if left is not None and not left.sets:  # like /undo: no empty workout stays behind
             await session.delete(left)
-        return
+        return []
     assert after is not None and len(after.exercises) == 1
     new_ex = after.exercises[0]
     exercise = await get_or_create_exercise(session, new_ex.exercise)
@@ -894,28 +897,44 @@ async def apply(
     for s in workout.sets:  # the whole message keeps one raw_text, see the module docstring
         if s.raw_text in originals and s.id not in {x.id for x in sets}:
             s.raw_text = _trail(s.raw_text, edit_raw)
+    raised: list[int] = []
     for s, p in zip(sets, new_ex.sets, strict=False):
+        if not p.drop_index and _raised(s, p, exercise.id):
+            raised.append(s.id)
         s.reps, s.drop_index, s.exercise_id = p.reps, p.drop_index, exercise.id
         s.weight_kg = Decimal(str(p.weight_kg)) if p.weight_kg is not None else None
         s.raw_text = _trail(s.raw_text, edit_raw)
     extra = new_ex.sets[len(sets):]
+    added: list[WorkoutSet] = []
     if extra:
         last_index = sets[-1].set_index
         for s in workout.sets:  # make room right after the exercise's sets
             if s.set_index > last_index:
                 s.set_index += len(extra)
         for i, p in enumerate(extra, 1):
-            workout.sets.append(WorkoutSet(
+            added.append(WorkoutSet(
                 exercise_id=exercise.id, set_index=last_index + i, reps=p.reps, drop_index=p.drop_index,
                 weight_kg=Decimal(str(p.weight_kg)) if p.weight_kg is not None else None,
                 raw_text=sets[-1].raw_text,
             ))
+            workout.sets.append(added[-1])
     for s in sets[len(new_ex.sets):]:
         await session.delete(s)
     await session.flush()
     left = await session.get(Workout, workout.id, options=[selectinload(Workout.sets)], populate_existing=True)
     if left is not None and not left.sets:  # never leave an empty workout behind
         await session.delete(left)
+    return raised + [s.id for s in added if not s.drop_index]
+
+
+def _raised(s: WorkoutSet, p: ParsedSet, exercise_id: int) -> bool:
+    """The edit makes this set a better one: another exercise, a drop made a main set, heavier, or more
+    reps at the same weight or heavier."""
+    old_w, new_w = float(s.weight_kg or 0), float(p.weight_kg or 0)
+    return (
+        s.exercise_id != exercise_id or bool(s.drop_index) or new_w > old_w
+        or (p.reps > s.reps and new_w >= old_w)
+    )
 
 
 def _set_food(e: FoodEntry, f: ParsedFood) -> None:

@@ -159,7 +159,7 @@ async def test_photo_goes_to_the_vision_model_and_then_to_the_preview(settings, 
 
     await run(msg, llm, settings, db)
 
-    msg.bot.send_chat_action.assert_awaited_once_with(USER, "typing")
+    msg.bot.send_chat_action.assert_awaited_with(USER, "typing")  # also kept on while the model looks
     msg.bot.download.assert_awaited_once()
     assert msg.bot.download.await_args.args[0].file_id == "f2560"  # the largest: a barcode needs the pixels
     known.assert_awaited_once()

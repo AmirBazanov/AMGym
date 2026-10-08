@@ -258,7 +258,7 @@ class FakeLLM:
     def __init__(self, answer: str = "Питание\n- добери 40 г белка", error: Exception | None = None):
         self.answer, self.error, self.calls = answer, error, []
 
-    async def complete_text(self, messages):
+    async def complete_text(self, messages, **_kw):
         self.calls.append(messages)
         if self.error:
             raise self.error

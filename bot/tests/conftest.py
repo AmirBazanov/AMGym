@@ -31,6 +31,14 @@ def init_data(user_id: int = 42, name: str = "Amir", token: str = TOKEN) -> str:
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_claude(monkeypatch):
+    """Settings read the process environment even with _env_file=None: a developer's ANTHROPIC_API_KEY (or a
+    Claude Code shell's ANTHROPIC_MODEL) must not add a real Claude route to the tests."""
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     return make_settings(tmp_path)

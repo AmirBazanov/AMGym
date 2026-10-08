@@ -6,14 +6,18 @@ import {
   HEALTHY_MS,
   backoffDelay,
   createLive,
+  emitRecords,
   emitRemoteRefresh,
   liveUnsupported,
+  onRecords,
   onRemoteRefresh,
   parseChange,
+  parseRecords,
   routeTopics,
   signalMatches,
   type LiveDeps,
   type LiveHandlers,
+  type RecordNote,
   type RefreshSignal,
   type Route,
 } from './liveCore'
@@ -28,6 +32,9 @@ describe('parseChange', () => {
   it('drops unknown names, non-strings and duplicates', () => {
     expect(parseChange('{"topics":["plan","bogus",3,null,"plan","facts"]}')).toEqual(['plan', 'facts'])
   })
+  it('accepts the records topic', () => {
+    expect(parseChange('{"topics":["records"],"records":[]}')).toEqual(['records'])
+  })
   it('returns nothing for malformed data', () => {
     for (const d of ['', 'not json', 'null', '[]', '{"topics":"state"}', '{}', '42']) expect(parseChange(d)).toEqual([])
   })
@@ -38,6 +45,9 @@ describe('routeTopics', () => {
     expect(routeTopics(['state']).sync).toBe(true)
     expect(routeTopics(['workouts']).sync).toBe(true)
     expect(routeTopics(['nutrition', 'reminders', 'facts', 'wellbeing', 'plan']).sync).toBe(false)
+  })
+  it('does not sync the store for records alone', () => {
+    expect(routeTopics(['records']).sync).toBe(false)
   })
   it('passes all topics to the refresh bus', () => {
     expect(routeTopics(['workouts', 'plan']).remote).toEqual(['workouts', 'plan'])
@@ -68,6 +78,60 @@ describe('refresh bus', () => {
     off()
     emitRemoteRefresh(['plan'])
     expect(got).toEqual([['facts'], 'all'])
+  })
+})
+
+const REC = { exercise: 'жим лёжа', weight: 92.5, reps: 6, kind: 'e1rm', text: 'жим лёжа 92,5×6' }
+
+describe('parseRecords', () => {
+  const payload = (records: unknown) => JSON.stringify({ topics: ['records'], records })
+  it('reads a valid payload', () => {
+    expect(parseRecords(payload([REC]))).toEqual([REC])
+  })
+  it('keeps a bodyweight record with null weight', () => {
+    const bw = { exercise: 'подтягивания', weight: null, reps: 12, kind: 'bw_reps', text: 'подтягивания ×12' }
+    expect(parseRecords(payload([bw]))).toEqual([bw])
+  })
+  it('returns nothing for malformed JSON or a missing array', () => {
+    for (const d of ['', 'not json', 'null', '{}', '{"records":"x"}', '{"topics":["records"]}']) {
+      expect(parseRecords(d)).toEqual([])
+    }
+  })
+  it('drops items with bad fields', () => {
+    const bad = [
+      null,
+      'x',
+      { ...REC, text: '   ' },
+      { ...REC, text: 5 },
+      { ...REC, exercise: 1 },
+      { ...REC, reps: 0 },
+      { ...REC, reps: 2.5 },
+      { ...REC, reps: '6' },
+      { ...REC, weight: -1 },
+      { ...REC, weight: '90' },
+      { ...REC, weight: undefined },
+    ]
+    expect(parseRecords(payload([...bad, REC]))).toEqual([REC])
+  })
+  it('trims the text and cuts it to 120 characters', () => {
+    const [a, b] = parseRecords(payload([{ ...REC, text: '  жим  ' }, { ...REC, text: 'я'.repeat(300) }]))
+    expect(a.text).toBe('жим')
+    expect(b.text).toHaveLength(120)
+  })
+  it('keeps at most 5 items', () => {
+    expect(parseRecords(payload(Array.from({ length: 9 }, () => REC)))).toHaveLength(5)
+  })
+})
+
+describe('records bus', () => {
+  it('delivers notes until unsubscribed and ignores an empty list', () => {
+    const got: RecordNote[][] = []
+    const off = onRecords((n) => got.push(n))
+    emitRecords([REC])
+    emitRecords([])
+    off()
+    emitRecords([REC])
+    expect(got).toEqual([[REC]])
   })
 })
 
@@ -168,6 +232,32 @@ describe('createLive', () => {
     expect(t.routes).toEqual([])
     await vi.advanceTimersByTimeAsync(COALESCE_MS)
     expect(t.routes).toEqual([{ sync: true, remote: ['nutrition', 'state'] }])
+  })
+
+  it('passes records to deps at once, only for records events', async () => {
+    const got: RecordNote[][] = []
+    const t = setup({ records: (n) => void got.push(n) })
+    t.live.start()
+    await flush()
+    t.last().h.onOpen()
+    t.last().h.onChange('{"topics":["workouts"]}')
+    t.last().h.onChange('{"topics":["records"],"records":[]}')
+    t.last().h.onChange('{"topics":["records"],"records":"bad"}')
+    expect(got).toEqual([])
+    t.last().h.onChange(JSON.stringify({ topics: ['workouts', 'records'], records: [REC] }))
+    expect(got).toEqual([[REC]]) // before the coalescing timer fires
+    expect(t.routes).toEqual([])
+    await vi.advanceTimersByTimeAsync(COALESCE_MS)
+    expect(t.routes).toEqual([{ sync: true, remote: ['workouts', 'records'] }])
+  })
+
+  it('works without a records dep', async () => {
+    const t = setup()
+    t.live.start()
+    await flush()
+    t.last().h.onChange(JSON.stringify({ topics: ['records'], records: [REC] }))
+    await vi.advanceTimersByTimeAsync(COALESCE_MS)
+    expect(t.routes).toEqual([{ sync: false, remote: ['records'] }])
   })
 
   it('does not connect when it may not run, nor twice', async () => {

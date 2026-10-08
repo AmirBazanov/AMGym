@@ -350,7 +350,7 @@ class FakeJSON:
         self.answer, self.error = answer, error
         self.calls: list[list[dict[str, str]]] = []
 
-    async def complete_json(self, messages):
+    async def complete_json(self, messages, **_kw):
         self.calls.append(messages)
         if self.error:
             raise self.error

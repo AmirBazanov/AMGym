@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { IconChevron } from '../components/icons'
+import { RecordToast } from '../components/RecordToast'
 import { useWellbeing, useWellbeingSheet, WELLBEING_DAYS, WellbeingDaySheet } from '../components/Wellbeing'
 import { capitalize, WEEKDAY_SHORT } from '../program'
 import { actions, useStore, type Workout } from '../store'
@@ -42,6 +43,7 @@ export function History() {
   if (!history.length)
     return (
       <>
+        <RecordToast />
         <div className="empty">
           <div className="big">🏋️</div>
           Тренировок пока нет.
@@ -62,6 +64,7 @@ export function History() {
 
   return (
     <>
+      <RecordToast />
       <div className="hero">
         <div className="eyebrow">История</div>
         <h1>За 30 дней</h1>

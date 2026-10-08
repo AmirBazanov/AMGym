@@ -28,7 +28,9 @@ from gymbot.handlers import (
     backup,
     chat_settings,
     common,
+    deload,
     facts,
+    llm_status,
     log_text,
     photo,
     plan,
@@ -83,11 +85,13 @@ async def setup_bot_ui(bot: Bot, settings: Settings) -> None:
             BotCommand(command="today", description="План на сегодня"),
             BotCommand(command="plan", description="План с поправками под самочувствие"),
             BotCommand(command="undo", description="Удалить последнюю запись"),
+            BotCommand(command="deload", description="Разгрузочная неделя: статус, начать, отменить"),
             BotCommand(command="advice", description="Советы по питанию, тренировкам и восстановлению"),
             BotCommand(command="facts", description="Что я помню о тебе"),
             BotCommand(command="products", description="Мои продукты (штрихкод, этикетка)"),
             BotCommand(command="help", description="Как записывать"),
             BotCommand(command="backup", description="Копия базы в чат"),
+            BotCommand(command="llm", description="Нейросети: состояние и расход (/llm test — проверка)"),
         ]
     )
     if settings.miniapp_url:
@@ -186,9 +190,11 @@ async def run() -> None:
         dp.include_routers(
             common.router,
             backup.router,
+            llm_status.router,
             advice.router,
             facts.router,
             plan.router,
+            deload.router,
             chat_settings.router,
             voice.router,
             photo.router,

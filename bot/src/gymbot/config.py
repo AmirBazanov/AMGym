@@ -19,6 +19,14 @@ class Settings(BaseSettings):
 
     database_url: str = f"sqlite+aiosqlite:///{ROOT / 'data' / 'gym.db'}"
 
+    # Claude (Anthropic API) goes first when ANTHROPIC_API_KEY is set: the owner's subscriber API credits.
+    # When the credits run out the API answers "credit balance is too low" and the bot falls back to the
+    # routes below for an hour (gymbot.llm.openrouter). One model for every call; effort per call type is in
+    # gymbot.llm.claude.PURPOSES. ANTHROPIC_ENABLED=false keeps the key but skips Claude.
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-opus-5-5"
+    anthropic_enabled: bool = True
+
     # Chat LLM: Groq first (free tier, fast, separate limits per model), OpenRouter free models as the
     # last fallback. Routes are tried in this order: GROQ_MODELS, then OPENROUTER_MODEL and its fallbacks.
     # Empty GROQ_API_KEY = the STT key when STT goes to Groq (same account); no key at all = no Groq routes.
@@ -95,6 +103,11 @@ class Settings(BaseSettings):
         if self.backup_enabled is None:
             self.backup_enabled = self.bot_mode == "webhook"
         return self
+
+    @property
+    def claude_key(self) -> str:
+        """ANTHROPIC_API_KEY when Claude is on; '' = no Claude routes."""
+        return self.anthropic_api_key if self.anthropic_enabled else ""
 
     @property
     def groq_key(self) -> str:

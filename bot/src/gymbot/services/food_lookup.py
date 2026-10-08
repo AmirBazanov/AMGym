@@ -95,7 +95,7 @@ class Option(BaseModel):
 
 
 class JSONModel(Protocol):
-    async def complete_json(self, messages: list[dict[str, str]]) -> dict: ...
+    async def complete_json(self, messages: list[dict[str, str]], *, purpose: str = "json") -> dict: ...
 
 
 # ---- terms and amounts ----
@@ -361,7 +361,7 @@ async def suggest(term: str, sources: list[Source], llm: JSONModel, phrase: str 
     """
     messages = build_lookup_messages(term, phrase, format_sources(sources))
     try:
-        data = await llm.complete_json(messages)
+        data = await llm.complete_json(messages, purpose="lookup")
     except LLMError as e:
         log.warning("food lookup: no variants from the model: %s", type(e).__name__)
         return []

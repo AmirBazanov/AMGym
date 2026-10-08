@@ -2,7 +2,7 @@
 // the reconnect backoff, the refresh bus for server-only screens and the connection state machine.
 // No window/fetch/EventSource here, so tests run in node; live.ts wires it to the browser.
 
-export const TOPICS = ['state', 'nutrition', 'reminders', 'facts', 'wellbeing', 'plan', 'workouts', 'weight'] as const
+export const TOPICS = ['state', 'nutrition', 'reminders', 'facts', 'wellbeing', 'plan', 'workouts', 'weight', 'records'] as const
 export type Topic = (typeof TOPICS)[number]
 
 const KNOWN = new Set<string>(TOPICS)
@@ -19,6 +19,43 @@ export function parseChange(data: string): Topic[] {
   if (!Array.isArray(topics)) return []
   const out: Topic[] = []
   for (const t of topics) if (typeof t === 'string' && KNOWN.has(t) && !out.includes(t as Topic)) out.push(t as Topic)
+  return out
+}
+
+export interface RecordNote {
+  exercise: string
+  /** null for bodyweight records. */
+  weight: number | null
+  reps: number
+  kind: string
+  text: string
+}
+
+const MAX_RECORDS = 5
+const MAX_RECORD_TEXT = 120
+
+/** Personal records of a `change` event with the 'records' topic; malformed items are dropped. */
+export function parseRecords(data: string): RecordNote[] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(data)
+  } catch {
+    return []
+  }
+  const records = (parsed as { records?: unknown } | null)?.records
+  if (!Array.isArray(records)) return []
+  const out: RecordNote[] = []
+  for (const r of records) {
+    if (out.length >= MAX_RECORDS) break
+    if (!r || typeof r !== 'object') continue
+    const { exercise, weight, reps, kind, text } = r as Record<string, unknown>
+    if (typeof text !== 'string' || typeof exercise !== 'string') continue
+    const t = text.trim().slice(0, MAX_RECORD_TEXT)
+    if (!t) continue
+    if (typeof reps !== 'number' || !Number.isInteger(reps) || reps <= 0) continue
+    if (weight !== null && (typeof weight !== 'number' || !Number.isFinite(weight) || weight < 0)) continue
+    out.push({ exercise, weight, reps, kind: typeof kind === 'string' ? kind : '', text: t })
+  }
   return out
 }
 
@@ -78,6 +115,22 @@ export function signalMatches(watched: readonly Topic[] | undefined, signal: Ref
   return signal === 'all' || signal.some((t) => watched.includes(t))
 }
 
+// ---------- records bus for the toast ----------
+
+const recordListeners = new Set<(notes: RecordNote[]) => void>()
+
+export function onRecords(cb: (notes: RecordNote[]) => void): () => void {
+  recordListeners.add(cb)
+  return () => {
+    recordListeners.delete(cb)
+  }
+}
+
+export function emitRecords(notes: RecordNote[]): void {
+  if (notes.length === 0) return
+  recordListeners.forEach((l) => l(notes))
+}
+
 // ---------- connection state machine ----------
 
 export interface LiveHandlers {
@@ -102,6 +155,8 @@ export interface LiveDeps {
   dispatch(route: Route): void
   /** Full refresh after a reconnect (events may have been missed). */
   resync(): void
+  /** Personal records set by a saved workout; shown at once, not coalesced. */
+  records?(notes: RecordNote[]): void
   random?: () => number
   now?: () => number
 }
@@ -186,6 +241,10 @@ export function createLive(deps: LiveDeps): LiveController {
             if (my !== gen) return
             const topics = parseChange(data)
             if (!topics.length) return
+            if (topics.includes('records')) {
+              const notes = parseRecords(data)
+              if (notes.length) deps.records?.(notes)
+            }
             topics.forEach((t) => pending.add(t))
             if (!flushTimer) flushTimer = setTimeout(flush, COALESCE_MS)
           },

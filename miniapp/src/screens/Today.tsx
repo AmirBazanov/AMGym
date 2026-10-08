@@ -5,6 +5,7 @@ import { DropBadge, IntensityBadge } from '../components/Badges'
 import { ExerciseSheet } from '../components/ExerciseSheet'
 import { IconCheck, IconChevron, IconPlus } from '../components/icons'
 import { NumField } from '../components/NumField'
+import { RecordToast } from '../components/RecordToast'
 import { Sheet } from '../components/Sheet'
 import { useWellbeing, useWellbeingSheet, WellbeingDaySheet } from '../components/Wellbeing'
 import {
@@ -204,6 +205,7 @@ export function Today() {
   }, [planContent, mode, activeId])
   return (
     <>
+      <RecordToast />
       {state.pending.length > 0 && (
         <div className="card notice">
           Не отправлено на сервер: {state.pending.length}. Отправлю, когда появится связь.

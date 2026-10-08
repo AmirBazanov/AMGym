@@ -68,7 +68,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import select
 
 from gymbot.config import Settings
-from gymbot.db.models import FoodEntry, User
+from gymbot.db.models import FoodEntry, User, Workout, WorkoutSet
 from gymbot.db.session import Sessionmaker
 from gymbot.handlers import body_weight, saved_edits
 from gymbot.handlers import products as product_cards
@@ -79,10 +79,11 @@ from gymbot.llm.prompts import MINIAPP_SETUP_ANSWER
 from gymbot.llm.schemas import REMEMBER_MAX, ParsedFood, ParsedWellbeing, ParseResult
 from gymbot.services import active_workout as aw
 from gymbot.services import answer as qa
-from gymbot.services import baselines, facts, food_lookup, live, plausibility
+from gymbot.services import baselines, facts, food_lookup, live, plausibility, workout_events
 from gymbot.services import products as pr
 from gymbot.services.answer_intent import classify as classify_question
 from gymbot.services.body_weight import parse_chat as parse_body_weight
+from gymbot.services.chat_settings import is_settings_request
 from gymbot.services.programs import exercise_catalog, normalize
 from gymbot.services.users import get_or_create_user
 from gymbot.services.wellbeing import wellbeing_entry
@@ -437,7 +438,7 @@ TYPING_EVERY = 4.5  # seconds; Telegram shows a chat action for about 5
 
 
 @contextlib.asynccontextmanager
-async def _typing(message: Message) -> AsyncIterator[None]:
+async def keep_typing(message: Message) -> AsyncIterator[None]:
     """Keep "typing" on while the block runs; a failed chat action never fails the reply."""
 
     async def loop() -> None:
@@ -458,7 +459,7 @@ def with_typing(message: Message, reparse: plausibility.Reparse) -> plausibility
     """The plausibility repair round with "typing" on: it is a second model call the user waits for."""
 
     async def run(correction: str) -> ParseResult:
-        async with _typing(message):
+        async with keep_typing(message):
             return await reparse(correction)
 
     return run
@@ -474,7 +475,7 @@ async def _diary_answer(
     tg_user = message.from_user
     assert tg_user is not None
     try:  # the plan and the answer may take a few model calls
-        async with _typing(message):
+        async with keep_typing(message):
             answered = await qa.respond(
                 sessionmaker, tg_user.id, tg_user.full_name, text, recent_answers(tg_user.id, message.date),
                 settings, llm, datetime.now(UTC),
@@ -716,21 +717,22 @@ async def process_text(
     # gets the text: a record in it is never lost (handlers/chat_settings.py). Not while a preview or the
     # model's question is open: "белок 20 жиры 8" then answers it, it is not a norm.
     staged = None
-    if not _dialog_open(user_id, message.date):
-        staged = await stage_settings(message, text, settings, sessionmaker, llm)
+    if not _dialog_open(user_id, message.date) and is_settings_request(text):
+        async with keep_typing(message):  # a model call before the parser
+            staged = await stage_settings(message, text, settings, sessionmaker, llm)
     async with sessionmaker() as session:
         catalog = await exercise_catalog(session)
         known = await facts.prompt_facts(session, user_id)
     prev = recent_exchange(user_id, message.date)
     # Without a record in the dialog the parser sees the recent questions, so "а по жиму?" stays a question.
     history = prev.history() if prev else _answers_history(user_id, message.date)
-    await message.bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
     # Saved products the message names, with their exact numbers (only those: the prompt stays short).
     products = await product_cards.parser_products(sessionmaker, user_id, text)
     mine = pr.prompt_line(text, products)
     known_all = [mine, *known] if mine else known
     try:
-        result = await llm.parse_message(text, catalog, history or None, known_all)
+        async with keep_typing(message):  # Claude thinks for several seconds; one chat action lasts ~5
+            result = await llm.parse_message(text, catalog, history or None, known_all)
     except LLMError:
         if staged is not None:
             await send_staged(message, staged, prefix=prefix)
@@ -938,7 +940,7 @@ async def save(
         return
     today = pending.sent_at.astimezone(ZoneInfo(settings.timezone)).date()
     try:
-        note = await _save(pending, cb, today, sessionmaker)
+        note, user_id, new_sets = await _save(pending, cb, today, sessionmaker)
     except Exception:
         PENDING[token] = pending  # let the user press again
         raise
@@ -958,6 +960,13 @@ async def save(
     if pending.result.kind == "wellbeing" and cb.message:
         # On a training day the plan may change: send it right after "Самочувствие сохранено ✅".
         await send_after_wellbeing(cb.message, cb.from_user.id, settings, sessionmaker, llm)  # type: ignore[arg-type]
+    if new_sets and cb.message:
+        # New records of these sets (never the same set twice: later saves are new sets), then maybe the
+        # deload offer; best-effort after the save.
+        await workout_events.after_save(
+            sessionmaker, user_id, new_sets, chat_sender(cb.message), ZoneInfo(settings.timezone),  # type: ignore[arg-type]
+            programs_dir=settings.programs_dir,
+        )
 
 
 @router.callback_query(F.data.startswith("lookup:"))
@@ -1073,12 +1082,31 @@ async def remember(cb: CallbackQuery, sessionmaker: Sessionmaker, llm: OpenRoute
     await cb.answer(done)
 
 
-async def _save(pending: Pending, cb: CallbackQuery, today: date, sessionmaker: Sessionmaker) -> str:
+def chat_sender(message: Message) -> workout_events.Send:
+    async def send(text: str, kb: InlineKeyboardMarkup | None) -> object:
+        return await message.answer(text, reply_markup=kb)
+
+    return send
+
+
+async def _save(
+    pending: Pending, cb: CallbackQuery, today: date, sessionmaker: Sessionmaker
+) -> tuple[str, int, list[int]]:
+    """(the note, the user's id, the ids of new workout sets)."""
+    new_sets: list[int] = []
     async with sessionmaker() as session:
         user = await get_or_create_user(session, cb.from_user.id, cb.from_user.full_name)
         topics: tuple[live.Topic, ...]
         if pending.result.kind == "workout":
-            await save_from_chat(session, user, pending.result, pending.raw_text, today)
+            had = set(
+                await session.scalars(
+                    select(WorkoutSet.id).join(Workout).where(
+                        Workout.user_id == user.id, Workout.performed_on == today, Workout.source == "chat"
+                    )
+                )
+            )
+            w = await save_from_chat(session, user, pending.result, pending.raw_text, today)
+            new_sets = [s.id for s in w.sets if s.id not in had]
             note = "Сохранено ✅ Видно в дневнике, /undo — отменить."
             topics = ("workouts", "state")
         elif pending.result.kind == "wellbeing":
@@ -1105,4 +1133,4 @@ async def _save(pending: Pending, cb: CallbackQuery, today: date, sessionmaker: 
             topics = ("nutrition",)
         await session.commit()
     live.publish(user.id, *topics)
-    return note
+    return note, user.id, new_sets

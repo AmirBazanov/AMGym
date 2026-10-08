@@ -429,7 +429,7 @@ async def generate(
 ) -> str:
     """Advice text for the chat. Raises LLMError when no model answered."""
     context = await build_context(session, user, settings, tz, now_utc)
-    text = await llm.complete_text(build_advice_messages(context))
+    text = await llm.complete_text(build_advice_messages(context), purpose="advice")
     if ADVICE_DISCLAIMER.lower() not in text.lower():
         text = f"{text}\n\n{ADVICE_DISCLAIMER}"
     if len(text) > TELEGRAM_MAX:
