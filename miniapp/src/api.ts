@@ -295,3 +295,66 @@ export function saveBodyWeight(weightKg: number, date?: string): Promise<unknown
 export function deleteBodyWeight(date: string): Promise<void> {
   return api<void>(`/body-weight/${encodeURIComponent(date)}`, { method: 'DELETE' })
 }
+
+// ---- Programs: the server is their source of truth (templates and the user's own copies). ----
+// Contract: docs/superpowers/specs/2026-10-08-program-editor-design.md, section «API». camelCase except
+// `prescription`, which keeps the program JSON keys (program.ts Prescription).
+
+export interface ProgramSummary {
+  id: string // slug
+  name: string
+  source: string | null
+  weeks: number
+  daysPerWeek: number // training days in the first week
+  exercises: number // distinct exercises
+  editable: boolean // the user's own copy
+  basedOn: string | null // template slug of a copy
+  version: number
+}
+
+export interface ProgramExerciseOut {
+  id: number // ProgramItem.id
+  name: string
+  intensity: 'heavy' | 'medium' | 'light' | null
+  order: number
+  prescription: { sets: number; reps_min: number | null; reps_max: number | null; drop_reps: number[] | null; raw: string }
+}
+
+export interface ProgramDayOut {
+  id: number // ProgramDay.id: POST /api/workouts programDayId
+  weekday: number // 1 = Monday .. 7 = Sunday
+  title: string // "понедельник"
+  focus: string | null
+  exercises: ProgramExerciseOut[]
+}
+
+export interface ProgramOut {
+  id: string // slug
+  name: string
+  source: string | null
+  version: number
+  editable: boolean
+  basedOn: string | null
+  weeks: { number: number; days: ProgramDayOut[] }[]
+}
+
+/** An exercise to pick from: in the user's programs or logged by them. */
+export interface CatalogExercise {
+  name: string
+  sets: number // main sets the user logged; the server sorts by this desc, then by name
+}
+
+/** Programs the user may choose (templates and own copies), oldest first. */
+export function getPrograms(): Promise<ProgramSummary[]> {
+  return api<ProgramSummary[]>('/programs')
+}
+
+/** The whole program, sorted. 404 {"detail": "unknown program"} for an unknown slug or another user's copy. */
+export function getProgramOut(slug: string, init: RequestInit = {}): Promise<ProgramOut> {
+  return api<ProgramOut>(`/programs/${encodeURIComponent(slug)}`, init)
+}
+
+/** Never cached offline: the picker falls back to the program's exercises. */
+export function getExercises(): Promise<CatalogExercise[]> {
+  return api<CatalogExercise[]>('/exercises')
+}

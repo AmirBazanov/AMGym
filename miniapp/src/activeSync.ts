@@ -40,6 +40,7 @@ export function activePayload(w: Workout): Workout {
   return {
     id: w.id,
     programId: w.programId,
+    ...(w.programDayId != null ? { programDayId: w.programDayId } : {}),
     week: w.week,
     weekday: w.weekday,
     startedAt: w.startedAt,

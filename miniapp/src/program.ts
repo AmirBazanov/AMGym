@@ -11,6 +11,7 @@ export interface Prescription {
 }
 
 export interface ProgramExercise {
+  id?: number // ProgramItem.id; only in programs from the server
   name: string
   intensity: Intensity | null
   prescription: Prescription
@@ -18,8 +19,10 @@ export interface ProgramExercise {
 }
 
 export interface ProgramDay {
+  id?: number // ProgramDay.id (POST /api/workouts programDayId); only in programs from the server
   weekday: number // 1 = Monday
   title: string
+  focus?: string | null // muscle-group title ("Руки и плечи"); absent in an old cache
   exercises: ProgramExercise[]
 }
 
@@ -29,16 +32,36 @@ export interface ProgramWeek {
 }
 
 export interface Program {
-  id: string
+  id: string // slug
   name: string
   source: string
   weeks: ProgramWeek[]
+  // Only in programs from the server (GET /api/programs/{slug}):
+  version?: number // Program.version, bumped on every edit
+  editable?: boolean // the user's own copy
+  basedOn?: string | null // template slug of a copy
 }
 
+/** Bundled templates: the demo and the fallback before the server program is known (offline first start). */
 export const PROGRAMS: Program[] = [{ id: 'arms_specialization_8w', ...(arms as Omit<Program, 'id'>) }]
 
+// Programs from the server by slug (store.ts keeps them in localStorage and registers them here on load).
+let serverPrograms: Readonly<Record<string, Program>> = {}
+
+/** Replaces the registry of server programs; looked up before the bundled ones. */
+export function setServerPrograms(map: Readonly<Record<string, Program>>): void {
+  serverPrograms = map
+}
+
+/** The program by slug: the server's copy first, then the bundled one; undefined when neither knows it. */
+export function findProgram(id: string | null): Program | undefined {
+  if (id == null) return undefined
+  return (Object.prototype.hasOwnProperty.call(serverPrograms, id) ? serverPrograms[id] : undefined) ?? PROGRAMS.find((p) => p.id === id)
+}
+
+/** findProgram, else the first bundled program, so screens always have something to show. */
 export function getProgram(id: string | null): Program {
-  return PROGRAMS.find((p) => p.id === id) ?? PROGRAMS[0]
+  return findProgram(id) ?? PROGRAMS[0]
 }
 
 export function getDay(program: Program, week: number, weekday: number): ProgramDay | undefined {
@@ -109,8 +132,13 @@ export function nextTrainingDay(program: Program, week: number, weekday: number)
   return { week, weekday: last?.weekday ?? weekday, isToday: false }
 }
 
-/** Short muscle-group title for a day, derived from the program structure. */
+/**
+ * Short muscle-group title for a day: the program's `focus` when it has one (short form: its first word,
+ * «Руки и плечи» -> «Руки»), else the old rule for an old cache: Wednesday is «База», other days arms.
+ */
 export function dayFocus(day: ProgramDay, short = false): string {
+  const focus = day.focus?.trim()
+  if (focus) return short ? focus.split(/\s+/)[0] : focus
   if (day.weekday === 3) return 'База'
   return short ? 'Руки' : 'Руки и плечи'
 }

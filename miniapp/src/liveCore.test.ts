@@ -35,6 +35,9 @@ describe('parseChange', () => {
   it('accepts the records topic', () => {
     expect(parseChange('{"topics":["records"],"records":[]}')).toEqual(['records'])
   })
+  it('accepts the program topic', () => {
+    expect(parseChange('{"topics":["program","plan","state"]}')).toEqual(['program', 'plan', 'state'])
+  })
   it('returns nothing for malformed data', () => {
     for (const d of ['', 'not json', 'null', '[]', '{"topics":"state"}', '{}', '42']) expect(parseChange(d)).toEqual([])
   })
@@ -48,6 +51,10 @@ describe('routeTopics', () => {
   })
   it('does not sync the store for records alone', () => {
     expect(routeTopics(['records']).sync).toBe(false)
+  })
+  it('syncs the store for a program edit, so a new programVersion reloads the program', () => {
+    expect(routeTopics(['program']).sync).toBe(true)
+    expect(routeTopics(['program']).remote).toEqual(['program'])
   })
   it('passes all topics to the refresh bus', () => {
     expect(routeTopics(['workouts', 'plan']).remote).toEqual(['workouts', 'plan'])

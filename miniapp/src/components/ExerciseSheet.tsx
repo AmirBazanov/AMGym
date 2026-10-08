@@ -22,7 +22,7 @@ export function ExerciseSheet({ name, onClose }: { name: string; onClose: () => 
   return (
     <Sheet onClose={onClose}>
       <h1 style={{ fontSize: 22 }}>{capitalize(name)}</h1>
-      <div className="hint">{plan.length} раз в программе</div>
+      <div className="hint">{plan.length ? `${plan.length} раз в программе` : 'В программе не встречается'}</div>
       {record && (
         <div className="hint num">
           Рекорд: 1ПМ {formatKg(Math.round(record.e1rm))} кг ({formatKg(record.weight)} × {record.reps},{' '}
@@ -54,19 +54,23 @@ export function ExerciseSheet({ name, onClose }: { name: string; onClose: () => 
         </>
       )}
 
-      <h2>По программе</h2>
-      <div className="list">
-        {plan.map(({ week, weekday, e }) => (
-          <div className="row" key={`${week}-${weekday}-${e.order}`}>
-            <div className="grow">
-              Неделя {week} · {WEEKDAY_SHORT[weekday]}
-            </div>
-            <div className="num" style={{ fontWeight: 600 }}>
-              {formatPrescription(e.prescription)}
-            </div>
+      {plan.length > 0 && (
+        <>
+          <h2>По программе</h2>
+          <div className="list">
+            {plan.map(({ week, weekday, e }) => (
+              <div className="row" key={`${week}-${weekday}-${e.order}`}>
+                <div className="grow">
+                  Неделя {week} · {WEEKDAY_SHORT[weekday]}
+                </div>
+                <div className="num" style={{ fontWeight: 600 }}>
+                  {formatPrescription(e.prescription)}
+                </div>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </>
+      )}
     </Sheet>
   )
 }

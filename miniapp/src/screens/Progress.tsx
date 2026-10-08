@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { BarSeries, LineSeries } from '../components/LazyCharts'
-import { capitalize, getProgram, programExerciseNames } from '../program'
+import { capitalize, getProgram } from '../program'
+import { exerciseNamesWithHistory } from '../programSync'
 import { bestE1rm } from '../progression'
 import { currentRun, useStore } from '../store'
 import { exerciseSeries, formatKg, formatShortDate, formatTonnage, weeklyVolume } from '../stats'
@@ -24,7 +25,8 @@ export function Progress() {
   const { history, programId } = state
   const program = getProgram(programId)
   const done = new Set(history.flatMap((w) => w.exercises.map((e) => e.name)))
-  const names = programExerciseNames(program).filter((n) => done.has(n))
+  // The program's exercises, then those only in the history (a replaced one keeps its chart).
+  const names = exerciseNamesWithHistory(program, history).filter((n) => done.has(n))
   const [name, setName] = useState(names[0] ?? '')
   const [metric, setMetric] = useState<Metric>('maxWeight')
   const [period, setPeriod] = useState<number | null>(56)

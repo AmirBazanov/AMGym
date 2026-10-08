@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ApiError, getTodayPlan, regenerateTodayPlan, type DayPlan } from '../api'
+import { ApiError, getExercises, getTodayPlan, regenerateTodayPlan, type DayPlan } from '../api'
 import { useScrollActive } from '../components/useScrollActive'
 import { DropBadge, IntensityBadge } from '../components/Badges'
 import { ExerciseSheet } from '../components/ExerciseSheet'
@@ -17,7 +17,6 @@ import {
   isDropset,
   nextTrainingDay,
   plural,
-  programExerciseNames,
   programPosition,
   WEEKDAY_LONG,
   WEEKDAY_SHORT,
@@ -33,6 +32,7 @@ import {
   type AppliedPlan,
   type PlanMode,
 } from '../plan'
+import { pickerNames } from '../programSync'
 import { overrideReason, perHand, shortReason, type Suggestion } from '../progression'
 import { actions, currentRun, isStarted, lastSetsFor, overridesFor, planMode, useStore, type Workout } from '../store'
 import { formatKg } from '../stats'
@@ -206,11 +206,13 @@ export function Today() {
   const planContent = dp.plan === undefined ? null : planKey(visiblePlan(dp))
   // New baselines need no rebuild here: store.applyServer refills the prepared workout in place.
   const activeId = state.active?.id
+  // Null after the store rebuilt the prepared workout from a reloaded program: put the plan on it again.
+  const activePlanKey = state.activePlanKey
   useEffect(() => {
     if (planContent != null) actions.applyDayPlan(visiblePlan(dp))
     // `dp` is rebuilt every render; planContent describes it fully.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [planContent, mode, activeId])
+  }, [planContent, mode, activeId, activePlanKey])
   return (
     <>
       <RecordToast />
@@ -675,10 +677,13 @@ function AddExerciseSheet({
   onPick: (name: string) => void
   onClose: () => void
 }) {
-  const { programId } = useStore()
+  const { programId, mode } = useStore()
   const [q, setQ] = useState('')
   const query = q.trim().toLowerCase()
-  const names = programExerciseNames(getProgram(programId)).filter((n) => !exclude.includes(n))
+  // The program's exercises first, then the catalog (GET /api/exercises, most done first); demo or
+  // offline: the program's only.
+  const catalog = useRemote(`exercises:${mode}`, () => (mode === 'server' ? getExercises() : Promise.resolve(null)))
+  const names = pickerNames(catalog.data, getProgram(programId), exclude)
   const filtered = names.filter((n) => n.includes(query))
   const exact = names.includes(query) || exclude.includes(query)
   return (

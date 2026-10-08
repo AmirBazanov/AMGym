@@ -2,7 +2,18 @@
 // the reconnect backoff, the refresh bus for server-only screens and the connection state machine.
 // No window/fetch/EventSource here, so tests run in node; live.ts wires it to the browser.
 
-export const TOPICS = ['state', 'nutrition', 'reminders', 'facts', 'wellbeing', 'plan', 'workouts', 'weight', 'records'] as const
+export const TOPICS = [
+  'state',
+  'nutrition',
+  'reminders',
+  'facts',
+  'wellbeing',
+  'plan',
+  'workouts',
+  'weight',
+  'records',
+  'program',
+] as const
 export type Topic = (typeof TOPICS)[number]
 
 const KNOWN = new Set<string>(TOPICS)
@@ -66,10 +77,14 @@ export interface Route {
   remote: Topic[]
 }
 
-/** state/workouts live in the store; the rest are server-only screens loaded with useRemote. */
+/**
+ * state/workouts/program live in the store; the rest are server-only screens loaded with useRemote.
+ * 'program' (an edit of the program) syncs too: /api/state brings the new programVersion and the store
+ * reloads the program (store.ensureProgram) and rebuilds a prepared workout nobody started.
+ */
 export function routeTopics(topics: readonly Topic[]): Route {
   return {
-    sync: topics.includes('state') || topics.includes('workouts'),
+    sync: topics.includes('state') || topics.includes('workouts') || topics.includes('program'),
     // A screen may also depend on state or workouts (today's plan, nutrition targets): pass all.
     remote: [...topics],
   }

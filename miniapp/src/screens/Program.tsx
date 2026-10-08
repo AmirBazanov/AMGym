@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useScrollActive } from '../components/useScrollActive'
 import { DropBadge, IntensityBadge } from '../components/Badges'
 import { ExerciseSheet } from '../components/ExerciseSheet'
@@ -15,8 +15,10 @@ import {
   PROGRAMS,
   WEEKDAY_LONG,
 } from '../program'
+import { exerciseNamesWithHistory } from '../programSync'
 import { actions, currentRun, useStore } from '../store'
 import { confirm, haptic } from '../telegram'
+import type { ProgramSummary } from '../api'
 
 type Tab = 'plan' | 'exercises' | 'settings'
 
@@ -129,7 +131,8 @@ function Exercises({ onOpen }: { onOpen: (name: string) => void }) {
   const { programId, history } = useStore()
   const program = getProgram(programId)
   const [q, setQ] = useState('')
-  const names = useMemo(() => programExerciseNames(program), [program])
+  // The program's exercises, then those only in the history (a replaced one stays findable).
+  const names = useMemo(() => exerciseNamesWithHistory(program, history), [program, history])
   const filtered = names.filter((n) => n.includes(q.trim().toLowerCase()))
 
   const count = (name: string) => history.filter((w) => w.exercises.some((e) => e.name === name)).length
@@ -155,18 +158,29 @@ function Exercises({ onOpen }: { onOpen: (name: string) => void }) {
   )
 }
 
+/** «Выбор»: the server's list (templates and own copies), the bundled programs until it is loaded. */
+function choices(list: ProgramSummary[] | null): { id: string; name: string; weeks: number; source: string | null; own: boolean }[] {
+  if (list?.length) return list.map((p) => ({ id: p.id, name: p.name, weeks: p.weeks, source: p.source, own: p.editable }))
+  return PROGRAMS.map((p) => ({ id: p.id, name: p.name, weeks: p.weeks.length, source: p.source, own: false }))
+}
+
 function Choose() {
-  const { programId, startDate, restSeconds, mode } = useStore()
+  const { programId, programVersion, programList, startDate, restSeconds, mode } = useStore()
+  // Refreshed when shown and after the active program changed (a new copy appears in the list).
+  useEffect(() => {
+    void actions.loadProgramList()
+  }, [mode, programId, programVersion])
   return (
     <>
       <h2>Активная программа</h2>
       <div className="list">
-        {PROGRAMS.map((p) => (
+        {choices(programList).map((p) => (
           <button className="row" key={p.id} onClick={() => actions.setProgram(p.id, startDate)}>
             <div className="grow">
               <div className="title">{p.name}</div>
               <div className="sub">
-                {p.weeks.length} недель · из {p.source}
+                {p.weeks} недель{p.source ? ` · из ${p.source}` : ''}
+                {p.own ? ' · моя' : ''}
               </div>
             </div>
             {p.id === programId && <span style={{ color: 'var(--link)', fontWeight: 600 }}>✓</span>}

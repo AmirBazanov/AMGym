@@ -1,7 +1,7 @@
 // Local-only state until the stage 2 API exists: everything lives in localStorage.
 // Shapes mirror the future server models (Workout -> exercises -> sets) so the swap is mechanical.
 import { useSyncExternalStore } from 'react'
-import { getDay, getProgram, isDropset } from './program'
+import { findProgram, getDay, getProgram, setServerPrograms, type Program, type ProgramDay } from './program'
 import {
   api,
   ApiError,
@@ -9,8 +9,11 @@ import {
   EMPTY_TARGETS,
   inTelegram,
   timeoutSignal,
+  getProgramOut,
+  getPrograms,
   type DayPlan,
   type Profile,
+  type ProgramSummary,
   type Targets,
 } from './api'
 import { buildDemoHistory, demoStartDate } from './mock'
@@ -18,13 +21,20 @@ import {
   applyPlan,
   overridesForWorkout,
   planKey,
-  todaysProgramDay,
   refillSuggestions,
   suggestionsOf,
-  type AdjustedExercise,
   type PlanMode,
   type PreparedSuggestions,
 } from './plan'
+import {
+  buildPrepared,
+  cacheProgram,
+  needsProgramFetch,
+  plannedLog,
+  preparePick,
+  programFromServer,
+  rebuildDecision,
+} from './programSync'
 import { findOverride, lastSameSession, mergeOverrides, normalizeBaselines } from './progression'
 import {
   activeFingerprint,
@@ -76,6 +86,9 @@ export interface Workout {
   clientId?: string | null // set on workouts returned by the server: the id this app generated
   id: string
   programId: string
+  // ProgramDay.id the workout was prepared from (server programs only); the server prefers it to
+  // programId/week/weekday, so a workout survives the program being copied or its days moved.
+  programDayId?: number | null
   week: number
   weekday: number
   startedAt: string // ISO, UTC
@@ -85,6 +98,12 @@ export interface Workout {
 
 export interface State {
   programId: string
+  // Programs.version of the active program from /api/state; null: demo or a server without the programs API.
+  programVersion: number | null
+  // Server programs by slug (with their version) for the gym offline: the active one and the workout's.
+  programs: Record<string, Program>
+  // GET /api/programs for «Выбор»; null until loaded (then the bundled programs are listed).
+  programList: ProgramSummary[] | null
   startDate: string // YYYY-MM-DD, a Monday
   restSeconds: number
   restEnd: number | null // epoch ms when the current rest ends
@@ -121,6 +140,7 @@ export interface State {
 
 interface ServerState {
   programId: string
+  programVersion?: number // absent on servers older than the programs API
   startDate: string
   restSeconds: number
   history: Workout[]
@@ -143,6 +163,9 @@ function initialState(): State {
   const startDate = demoStartDate()
   return {
     programId: program.id,
+    programVersion: null,
+    programs: {},
+    programList: null,
     startDate,
     restSeconds: 90,
     restEnd: null,
@@ -187,7 +210,10 @@ function load(): State {
         delete saved.endedActive
       }
       // Nested merge: storage written before the profile existed (or with fewer keys) still loads.
-      return { ...initialState(), ...saved, profile: { ...EMPTY_PROFILE, ...saved.profile } }
+      const loaded: State = { ...initialState(), ...saved, profile: { ...EMPTY_PROFILE, ...saved.profile } }
+      // Register the cached server programs before anything reads getProgram (cold start, offline).
+      setServerPrograms(loaded.programs)
+      return loaded
     }
   } catch {
     // Storage blocked or corrupted: start from the demo state.
@@ -229,17 +255,6 @@ export function lastSetsFor(name: string, history = state.history): SetEntry[] |
   return lastSameSession(history, name)
 }
 
-function plannedLog(adj: AdjustedExercise): ExerciseLog {
-  // Record-based weight or double progression, whichever is higher (see progression.ts), × the plan factor.
-  const ex = adj.exercise
-  return {
-    name: ex.name,
-    target: adj.changed ? adj.target : adj.original.prescription.raw,
-    dropset: isDropset(ex.prescription),
-    sets: Array.from({ length: ex.prescription.sets }, () => ({ weight: adj.weight, reps: null, done: false })),
-  }
-}
-
 /** Today's choice for the adaptive plan; a new day starts with the correction on. */
 export function planMode(s: State = state): PlanMode {
   return s.planChoice?.date === localDate() ? s.planChoice.mode : 'adjusted'
@@ -277,30 +292,25 @@ export const actions = {
     if (state.active) return
     const today = localDate()
     if (state.skipAutoStart === today) return
-    const next = todaysProgramDay(getProgram(state.programId), state.startDate, currentRun())
+    // Null while the active program is unknown (a copy not loaded yet): syncFromServer awaits
+    // ensureProgram before the app calls this, so the workout comes from the loaded program.
+    const next = preparePick({ programId: state.programId, startDate: state.startDate, run: currentRun() })
     if (next) actions.startWorkout(next.week, next.weekday)
   },
 
   startWorkout(week: number, weekday: number) {
-    const program = getProgram(state.programId)
-    const day = getDay(program, week, weekday)
+    // Never another program as a fallback: the workout would be logged against it.
+    const program = findProgram(state.programId)
+    const day = program && getDay(program, week, weekday)
     if (!day) return
     // Started now, so trained today: today's overrides count whatever program day it is.
-    const res = applyPlan(day, null, state.history, localDate(), week, state.baselines, state.weightOverrides)
-    commit({
-      ...state,
-      active: {
-        id: crypto.randomUUID(),
-        programId: program.id,
-        week,
-        weekday,
-        startedAt: new Date().toISOString(),
-        finishedAt: null,
-        exercises: res.exercises.map(plannedLog),
-      },
-      activePlanKey: 'program',
-      activeSuggested: suggestionsOf(res.exercises),
+    const built = buildPrepared(crypto.randomUUID(), state.programId, week, day, new Date().toISOString(), {
+      history: state.history,
+      today: localDate(),
+      baselines: state.baselines,
+      overrides: state.weightOverrides,
     })
+    commit({ ...state, active: built.workout, activePlanKey: 'program', activeSuggested: built.suggested })
   },
 
   setPlanMode(mode: PlanMode) {
@@ -317,7 +327,8 @@ export const actions = {
   applyDayPlan(plan: DayPlan | null) {
     const a = state.active
     if (!a || isStarted(a)) return
-    const day = getDay(getProgram(a.programId), a.week, a.weekday)
+    const program = findProgram(a.programId)
+    const day = program && getDay(program, a.week, a.weekday)
     if (!day) return
     const res = applyPlan(
       day,
@@ -447,6 +458,17 @@ export const actions = {
     }
   },
 
+  /** GET /api/programs for «Выбор»; kept for offline. Failures keep the last list (or the bundled one). */
+  async loadProgramList(): Promise<void> {
+    if (state.mode !== 'server') return
+    try {
+      const programList = await getPrograms()
+      commit({ ...state, programList })
+    } catch {
+      // Offline or an older server: «Выбор» lists what it has.
+    }
+  },
+
   setProgram(programId: string, startDate: string) {
     commit({ ...state, programId, startDate: toMonday(startDate) })
     void pushSettings({ programId, startDate: toMonday(startDate) })
@@ -510,6 +532,7 @@ function applyServer(server: ServerState) {
     ...state,
     mode: 'server',
     programId: server.programId,
+    programVersion: server.programVersion ?? null,
     startDate: server.startDate,
     restSeconds: server.restSeconds,
     targets: server.targets ?? state.targets,
@@ -545,11 +568,12 @@ function applyServer(server: ServerState) {
   // or app-suggested weights of sets not done only), whether or not the day plan request succeeds.
   // Idempotent, so every sync may run it.
   const a = next.active
+  const program = a && findProgram(a.programId)
   const refill = a
     ? refillSuggestions(
         a,
         next.activeSuggested,
-        getDay(getProgram(a.programId), a.week, a.weekday),
+        program ? getDay(program, a.week, a.weekday) : undefined,
         next.history,
         baselines,
         overridesFor(a, next),
@@ -557,6 +581,77 @@ function applyServer(server: ServerState) {
       )
     : null
   commit(refill ? { ...next, active: refill.workout, activeSuggested: refill.suggested } : next)
+  // Another program or a new version (an edit, also from another device): load it. syncFromServer awaits it.
+  void ensureProgram()
+}
+
+// ---- Programs from the server (GET /api/programs/{slug}), cached by slug with their version ----
+
+const PROGRAM_TIMEOUT_MS = 15_000
+let programLoad: { key: string; promise: Promise<void> } | null = null
+
+/**
+ * Loads the active program when the cache lacks it or holds another version than /api/state reported
+ * (needsProgramFetch), puts it in the cache and the registry and rebuilds a prepared workout that is not
+ * started. One request per slug and version at a time. Failures keep the cache (or the bundled program).
+ */
+export function ensureProgram(): Promise<void> {
+  if (state.mode !== 'server') return Promise.resolve()
+  const slug = state.programId
+  const version = state.programVersion
+  if (!needsProgramFetch(state.programs, slug, version)) return Promise.resolve()
+  const key = `${slug}@${version}`
+  if (programLoad?.key === key) return programLoad.promise
+  const promise = getProgramOut(slug, { signal: timeoutSignal(PROGRAM_TIMEOUT_MS) })
+    .then((out) => storeProgram(programFromServer(out)))
+    .catch(() => {
+      // Offline, a timeout or 404: the cached (or bundled) program stays; the next sync tries again.
+    })
+    .finally(() => {
+      if (programLoad?.key === key) programLoad = null
+    })
+  programLoad = { key, promise }
+  return promise
+}
+
+function storeProgram(program: Program) {
+  const a = state.active
+  // The day the prepared workout was built from, read before the registry changes.
+  const before = a && a.programId === program.id ? findProgram(a.programId) : undefined
+  const oldDay = a && before ? getDay(before, a.week, a.weekday) : undefined
+  const keep = [state.programId, a?.programId, ...state.pending.map((w) => w.programId)]
+  const programs = cacheProgram(state.programs, program, keep)
+  setServerPrograms(programs)
+  commit(rebuildPrepared({ ...state, programs }, program.id, oldDay))
+}
+
+/**
+ * After the program `slug` changed in the registry (ensureProgram; phase 2: the «program» event and
+ * editProgram): a prepared workout nobody started follows it, a started one is never touched.
+ */
+function rebuildPrepared(s: State, slug: string, oldDay: ProgramDay | undefined): State {
+  const a = s.active
+  const program = findProgram(slug)
+  const newDay = a && program ? getDay(program, a.week, a.weekday) : undefined
+  switch (rebuildDecision(a, slug, oldDay, newDay)) {
+    case 'keep':
+      return s
+    case 'link':
+      return { ...s, active: { ...a!, programDayId: newDay!.id ?? null } }
+    case 'drop':
+      return { ...s, active: null, activeSuggested: {}, activePlanKey: null }
+    case 'rebuild': {
+      // Same id (an earlier PUT of it may exist), built as written; activePlanKey null lets Today's
+      // applyDayPlan put the day plan on it again.
+      const built = buildPrepared(a!.id, a!.programId, a!.week, newDay!, a!.startedAt, {
+        history: s.history,
+        today: localDate(),
+        baselines: s.baselines,
+        overrides: overridesFor(a!, s),
+      })
+      return { ...s, active: built.workout, activePlanKey: null, activeSuggested: built.suggested }
+    }
+  }
 }
 
 let flushing = false
@@ -615,6 +710,8 @@ export async function syncFromServer(): Promise<void> {
     while (flushing) await new Promise((r) => setTimeout(r, 100))
     await flushPending()
     applyServer(await api<ServerState>('/state'))
+    // Before the caller prepares today's workout: from the server's program, not the bundled one.
+    await ensureProgram()
     // Deletes that failed earlier (cancelled offline), then the workout in progress if an earlier PUT
     // was lost. An unchanged one is not sent again (needsPut), so live-update syncs do not loop.
     retryActiveDeletes()
