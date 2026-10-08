@@ -86,6 +86,7 @@ from gymbot.services.answer_intent import plan_question
 from gymbot.services.body_weight import parse_chat as parse_body_weight
 from gymbot.services.chat_settings import is_settings_request
 from gymbot.services.programs import exercise_catalog, normalize
+from gymbot.services.tg_html import escape, send_html
 from gymbot.services.users import get_or_create_user
 from gymbot.services.wellbeing import wellbeing_entry
 from gymbot.services.workouts import save_from_chat
@@ -190,6 +191,7 @@ QA: dict[int, list[tuple[str, str, datetime]]] = {}  # user -> (question, answer
 CONTEXT_TTL = timedelta(minutes=15)
 QA_TURNS = 3  # earlier questions and answers sent with a new question
 SMALL_TALK_WORDS = 3  # a question without "?" this short gets the parser's reply, not the diary answer
+ANSWER_TIME_LIMIT = 150.0  # seconds for one diary answer: routes, their timeouts and a regeneration add up
 MAX_CHAIN = 3  # messages of a chain sent to the model as one turn; raw_text keeps them all
 
 # Offered facts by preview token; a record preview shares its token with PENDING.
@@ -469,30 +471,36 @@ def with_typing(message: Message, reparse: plausibility.Reparse) -> plausibility
 async def _diary_answer(
     message: Message, text: str, result: ParseResult, settings: Settings, sessionmaker: Sessionmaker,
     llm: OpenRouterClient,
-) -> ParseResult:
+) -> tuple[ParseResult, str | None]:
     """The question answered from the user's diary (gymbot.services.answer: from the database for a factual
     question, else the model's checked answer) instead of the parser's one-liner without data; that one
-    stays on any failure."""
+    stays on any failure. Also returns the answer's Telegram HTML (None: send the plain clarification)."""
     tg_user = message.from_user
     assert tg_user is not None
     try:  # the plan and the answer may take a few model calls
         async with keep_typing(message):
-            answered = await qa.respond(
-                sessionmaker, tg_user.id, tg_user.full_name, text, recent_answers(tg_user.id, message.date),
-                settings, llm, datetime.now(UTC),
+            answered = await asyncio.wait_for(
+                qa.respond(
+                    sessionmaker, tg_user.id, tg_user.full_name, text, recent_answers(tg_user.id, message.date),
+                    settings, llm, datetime.now(UTC),
+                ),
+                ANSWER_TIME_LIMIT,
             )
+    except TimeoutError:
+        log.warning("answer from the diary: over %s s, the parser's reply stays", ANSWER_TIME_LIMIT)
+        return result, None
     except LLMError as e:
         log.warning("answer from the diary: no model answered (%s)", e)
-        return result
+        return result, None
     except Exception:
         log.exception("answer from the diary failed")
-        return result
-    reply = answered.text
+        return result, None
+    reply, rich = answered.text, answered.html
     if claims_action(reply):
         log.info("the diary answer claimed an action it did not do: replaced")
-        reply = NO_ACTION
+        reply, rich = NO_ACTION, None
     _remember_answer(tg_user.id, text, reply, message.date)
-    return result.model_copy(update={"clarification": reply})
+    return result.model_copy(update={"clarification": reply}), rich
 
 
 # A record in the same message ("съел курт, сколько белка осталось", "сделал жим 3 подхода по 8"): the
@@ -813,13 +821,14 @@ async def _reply_parsed(
         and not _RECORD_VERB.search(normalize(text))  # "поел курицу" + "Сколько грамм?": the parser asks on
     )
     factual = _factual_question(text, result, prev)
+    answer_html: str | None = None
     if follow_up or factual or (
         result.kind == "question"
         and not (prev and prev.token)
         and (wants_diary(text) or claims_action(result.clarification))
     ):
         asked = result.model_copy(update={"kind": "question"}) if follow_up or factual else result
-        answered = await _diary_answer(message, text, asked, settings, sessionmaker, llm)
+        answered, answer_html = await _diary_answer(message, text, asked, settings, sessionmaker, llm)
         result = result if answered is asked else answered  # failed: an unclear message stays unclear
     result = honest(result)
     # The model tends to repeat facts it was given: offer only new ones.
@@ -840,16 +849,30 @@ async def _reply_parsed(
         await message.bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
         variants = await _variants(result, text, settings, llm)
     preview = prefix + render_preview(result, source_text=text)
+    # The diary answer as HTML (bold names and weights), only while the preview still shows that answer;
+    # the voice prefix and the fact line hold the user's words: escaped.
+    rich = (
+        escape(prefix) + answer_html
+        if answer_html is not None and result.kind == "question" and preview == prefix + (result.clarification or "")
+        else None
+    )
     if not result.is_record() and offer:  # a fact in a question or an unclear message: offer it alone
         answer = preview if preview != prefix + HINT else ""
         token = _new_token(FACTS)
         FACTS[token] = PendingFact(user_id, offer, raw, standalone=True, answer=answer)
         shown = answer + _offer_line(offer) if answer else f"{prefix}Запомнить? «{offer}»"
-        await message.answer(shown, reply_markup=keyboard(token, record=False, fact=True))
+        markup = keyboard(token, record=False, fact=True)
+        if rich is not None and answer:
+            await send_html(message.answer, rich + escape(_offer_line(offer)), shown, reply_markup=markup)
+        else:
+            await message.answer(shown, reply_markup=markup)
         if result.kind == "question":
             return
     elif result.kind == "question":
-        await message.answer(preview)
+        if rich is not None:
+            await send_html(message.answer, rich, preview)
+        else:
+            await message.answer(preview)
         return
     # Updates are handled concurrently: while the model was thinking, the previous preview may have
     # been saved, cancelled or replaced by another message. Then this is not its continuation.

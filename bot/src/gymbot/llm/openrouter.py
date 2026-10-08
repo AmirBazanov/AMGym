@@ -52,6 +52,7 @@ from gymbot.llm.claude import PURPOSES, Purpose, Usage
 from gymbot.llm.prompts import EXAMPLES, build_messages, build_vision_messages, parser_system
 from gymbot.llm.schemas import ParsedLabel, ParseResult, PhotoParse
 from gymbot.llm.stats import LLMStats
+from gymbot.services.tg_format import plain
 
 log = logging.getLogger(__name__)
 
@@ -81,15 +82,14 @@ def extract_json(content: str, prefer: str = "kind") -> dict:
 
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _FENCE = re.compile(r"^```[\w-]*\s*$", re.MULTILINE)
-_HEADING = re.compile(r"^#{1,6}\s*", re.MULTILINE)
 
 
 def clean_text(content: str) -> str:
-    """Plain text for a Telegram message sent without parse_mode: no reasoning, fences or Markdown marks."""
+    """The model's text without reasoning and code fences. Bold, lists and headers stay: the callers make
+    Telegram HTML of them (gymbot.services.tg_html) and a plain version for checks and the fallback
+    (gymbot.services.tg_format.plain)."""
     text = _THINK.sub("", content)
     text = _FENCE.sub("", text)
-    text = _HEADING.sub("", text)
-    text = text.replace("**", "").replace("__", "")
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
@@ -303,7 +303,10 @@ class OpenRouterClient:
             )
             free = Usage(input=_int(usage.get("prompt_tokens")), output=_int(usage.get("completion_tokens")))
             self.stats.record(route.name, route.provider, free)
-        message = data["choices"][0]["message"]
+        choices = data.get("choices") or []
+        if not choices:
+            raise LLMError(f"{route.name}: no choices in the answer")
+        message = choices[0]["message"]
         if not use_reasoning:
             return message.get("content") or ""
         # Reasoning models sometimes leave `content` empty and put the answer after their reasoning.
@@ -519,7 +522,7 @@ class OpenRouterClient:
                 route, messages, False, purpose=spec, temperature=temperature, use_reasoning=False
             )
             text = clean_text(raw)
-            if not text:
+            if not text or not plain(text).strip():
                 raise _EmptyAnswer("empty answer")
             return text
 

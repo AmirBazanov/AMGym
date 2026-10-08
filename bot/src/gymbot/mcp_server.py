@@ -13,6 +13,7 @@ Tool docstrings are in Russian: they are the descriptions the model reads. Answe
 from __future__ import annotations
 
 import asyncio
+import functools
 import hmac
 import json
 import logging
@@ -57,6 +58,7 @@ from gymbot.services import wellbeing as wb
 from gymbot.services.access import owner_user
 from gymbot.services.advice import epley
 from gymbot.services.programs import find_day, format_item, load_program, program_position
+from gymbot.services.tg_html import send_html, strip_tags
 from gymbot.services.users import active_program
 
 log = logging.getLogger(__name__)
@@ -642,19 +644,17 @@ def build_mcp(
         chat_id = user.telegram_id if user else (settings.allowed_user_ids[0] if settings.allowed_user_ids else None)
         if chat_id is None:
             raise ToolError("Владелец ещё не писал боту: некому отправить.")
-        parse_mode = "HTML" if html else None
+        send = functools.partial(bot.send_message, chat_id)
         try:
-            sent = await bot.send_message(chat_id, text, parse_mode=parse_mode)
+            if html:  # broken markup: the content still goes, as plain text (gymbot.services.tg_html)
+                sent, used = await send_html(send, text, strip_tags(text))
+            else:
+                sent, used = await send(text, parse_mode=None), False
         except TelegramAPIError as e:
-            if parse_mode is None:
-                raise ToolError(f"Telegram не принял сообщение: {e}") from e
-            # Broken markup: deliver the content anyway rather than lose the report.
-            try:
-                sent = await bot.send_message(chat_id, text, parse_mode=None)
-            except TelegramAPIError as e2:
-                raise ToolError(f"Telegram не принял сообщение: {e2}") from e2
+            raise ToolError(f"Telegram не принял сообщение: {e}") from e
+        if html and not used and strip_tags(text) != text:
             return dumps({"sent": True, "message_id": sent.message_id, "html": False, "note": "разметка отклонена, отправлено как текст"})
-        return dumps({"sent": True, "message_id": sent.message_id, "html": html})
+        return dumps({"sent": True, "message_id": sent.message_id, "html": used})
 
     @tool(READ)
     async def service_status() -> str:

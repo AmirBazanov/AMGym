@@ -77,7 +77,7 @@ def answer_buttons(msg) -> list[tuple[str, str]]:
 @pytest.fixture(autouse=True)
 def clean_state(monkeypatch):
     async def parser_answer(message, text, result, *args):
-        return result
+        return result, None
 
     monkeypatch.setattr(log_text, "_diary_answer", parser_answer)
     stores = (log_text.PENDING, log_text.CONTEXT, log_text.FACTS, hp.CARDS, hp.PREVIEWS, hp.CHOICES, hp.LATEST)

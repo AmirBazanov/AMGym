@@ -39,6 +39,7 @@ from gymbot.services.plan import muscle_group
 from gymbot.services.profile import GOAL_NAMES
 from gymbot.services.programs import find_day, format_item, load_program, program_position
 from gymbot.services.tg_format import plain
+from gymbot.services.tg_html import to_html
 from gymbot.services.wellbeing import context_lines as wellbeing_lines
 
 FACTS_IN_CONTEXT = 400  # newest active facts that fit; the rest of the summary matters more
@@ -464,3 +465,15 @@ async def generate(
     if len(text) > TELEGRAM_MAX:
         text = text[: TELEGRAM_MAX - len(ADVICE_DISCLAIMER) - 3].rstrip() + "…\n\n" + ADVICE_DISCLAIMER
     return text
+
+
+ADVICE_HEADERS = ("Питание", "Тренировки", "Восстановление")  # the three blocks of ADVICE_SYSTEM_PROMPT
+
+
+def html(text: str) -> str:
+    """Telegram HTML of `generate`'s plain text: the block headers bold, «- » items as «• », the rest
+    escaped (gymbot.services.tg_html)."""
+    lines = to_html(text).split("\n")
+    return "\n".join(
+        f"<b>{line}</b>" if line.strip().rstrip(":") in ADVICE_HEADERS else line for line in lines
+    )

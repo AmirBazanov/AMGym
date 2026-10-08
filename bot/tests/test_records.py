@@ -52,7 +52,7 @@ def clean(monkeypatch):
         store.clear()
 
     async def parser_answer(message, text, result, *args):
-        return result
+        return result, None
 
     monkeypatch.setattr(log_text, "_diary_answer", parser_answer)
     monkeypatch.setattr(hse, "utcnow", lambda: T0 + timedelta(minutes=5))

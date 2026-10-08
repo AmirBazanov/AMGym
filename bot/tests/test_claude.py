@@ -196,13 +196,14 @@ async def test_parse_rules_block_is_the_same_bytes_for_different_messages():
     assert a["messages"][: 2 * len(EXAMPLES)] == b["messages"][: 2 * len(EXAMPLES)]
 
 
-async def test_answer_uses_medium_effort_no_schema_and_caches_prompt_and_summary():
+async def test_answer_uses_high_effort_no_schema_and_caches_prompt_and_summary():
     h = Harness([message("Сегодня жим 3×8 на 80 кг.")])
     messages = build_answer_messages("Профиль: 85 кг", "что сегодня?", [("а вчера?", "отдых")])
     text = await h.client.complete_text(messages, temperature=0.4)
     assert text == "Сегодня жим 3×8 на 80 кг."
     body = h.claude_bodies[0]
-    assert body["output_config"] == {"effort": "medium"}
+    assert body["output_config"] == {"effort": "high"}
+    assert body["max_tokens"] == 12000
     assert "temperature" not in body
     prompt, summary = body["system"]
     assert prompt["text"] == ANSWER_SYSTEM_PROMPT and prompt["cache_control"] == {"type": "ephemeral"}

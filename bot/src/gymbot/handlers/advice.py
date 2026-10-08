@@ -13,6 +13,7 @@ from gymbot.config import Settings
 from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.services import advice
+from gymbot.services.tg_html import send_html
 from gymbot.services.users import get_or_create_user
 
 router = Router(name="advice")
@@ -37,4 +38,4 @@ async def give_advice(message: Message, settings: Settings, sessionmaker: Sessio
             text = await advice.generate(session, user, settings, llm, tz, datetime.now(UTC))
         except LLMError:
             text = UNAVAILABLE
-    await message.answer(text)
+    await send_html(message.answer, advice.html(text), text)  # plain text again if Telegram rejects it

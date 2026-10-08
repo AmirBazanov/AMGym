@@ -1,15 +1,18 @@
 """Sanitizer for model text that goes to Telegram as plain text.
 
-The bot sends answers without `parse_mode`, so Telegram shows Markdown literally: `**bold**`, `| a | b |`
-tables and `## headers` arrive as raw characters. The models still emit them despite the prompt, so
-`plain()` turns that markup into readable plain text (tables -> bullet lines, emphasis and code markers
-dropped, links -> `text (url)`). Text without markup is returned unchanged and `plain` is idempotent.
+Telegram without `parse_mode` shows Markdown literally: `**bold**`, `| a | b |` tables and `## headers`
+arrive as raw characters. `plain()` turns that markup into readable plain text: the answer check
+(gymbot.services.answer_check) reads it, and it is the fallback when Telegram rejects the HTML version
+(gymbot.services.tg_html, which shares `render` and the regexps below). Tables become bullet lines,
+emphasis and code markers are dropped, links become `text (url)`. Text without markup is returned unchanged and `plain` is idempotent.
 Arithmetic like `20*8`, `3 * 10` or `snake_case` is not markup and is left alone.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 
 _FENCE = re.compile(r"^\s*```")
 _HEADER = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)(?:\s+#+)?\s*$")
@@ -65,8 +68,8 @@ def _is_table_line(line: str) -> bool:
     return line.lstrip().startswith("|")
 
 
-def _table_row(line: str) -> str | None:
-    cells = [c for c in (_inline(c) for c in _cells(line)) if c]
+def _table_row(line: str, inline: Callable[[str], str]) -> str | None:
+    cells = [c for c in (inline(c) for c in _cells(line)) if c]
     if not cells:
         return None
     if len(cells) == 1:
@@ -74,7 +77,7 @@ def _table_row(line: str) -> str | None:
     return f"• {cells[0]} — {', '.join(cells[1:])}"
 
 
-def _table(block: list[str]) -> list[str]:
+def _table(block: list[str], inline: Callable[[str], str]) -> list[str]:
     """Rows of a Markdown table -> bullet lines; separator rows and a header (above a separator) go."""
     out: list[str] = []
     for i, line in enumerate(block):
@@ -82,14 +85,25 @@ def _table(block: list[str]) -> list[str]:
             continue
         if i + 1 < len(block) and _is_separator(block[i + 1]) and i == 0:
             continue  # header row
-        row = _table_row(line)
+        row = _table_row(line, inline)
         if row is not None:
             out.append(row)
     return out
 
 
-def plain(text: str) -> str:
-    """Model text -> Telegram plain text: no tables, no Markdown markers (see the module docstring)."""
+@dataclass(frozen=True)
+class Style:
+    """How `render` writes each kind of line: plain text here, Telegram HTML in gymbot.services.tg_html."""
+
+    inline: Callable[[str], str]  # an ordinary line (and a table cell) with its inline markup
+    header: Callable[[str], str]  # the text of a "# header"
+    verbatim: Callable[[str], str]  # a line inside a ``` fence
+    bullet: re.Pattern[str]  # list markers replaced with "• " (group 1 keeps the indent)
+
+
+def render(text: str, style: Style) -> str:
+    """The block structure shared by plain() and tg_html.to_html(): fences dropped (their lines kept as
+    `style.verbatim`), tables -> bullet lines, rules dropped, headers, list markers -> "• ", inline markup."""
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     out: list[str] = []
     in_fence = False
@@ -102,7 +116,7 @@ def plain(text: str) -> str:
             i += 1
             continue
         if in_fence:
-            out.append(line)
+            out.append(style.verbatim(line))
             i += 1
             continue
         # A table: lines starting with "|", or a "a | b" line directly above a separator row.
@@ -115,7 +129,7 @@ def plain(text: str) -> str:
             while i < len(lines) and (_is_table_line(lines[i]) or ("|" in lines[i] and lines[i].strip())):
                 block.append(lines[i])
                 i += 1
-            out.extend(_table(block))
+            out.extend(_table(block, style.inline))
             continue
         i += 1
         if _HRULE.match(line):
@@ -126,9 +140,17 @@ def plain(text: str) -> str:
             continue
         after_rule = False
         if m := _HEADER.match(line):
-            out.append(_inline(m.group(1)))
+            out.append(style.header(m.group(1)))
             continue
-        line = _BULLET.sub(lambda m: f"{m.group(1)}• ", line)
-        out.append(_inline(line))
+        line = style.bullet.sub(lambda m: f"{m.group(1)}• ", line)
+        out.append(style.inline(line))
     result = "\n".join(s.rstrip() for s in out)
     return _BLANK_RUN.sub("\n\n", result).strip()
+
+
+PLAIN = Style(inline=_inline, header=_inline, verbatim=lambda line: line, bullet=_BULLET)
+
+
+def plain(text: str) -> str:
+    """Model text -> Telegram plain text: no tables, no Markdown markers (see the module docstring)."""
+    return render(text, PLAIN)

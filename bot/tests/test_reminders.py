@@ -792,3 +792,37 @@ async def test_checkin_without_text_and_without_miniapp_url(db):
     bot = FakeBot()
     assert await _tick(db, bot, at(9, 30), miniapp_url="") == 1
     assert bot.calls == [(42, CHECKIN_TEXT, None)]
+
+
+# ---- advice goes as Telegram HTML, plain if Telegram rejects it (gymbot.services.tg_html) ----
+
+ADVICE_TEXT = "Питание\n- добери 40 г белка & воды\nЭто не медицинская рекомендация"
+ADVICE_HTML = "<b>Питание</b>\n• добери 40 г белка &amp; воды\nЭто не медицинская рекомендация"
+
+
+class KwBot:
+    def __init__(self, fail_html: bool = False) -> None:
+        self.calls: list[tuple[int, str, dict]] = []
+        self.fail_html = fail_html
+
+    async def send_message(self, chat_id, text, **kw):
+        self.calls.append((chat_id, text, kw))
+        if self.fail_html and kw.get("parse_mode") == "HTML":
+            raise TelegramBadRequest(method=SendMessage(chat_id=1, text="x"), message="Bad Request: can't parse entities")
+
+
+async def test_advice_reminder_is_sent_as_html(db, monkeypatch):
+    _fake_advice(monkeypatch, ADVICE_TEXT)
+    await _rem(db, await _user(db), kind="advice", text=None)
+    bot = KwBot()
+    assert await _tick(db, bot, at(9, 30), llm=object()) == 1
+    assert bot.calls == [(42, ADVICE_HTML, {"parse_mode": "HTML", "reply_markup": None})]
+
+
+async def test_advice_reminder_rejected_html_goes_plain_and_counts(db, monkeypatch):
+    _fake_advice(monkeypatch, ADVICE_TEXT)
+    rid = await _rem(db, await _user(db), kind="advice", text=None)
+    bot = KwBot(fail_html=True)
+    assert await _tick(db, bot, at(9, 30), llm=object()) == 1
+    assert bot.calls[-1] == (42, ADVICE_TEXT, {"parse_mode": None, "reply_markup": None})
+    assert await _last_sent(db, rid) == DAY

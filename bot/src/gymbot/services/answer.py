@@ -13,11 +13,15 @@ asks again here (`respond`), in three layers against made-up numbers:
    and its next training day), the day's workout, food and per-exercise records counted here, today's adjusted plan (gymbot.services.plan), the weights set for today from the
    chat (gymbot.services.overrides), the workout in progress in the Mini App (gymbot.services.active_workout),
    the weights for the asked (else the next) training day counted by gymbot.services.next_weights (the
-   model may name only those) and the last questions and answers of the dialog. Model text is made plain
-   for Telegram (gymbot.services.tg_format: no Markdown tables, ** or #) and then checked in code
+   model may name only those) and the last questions and answers of the dialog. The model's Markdown is
+   made plain (gymbot.services.tg_format) and the plain text is checked in code
    (gymbot.services.answer_check): a claim about the past that the summary does not hold gets one
    regeneration with a correction, then an honest fallback that shows the counted block.
 3. The model answers at ANSWER_TEMPERATURE, and the prompt says to admit what the diary lacks.
+
+`Reply.text` is plain text (the dialog memory and the checks use it); `Reply.html` is what goes to Telegram
+with parse_mode=HTML (gymbot.services.tg_html): the model's bold and lists, built from its own text after the
+check passed, or the database text with its heading line bold. None = send `text` as is.
 
 Several questions in a row reuse the summary: `respond` keeps it per user for CONTEXT_TTL seconds
 (`ContextCache`) unless the local day changes or anything published a change for the user
@@ -54,6 +58,7 @@ from gymbot.services.answer_check import Evidence, correction, violations
 from gymbot.services.answer_intent import classify, mentions, plan_question
 from gymbot.services.programs import normalize
 from gymbot.services.tg_format import plain
+from gymbot.services.tg_html import bold_head, to_html
 from gymbot.services.users import active_program, get_or_create_user
 
 log = logging.getLogger(__name__)
@@ -61,7 +66,7 @@ log = logging.getLogger(__name__)
 ANSWER_MAX = 1500  # characters sent to the chat; the prompt asks for far less
 NO_TRAINING = "Сегодня тренировки по программе нет."
 DONE_MAX = 900  # characters of the "done on the last training day" block
-ANSWER_TEMPERATURE = 0.2  # low: the answer retells the summary, it does not invent
+ANSWER_TEMPERATURE = 0.4  # the numbers come from the summary and the check; Claude gets no temperature
 CONTEXT_TTL = 60.0  # seconds a user's summary is reused for the next questions (see ContextCache)
 
 
@@ -233,6 +238,11 @@ def _cut(text: str) -> str:
     return text if len(text) <= ANSWER_MAX else text[: ANSWER_MAX - 1].rstrip() + "…"
 
 
+def _html(raw: str) -> str | None:
+    """The HTML of the model's text, None when its plain version had to be cut (never cut inside a tag)."""
+    return to_html(raw) if len(plain(raw)) <= ANSWER_MAX else None
+
+
 async def answer(
     llm: OpenRouterClient, context: str, question: str, dialog: list[tuple[str, str]] | None = None
 ) -> str:
@@ -244,9 +254,10 @@ async def answer(
 
 @dataclass
 class Reply:
-    text: str
+    text: str  # plain
     layer: str  # DIRECT | LLM | RETRIED | FALLBACK
     flags: list[str] = field(default_factory=list)  # claims the check did not find in the summary
+    html: str | None = None  # Telegram HTML of the same text (see the module doc)
 
 
 DIRECT, LLM, RETRIED, FALLBACK = "direct", "llm", "llm-retry", "fallback"
@@ -274,23 +285,30 @@ async def checked_answer(
     """The model's answer after the check (see the module doc). Raises LLMError if the first call fails."""
     dialog = dialog or []
     messages = build_answer_messages(ctx.text, question, dialog)
-    text = _cut(await llm.complete_text(messages, temperature=ANSWER_TEMPERATURE))
+    raw = await llm.complete_text(messages, temperature=ANSWER_TEMPERATURE)
+    text = _cut(raw)
     evidence = ctx.evidence(question, dialog)
     flags = violations(text, evidence)
     if not flags:
-        return Reply(text, LLM)
+        return Reply(text, LLM, html=_html(raw))
     log.warning("diary answer: not in the summary %s, asking again", flags)
-    retry = [*messages, {"role": "assistant", "content": text}, {"role": "user", "content": correction(flags)}]
+    retry = [*messages, {"role": "assistant", "content": raw}, {"role": "user", "content": correction(flags)}]
     try:
-        again = _cut(await llm.complete_text(retry, temperature=ANSWER_TEMPERATURE))
+        raw_again = await llm.complete_text(retry, temperature=ANSWER_TEMPERATURE)
     except LLMError as e:
         log.warning("diary answer: the regeneration failed (%s), honest fallback", e)
-        return Reply(fallback(ctx, question, flags), FALLBACK, flags)
+        return _fallback_reply(ctx, question, flags)
+    again = _cut(raw_again)
     still = violations(again, evidence)
     if not still:
-        return Reply(again, RETRIED, flags)
+        return Reply(again, RETRIED, flags, html=_html(raw_again))
     log.warning("diary answer: still not in the summary %s, honest fallback", still)
-    return Reply(fallback(ctx, question, still), FALLBACK, still)
+    return _fallback_reply(ctx, question, still)
+
+
+def _fallback_reply(ctx: Context, question: str, flags: list[str]) -> Reply:
+    text = fallback(ctx, question, flags)
+    return Reply(text, FALLBACK, flags, html=bold_head(text))
 
 
 async def respond(
@@ -315,10 +333,10 @@ async def respond(
             await session.commit()
             if (text := await direct.plan_reply(session, user, settings, question, pq, tz, now_utc)) is not None:
                 log.info("diary answer: the program day from the database")
-                return Reply(text, DIRECT)
+                return Reply(text, DIRECT, html=bold_head(text))
         q = classify(question)
         if q is not None and (text := await direct.reply(session, user, question, q, tz, now_utc)) is not None:
             log.info("diary answer: %s from the database", q.intent.value)
-            return Reply(text, DIRECT)
+            return Reply(text, DIRECT, html=bold_head(text))
         ctx = await gather(session, user, settings, llm, tz, now_utc, cache_for(sessionmaker), question)
     return await checked_answer(llm, ctx, question, dialog)

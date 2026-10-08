@@ -26,6 +26,7 @@ Delivery is "at most once per claim", not strictly at most once per day:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -44,6 +45,7 @@ from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.services import advice
 from gymbot.services.access import is_allowed
 from gymbot.services.nutrition import day_summary
+from gymbot.services.tg_html import send_html
 
 log = logging.getLogger(__name__)
 
@@ -161,6 +163,7 @@ class _Due:
 class _Message:
     text: str
     reply_markup: InlineKeyboardMarkup | None = None
+    html: str | None = None  # Telegram HTML of `text` (advice); sent plain if Telegram cannot parse it
 
 
 async def _build(
@@ -176,7 +179,8 @@ async def _build(
             raise RuntimeError("kind=advice needs an LLM client")
         user = await session.get(User, item.user_id)
         assert user is not None  # FK with ON DELETE CASCADE
-        return _Message(await advice.generate(session, user, settings, llm, tz, now_utc))
+        text = await advice.generate(session, user, settings, llm, tz, now_utc)
+        return _Message(text, html=advice.html(text))
     if item.kind == "nutrition":
         user = await session.get(User, item.user_id)
         assert user is not None  # FK with ON DELETE CASCADE
@@ -289,7 +293,11 @@ async def tick(
             log.exception("reminder %s: failed to prepare", item.id)
             continue
         try:
-            await bot.send_message(item.chat_id, message.text, reply_markup=message.reply_markup)
+            if message.html is not None:
+                send = functools.partial(bot.send_message, item.chat_id)
+                await send_html(send, message.html, message.text, reply_markup=message.reply_markup)
+            else:
+                await bot.send_message(item.chat_id, message.text, reply_markup=message.reply_markup)
         except (TelegramForbiddenError, TelegramBadRequest) as e:
             # Permanent for today (bot blocked, chat not found): keep the claim, retrying would only spam logs.
             log.warning("reminder %s: not delivered to %s, skipped for today: %s", item.id, item.chat_id, e)

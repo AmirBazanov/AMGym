@@ -108,7 +108,7 @@ def no_diary_answer(request, monkeypatch):
         return
 
     async def parser_answer(message, text, result, *args):
-        return result
+        return result, None
 
     monkeypatch.setattr(log_text, "_diary_answer", parser_answer)
 
@@ -1709,7 +1709,7 @@ async def test_objection_after_a_diary_answer_goes_to_the_diary(llm, settings, d
         {"kind": "unknown", "clarification": "Уточни название упражнения."}, "Да, 6 упражнений и 24 подхода, 6530 кг.",
     ]
     first = await send("сколько сегодня по тоннажу?", llm, settings, db)
-    assert first.answer.await_args.args[0] == "Сегодня в истории тренировки нет.\nТренировок в истории пока нет."
+    assert first.answer.await_args.args[0] == "<b>Сегодня в истории тренировки нет.</b>\nТренировок в истории пока нет."
     assert len(llm.bodies) == 1  # only the parser
     msg = await send("там должно быть 6 упражнений всего 24 подхода", llm, settings, db, T0 + timedelta(minutes=1))
     assert msg.answer.await_args.args[0] == "Да, 6 упражнений и 24 подхода, 6530 кг."
@@ -1725,3 +1725,72 @@ async def test_unclear_message_without_a_recent_answer_stays_unclear(llm, settin
     llm.answers = [{"kind": "unknown", "clarification": "Уточни название упражнения."}]
     msg = await send("шесть по двадцать четыре", llm, settings, db)
     assert len(llm.bodies) == 1 and "Уточни" in msg.answer.await_args.args[0]
+
+
+# ---- the diary answer goes as Telegram HTML (gymbot.services.tg_html) ----
+
+ADVICE_Q = "что посоветуешь на сегодня и с каким весом?"
+MARKED = "**Жим лёжа** 3×8–12 & отдых\n- начни с 40 кг"
+MARKED_HTML = "<b>Жим лёжа</b> 3×8–12 &amp; отдых\n• начни с 40 кг"
+MARKED_PLAIN = "Жим лёжа 3×8–12 & отдых\n- начни с 40 кг"
+
+
+async def test_diary_answer_markup_goes_as_html_and_the_dialog_keeps_plain(llm, settings, db, diary):
+    llm.answers = [{"kind": "question", "clarification": "Не знаю."}, MARKED]
+    msg = await send(ADVICE_Q, llm, settings, db)
+    assert msg.answer.await_args.args[0] == MARKED_HTML
+    assert msg.answer.await_args.kwargs == {"parse_mode": "HTML"}
+    assert log_text.QA[USER][-1][1] == MARKED_PLAIN
+
+
+async def test_diary_answer_rejected_html_is_sent_plain(llm, settings, db, diary):
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import SendMessage
+
+    llm.answers = [{"kind": "question", "clarification": "Не знаю."}, MARKED]
+    msg = message(ADVICE_Q)
+    bad = TelegramBadRequest(method=SendMessage(chat_id=1, text="x"), message="Bad Request: can't parse entities")
+    msg.answer = AsyncMock(side_effect=[bad, None])
+    await log_text.log_free_text(msg, settings, db, llm.client)
+    assert [c.args[0] for c in msg.answer.await_args_list] == [MARKED_HTML, MARKED_PLAIN]
+    assert msg.answer.await_args.kwargs == {"parse_mode": None}
+
+
+async def test_voice_prefix_is_escaped_in_the_html_answer(llm, settings, db, diary):
+    llm.answers = [{"kind": "question", "clarification": "Не знаю."}, MARKED]
+    msg = message(ADVICE_Q)
+    await log_text.process_text(msg, ADVICE_Q, settings, db, llm.client, prefix="Распознал: «a <b> & c»\n\n")
+    assert msg.answer.await_args.args[0] == "Распознал: «a &lt;b&gt; &amp; c»\n\n" + MARKED_HTML
+
+
+async def test_diary_answer_replaced_by_no_action_goes_plain(llm, settings, db, diary):
+    llm.answers = [{"kind": "question", "clarification": "-"}, "**Сохранил** твой вес, теперь он 80 кг."]
+    msg = await send("какой у меня сейчас рабочий вес в жиме?", llm, settings, db)
+    assert msg.answer.await_args.args[0] == log_text.NO_ACTION
+    assert msg.answer.await_args.kwargs == {}
+
+
+async def test_diary_answer_with_a_fact_offer_goes_as_html_with_the_button(llm, settings, db, diary):
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import SendMessage
+
+    text = "у меня болит колено, что посоветуешь на сегодня и с каким весом?"
+    parsed = {"kind": "question", "clarification": "Не знаю.", "remember": "болит колено <справа>"}
+    llm.answers = [parsed, MARKED, parsed, MARKED]
+    msg = await send(text, llm, settings, db)
+    offer = "\n\nЗапомнить: «болит колено &lt;справа&gt;»"
+    assert msg.answer.await_args.args[0] == MARKED_HTML + offer
+    kw = msg.answer.await_args.kwargs
+    assert kw["parse_mode"] == "HTML" and kw["reply_markup"] is not None
+    (fact,) = log_text.FACTS.values()
+    assert fact.answer == MARKED_PLAIN  # the button edits the message back to this plain text
+
+    log_text.FACTS.clear()
+    log_text.QA.clear()
+    msg = message(text)
+    bad = TelegramBadRequest(method=SendMessage(chat_id=1, text="x"), message="Bad Request: can't parse entities")
+    msg.answer = AsyncMock(side_effect=[bad, None])
+    await log_text.log_free_text(msg, settings, db, llm.client)
+    assert msg.answer.await_args.args[0] == MARKED_PLAIN + "\n\nЗапомнить: «болит колено <справа>»"
+    kw = msg.answer.await_args.kwargs
+    assert kw["parse_mode"] is None and kw["reply_markup"] is not None

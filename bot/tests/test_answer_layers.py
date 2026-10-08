@@ -349,6 +349,37 @@ def context() -> answer.Context:
     )
 
 
+async def test_model_bold_goes_to_html_and_the_check_reads_plain(llm):
+    llm.answers = ["**Ты сделал 24 подхода**, тоннаж 6530 кг & всё."]
+    reply = await answer.checked_answer(llm.client, context(), "сколько я сделал?")
+    assert reply.layer == answer.LLM
+    assert reply.text == "Ты сделал 24 подхода, тоннаж 6530 кг & всё."
+    assert reply.html == "<b>Ты сделал 24 подхода</b>, тоннаж 6530 кг &amp; всё."
+
+
+async def test_retry_html_comes_from_the_retry_and_the_model_sees_its_own_markup(llm):
+    bad = f"**{BAD}**"
+    llm.answers = [bad, f"**{GOOD}**"]
+    reply = await answer.checked_answer(llm.client, context(), "сколько я сделал?")
+    assert (reply.text, reply.layer, reply.html) == (GOOD, answer.RETRIED, f"<b>{GOOD}</b>")
+    assert llm.bodies[1]["messages"][-2] == {"role": "assistant", "content": bad}
+
+
+async def test_fallback_html_has_a_bold_head(llm):
+    llm.answers = [BAD, BAD]
+    ctx = context()
+    reply = await answer.checked_answer(llm.client, ctx, "сколько я сделал?")
+    assert reply.layer == answer.FALLBACK
+    assert reply.html is not None and reply.html.startswith(f"<b>{answer.FALLBACK_HEAD}</b>\n")
+
+
+async def test_too_long_answer_is_cut_as_plain_text_without_html(llm):
+    llm.answers = ["**Ответ** " + "слово " * 400]
+    reply = await answer.checked_answer(llm.client, context(), "расскажи подробно")
+    assert len(reply.text) == answer.ANSWER_MAX and reply.text.endswith("…")
+    assert reply.html is None
+
+
 def test_one_word_names_do_not_match_words_they_prefix():
     assert answer_intent.mentions("разве ты", ["разведения"]) == []
     assert answer_intent.mentions("в подтягиваниях", ["подтягивания"]) == ["подтягивания"]
@@ -362,12 +393,12 @@ async def test_exercise_named_in_the_question_is_no_proof_it_was_done(llm):
     assert reply.layer == answer.FALLBACK and "жим лёжа" in reply.flags
 
 
-async def test_clean_answer_is_kept_at_a_low_temperature(llm):
+async def test_clean_answer_is_kept_at_the_answer_temperature(llm):
     llm.answers = [GOOD]
     reply = await answer.checked_answer(llm.client, context(), "сколько я сделал?")
     assert (reply.text, reply.layer, reply.flags) == (GOOD, answer.LLM, [])
     assert len(llm.bodies) == 1
-    assert llm.bodies[0]["temperature"] == answer.ANSWER_TEMPERATURE == 0.2
+    assert llm.bodies[0]["temperature"] == answer.ANSWER_TEMPERATURE == 0.4
 
 
 async def test_bad_answer_is_regenerated_with_a_correction(llm):
@@ -377,7 +408,7 @@ async def test_bad_answer_is_regenerated_with_a_correction(llm):
     assert len(llm.bodies) == 2
     last = [(m["role"], m["content"]) for m in llm.bodies[1]["messages"][-2:]]
     assert last == [("assistant", BAD), ("user", answer_check.correction(["жим лёжа", "1800 кг"]))]
-    assert llm.bodies[1]["temperature"] == 0.2
+    assert llm.bodies[1]["temperature"] == 0.4
 
 
 async def test_two_bad_answers_give_the_honest_fallback(llm):
@@ -454,7 +485,8 @@ async def test_short_food_question_is_answered_from_the_database(llm, settings, 
     await _seed_today(db, settings, eat=True)
     llm.answers = [{"kind": "question", "clarification": "-"}]
     msg = await send("сколько белка осталось", llm, settings, db)
-    text = msg.answer.await_args.args[0]
+    text = log_text.QA[USER][-1][1]  # plain; the chat got its first line bold
+    assert msg.answer.await_args.args[0].startswith("<b>Белка осталось 90 г: съедено 60 из 150 г.</b>\n")
     assert text.startswith("Белка осталось 90 г: съедено 60 из 150 г.")
     assert len(llm.bodies) == 1  # only the parser
     assert log_text.QA[USER][-1][1] == text
@@ -464,7 +496,8 @@ async def test_workout_question_the_parser_called_unknown_is_still_answered(llm,
     await _seed_today(db, settings, workout=True)
     llm.answers = [{"kind": "unknown", "clarification": "Уточни."}]
     msg = await send("что я сегодня делал", llm, settings, db)
-    text = msg.answer.await_args.args[0]
+    assert msg.answer.await_args.args[0].startswith("<b>Сегодня: 6 упражнений, 24 подхода, тоннаж 6530 кг.</b>\n")
+    text = log_text.QA[USER][-1][1]  # plain in the dialog memory
     assert text.startswith("Сегодня: 6 упражнений, 24 подхода, тоннаж 6530 кг.")
     assert len(llm.bodies) == 1
 
@@ -518,3 +551,13 @@ def test_tonnage_with_a_thin_space_is_supported():
 def test_one_word_name_does_not_match_a_word_that_only_starts_alike():
     names = ["разведения"]
     assert not mentions("разве ты не видишь, что я устал", names)
+
+
+async def test_direct_reply_heading_goes_bold(llm, settings, db, diary):
+    await _seed_today(db, settings, workout=True)
+    llm.answers = [{"kind": "question", "clarification": "-"}]
+    msg = await send("какой мой рекорд?", llm, settings, db)
+    html = msg.answer.await_args.args[0]
+    assert html.startswith("<b>Рекорды из истории (1ПМ по Эпли):</b>\n- ")
+    assert msg.answer.await_args.kwargs == {"parse_mode": "HTML"}
+    assert log_text.QA[USER][-1][1].startswith("Рекорды из истории (1ПМ по Эпли):\n- ")  # plain in the dialog

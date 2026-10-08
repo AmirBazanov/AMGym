@@ -213,14 +213,14 @@ async def test_complete_text_plain_body_and_clean_text():
         return reply("<think>hmm, let me think</think>\n\n**Питание**\n- добери 40 г белка\n")
 
     text = await client_with(handler).complete_text(MSGS)
-    assert text == "Питание\n- добери 40 г белка"
+    assert text == "**Питание**\n- добери 40 г белка"  # markup stays: gymbot.services.tg_html makes HTML of it
     assert "response_format" not in bodies[0]
     assert bodies[0]["messages"] == MSGS and bodies[0]["model"] == "m1"
 
 
-async def test_complete_text_strips_code_fence_and_headings():
+async def test_complete_text_strips_code_fence_keeps_headings():
     text = await client_with(lambda req: reply("```\n## Питание\n- пункт\n```")).complete_text(MSGS)
-    assert text == "Питание\n- пункт"
+    assert text == "## Питание\n- пункт"
 
 
 async def test_complete_text_fallback_on_429():
@@ -504,3 +504,20 @@ async def test_usage_is_logged_without_content(caplog):
     assert await groq_client(rec).complete_text(MSGS) == "секретный ответ"
     assert "groq/g1 tokens: prompt 2418, completion 95" in caplog.text
     assert "секретный" not in caplog.text and "stt-key" not in caplog.text
+
+
+
+async def test_markup_only_answer_and_empty_choices_fail_over():
+    """An answer made of markup only ("** **") or a 200 with no choices goes to the next route."""
+    models = []
+
+    def handler(req):
+        models.append(json.loads(req.content)["model"])
+        if len(models) == 1:
+            return reply("** **")
+        if len(models) == 2:
+            return httpx.Response(200, json={"choices": []})
+        return reply("ответ")
+
+    assert await client_with(handler).complete_text([{"role": "user", "content": "q"}]) == "ответ"
+    assert len(models) == 3

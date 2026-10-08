@@ -252,3 +252,19 @@ def test_leg_press_is_legs_not_abs():
     assert muscle_group("лег пресс") == "legs"
     assert muscle_group("легпресс") == "legs"
     assert muscle_group("скручивания на пресс") == "abs"
+
+
+def test_answer_prompt_is_a_coach_that_answers_not_a_retelling():
+    p = ANSWER_SYSTEM_PROMPT
+    # Gone: the plain-text rule, the 700-character cap and "never cancel the program day for recovery".
+    assert "без Markdown" not in p and "700 символов" not in p and "не отменяй" not in p
+    # Format: a direct answer first, bullets, a next step, bold only.
+    assert "900 символов" in p and "прямой ответ" in p and "«• »" in p and "**жирный**" in p
+    assert "Таблицы, заголовки с #, код" in p
+    # Soreness or another workout: options, one recommendation, the program day is not insisted on.
+    assert "поменять местами с другим днём программы" in p and "−10–20 %" in p and "Не настаивай" in p
+    assert "к какому времени" in p and "я ошибся" in p
+    # The data rules stay.
+    for rule in ("«Веса на … (посчитано дневником)»", "в дневнике этого нет", "«Сделано …»", "«Еда сегодня»",
+                 "Диагнозы не ставь", "никогда не пиши, что что-то записал", "«Что сегодня?»", "мини-апп"):
+        assert rule in p, rule

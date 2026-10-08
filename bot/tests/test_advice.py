@@ -336,6 +336,24 @@ async def test_handler_answers_with_advice(db, settings, monkeypatch):
     assert seen == {"user": TG_ID, "tz": ZoneInfo(settings.timezone), "llm": llm}
 
 
+async def test_handler_sends_advice_as_html(db, settings, monkeypatch):
+    async def fake_generate(*args):
+        return "Питание\n- добери 40 г белка & воды\nТренировки:\n- жим 80 кг"
+
+    monkeypatch.setattr(advice, "generate", fake_generate)
+    msg = _message()
+    await advice_handler.give_advice(msg, settings, db, object())
+    msg.answer.assert_awaited_once_with(
+        "<b>Питание</b>\n• добери 40 г белка &amp; воды\n<b>Тренировки:</b>\n• жим 80 кг", parse_mode="HTML"
+    )
+
+
+def test_advice_html_bolds_only_the_block_headers():
+    assert advice.html("Питание\n- пункт про питание <3") == "<b>Питание</b>\n• пункт про питание &lt;3"
+    assert advice.html("Восстановление: спи 8 ч") == "Восстановление: спи 8 ч"
+    assert advice.html("СОВЕТ") == "СОВЕТ"
+
+
 async def test_handler_llm_error(db, settings, monkeypatch):
     async def failing(*args):
         raise LLMError("down")
