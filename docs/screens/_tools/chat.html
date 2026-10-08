@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bot chat mock</title>
+<!--
+  A static mock of a Telegram chat for README illustrations (not a screenshot of Telegram).
+  The bot texts come from the bot's own formatting code run on demo data (render_preview, card_text,
+  answer_direct.plan_reply, records.message_text, chat_settings.render). Open with ?d=<name>;
+  chat-shots.mjs renders every dialog to docs/screens/chat-<name>.png.
+-->
+<style>
+  :root {
+    --bg: #c9d9b4;
+    --in: #ffffff;
+    --out: #e1fec6;
+    --text: #000000;
+    --meta: #8a9a83;
+    --meta-out: #5fae5a;
+    --btn: rgba(66, 94, 52, 0.42);
+    --head: #ffffff;
+    --accent: #3390ec;
+  }
+  /* Color emoji: system fonts first; under WSL Chromium has none, so the Windows font is the fallback. */
+  @font-face {
+    font-family: "MockEmoji";
+    src: local("Apple Color Emoji"), local("Segoe UI Emoji"), local("Noto Color Emoji"),
+      url("file:///mnt/c/Windows/Fonts/seguiemj.ttf");
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #ffffff;
+    font: 15px/1.35 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "MockEmoji", sans-serif;
+    color: var(--text);
+  }
+  #chat { width: 420px; overflow: hidden; }
+  .head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; background: var(--head); border-bottom: 1px solid #e5e5e5;
+  }
+  .avatar {
+    width: 38px; height: 38px; border-radius: 50%;
+    background: linear-gradient(135deg, #5fb3f9, #3a7fe0);
+    color: #fff; font-weight: 600; display: grid; place-items: center; font-size: 16px;
+  }
+  .name { font-weight: 600; }
+  .status { color: #8e8e93; font-size: 13px; }
+  .tag {
+    margin-left: auto; font-size: 12px; color: #8e8e93;
+    border: 1px solid #d6d6d6; border-radius: 10px; padding: 2px 8px;
+  }
+  .wall {
+    padding: 12px 10px 16px;
+    background:
+      radial-gradient(circle at 20% 20%, rgba(255,255,255,0.25) 0 18%, transparent 19%),
+      radial-gradient(circle at 80% 60%, rgba(255,255,255,0.18) 0 14%, transparent 15%),
+      linear-gradient(160deg, #d3e1b6, #b9cfa4);
+    background-size: 120px 120px, 90px 90px, 100% 100%;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .msg { max-width: 86%; display: flex; flex-direction: column; gap: 4px; }
+  .msg.out { align-self: flex-end; }
+  .msg.in { align-self: flex-start; }
+  .bubble {
+    padding: 6px 10px 6px; border-radius: 14px; white-space: pre-wrap; word-wrap: break-word;
+    box-shadow: 0 1px 1px rgba(0,0,0,0.12); position: relative;
+  }
+  .out .bubble { background: var(--out); border-bottom-right-radius: 4px; }
+  .in .bubble { background: var(--in); border-bottom-left-radius: 4px; }
+  .time { float: right; margin: 6px 0 -4px 10px; font-size: 11.5px; color: var(--meta); }
+  .out .time { color: var(--meta-out); }
+  .edited::before { content: "изменено "; }
+  .buttons { display: flex; flex-direction: column; gap: 4px; }
+  .buttons .row { display: flex; gap: 4px; }
+  .buttons .b {
+    flex: 1; text-align: center; padding: 8px 6px; border-radius: 10px;
+    background: var(--btn); color: #fff; font-weight: 500; font-size: 14px;
+    backdrop-filter: blur(4px);
+  }
+  .photo {
+    padding: 4px; border-radius: 14px; background: var(--out); box-shadow: 0 1px 1px rgba(0,0,0,0.12);
+    border-bottom-right-radius: 4px;
+  }
+  .photo svg { display: block; border-radius: 10px; }
+  .day {
+    align-self: center; font-size: 13px; color: #fff; background: rgba(70, 100, 60, 0.45);
+    padding: 2px 10px; border-radius: 10px; margin: 2px 0 6px;
+  }
+  .caption {
+    padding: 8px 14px 10px; font-size: 13px; color: #6d6d72; background: #f4f4f6; border-top: 1px solid #e5e5e5;
+  }
+</style>
+</head>
+<body>
+<div id="chat"></div>
+<script>
+const PHOTO = '<svg width="220" height="160" viewBox="0 0 220 160" xmlns="http://www.w3.org/2000/svg">'
+  + '<rect width="220" height="160" fill="#8a6a4a"/>'
+  + '<rect x="18" y="22" width="184" height="116" rx="8" fill="#f3efe6" transform="rotate(-4 110 80)"/>'
+  + '<g transform="rotate(-4 110 80)">'
+  + [3,1,2,1,1,3,1,2,2,1,1,2,3,1,1,2,1,3,2,1,1,2,1,1,3,2,1,1,2,1,3,1,1,2,1,2]
+      .reduce((acc, w, i) => { const x = acc.x; acc.s += i % 2 === 0 ? `<rect x="${x}" y="40" width="${w * 2}" height="62" fill="#111"/>` : ''; acc.x += w * 2; return acc }, { x: 40, s: '' }).s
+  + '<text x="110" y="122" font-family="monospace" font-size="13" text-anchor="middle" fill="#111">4 600000 000000</text>'
+  + '</g></svg>'
+
+const DIALOGS = {
+  food: {
+    caption: 'Пример диалога: еда текстом',
+    items: [
+      { out: 'плов, касушка и пол лепёшки', t: '13:42' },
+      { in: 'Записать еду? Всего 965 ккал\n• плов 300 г: 540 ккал, Б18 Ж24 У63\n• касушка (пиала) чая с молоком 250 г: 95 ккал, Б4 Ж4 У11\n• лепёшка, половина 125 г: 330 ккал, Б11 Ж3 У66\n\nЛепёшку посчитал по твоему факту: целая ~250 г.',
+        t: '13:42', buttons: [['✅ Сохранить', '✖ Отмена']] },
+    ],
+  },
+  barcode: {
+    caption: 'Пример диалога: фото штрихкода упаковки',
+    items: [
+      { photo: true, t: '16:05' },
+      { in: 'Протеиновый батончик арахис-карамель (Open Food Facts)\nНа 100 г: 355 ккал, Б33 Ж12 У30\nУпаковка 60 г\n\nСколько съел? Нажми кнопку или напиши, например «60 г».',
+        t: '16:05', buttons: [['Вся упаковка (60 г)', '½ (30 г)'], ['Ввести граммы', '✖ Отмена']] },
+    ],
+  },
+  plan: {
+    caption: 'Пример диалога: план на завтра, веса посчитаны дневником',
+    items: [
+      { out: 'какая завтра тренировка и какие веса', t: '18:30' },
+      { in: 'Завтра, пт 09.10 — тренировка по программе (неделя 4):\n• Сгибания на бицепс с ez грифом хватом снизу 5×8–12 — 27,5 кг (прошлый раз 25 × 12 во всех подходах, +2,5 кг)\n• Сгибания на бицепс с ez грифом хватом сверху 5×8–12 — 20 кг (как в прошлый раз 20 кг)\n• Французский жим лёжа 5×8–12 — 35 кг (как в прошлый раз 35 кг)\n• Жим сидя в смите 5×8–12 — 47,5 кг (прошлый раз 45 × 12 во всех подходах, +2,5 кг)\n• Отведения на дельты 5×12–15 — 7,5 кг (как в прошлый раз 7,5 кг)\n• Отведения пек дек на заднюю дельту 5×12–15 — 50 кг (как в прошлый раз 50 кг)\nБицепс, трицепс, плечи восстановятся к пт 09.10 19:00 (48 ч после тренировки) — тренировка после 19:00 в самый раз.',
+        t: '18:30' },
+    ],
+  },
+  record: {
+    caption: 'Пример диалога: тренировка из чата и новые рекорды',
+    items: [
+      { out: 'супинация 20 на 8 три подхода, француз в блоке 60 на 10 три подхода, пек дек 50 на 10 два', t: '20:14' },
+      { in: '• сгибания с гантелями на бицепс с супинацией: 20 кг × 8, 20 кг × 8, 20 кг × 8\n• французский жим в блоке из-за головы: 60 кг × 10, 60 кг × 10, 60 кг × 10\n• отведения пек дек на заднюю дельту: 50 кг × 10, 50 кг × 10\n\nСохранено ✅ Видно в дневнике, /undo — отменить.',
+        t: '20:14', edited: true },
+      { in: '🏆 Новый рекорд: сгибания с гантелями на бицепс с супинацией 20×8 — 1ПМ 23 → 25 кг\n🏆 Новый рекорд: французский жим в блоке из-за головы 60×10 — 1ПМ 73 → 80 кг\n🏆 Новый рекорд: отведения пек дек на заднюю дельту 50×10 — 1ПМ 63 → 67 кг',
+        t: '20:14' },
+    ],
+  },
+  settings: {
+    caption: 'Пример диалога: настройка из чата',
+    items: [
+      { out: 'норма 2800 ккал, белок 170', t: '21:03' },
+      { in: 'Применить?\n• Норма КБЖУ: ккал 2500 → 2800, белок 150 → 170 г', t: '21:03', buttons: [['✅ Применить', 'Отмена']] },
+    ],
+  },
+}
+
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+function render(name) {
+  const d = DIALOGS[name]
+  let html = '<div class="head"><div class="avatar">G</div><div><div class="name">GymAPP</div>'
+    + '<div class="status">бот</div></div><div class="tag">иллюстрация</div></div><div class="wall">'
+    + '<div class="day">8 октября</div>'
+  for (const it of d.items) {
+    if (it.photo) {
+      html += `<div class="msg out"><div class="photo">${PHOTO}</div></div>`
+      continue
+    }
+    const dir = it.out != null ? 'out' : 'in'
+    const text = it.out ?? it.in
+    const time = `<span class="time${it.edited ? ' edited' : ''}">${it.t}${dir === 'out' ? ' ✓✓' : ''}</span>`
+    html += `<div class="msg ${dir}"><div class="bubble">${esc(text)}${time}</div>`
+    if (it.buttons) {
+      html += '<div class="buttons">' + it.buttons.map((r) => '<div class="row">'
+        + r.map((b) => `<div class="b">${esc(b)}</div>`).join('') + '</div>').join('') + '</div>'
+    }
+    html += '</div>'
+  }
+  html += `</div><div class="caption">${esc(d.caption)}</div>`
+  document.getElementById('chat').innerHTML = html
+}
+
+window.DIALOG_NAMES = Object.keys(DIALOGS)
+render(new URLSearchParams(location.search).get('d') ?? 'food')
+</script>
+</body>
+</html>
