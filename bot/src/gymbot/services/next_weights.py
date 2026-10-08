@@ -12,8 +12,13 @@ history and no baseline (`related`):
 
 - Equipment and movement are read from the name (`equipment`, `movement`, `grip`). Dumbbell weights are
   PER HAND everywhere: in the history and in suggestions («на руку»).
-- Only free weights convert, from the related exercise's best Epley 1RM (one hop, real history only):
-  EQ_FACTORS below. Cables and machines never convert to or from anything else (different resistance
+- Only whitelisted pairs convert (TRANSFER_EQUIPMENT), from the related exercise's best Epley 1RM (one
+  hop, real history only): curls (with the grip factor) and the SAME press or raise across equipment
+  (EQ_FACTORS), e.g. жим гантелей сидя <-> жим сидя в смите <-> жим штанги сидя. Both names must have the
+  same variant words (`modifiers`: incline, front, seated/standing, close grip, румынская vs становая, …);
+  unilateral and single-dumbbell exercises (болгарские, выпады, гоблет, одной рукой, концентрированные)
+  never take a number from anything. Among candidates the CLOSEST name wins (most shared words), not the
+  strongest lift. Squats, hinges, rows, pulldowns, triceps extensions and rear delts never convert. Cables and machines never convert to or from anything else (different resistance
   curves, stacks and pulleys): between two cable (or two machine) exercises of the same movement the
   answer is a hint «подбери по ощущениям: начни с ~X», X = the first set of the related exercise's last
   session; otherwise no number. Unknown equipment is never "the same equipment".
@@ -82,6 +87,13 @@ HINT_EQUIPMENT = ("cable", "machine")
 # Reverse (pronated) curls are 60-70 % of supinated ones (brachioradialis instead of the biceps leading):
 # the middle, 0.65, from any non-pronated curl of the same or a convertible equipment.
 REVERSE_GRIP = 0.65
+# Movement -> equipment between which numbers transfer. Lateral raises: dumbbells to dumbbells only.
+TRANSFER_EQUIPMENT: dict[str, frozenset[str]] = {
+    "curl": frozenset({"dumbbell", "barbell", "ez"}),
+    "overhead_press": frozenset({"dumbbell", "barbell", "smith"}),
+    "bench": frozenset({"dumbbell", "barbell", "smith"}),
+    "lateral_raise": frozenset({"dumbbell"}),
+}
 TRANSFER_INTENSITY = "medium"  # a transferred 1RM is an estimate: never the "heavy" share of it
 
 EQUIPMENT_NAMES = {
@@ -405,15 +417,41 @@ _MOVEMENTS: list[tuple[str, re.Pattern[str]]] = [
     ("rear_delt", _rx(r"задн\w*\s+дельт|пек[\s-]?дек\w*\s+на\s+задн|обратн\w*\s+(?:развед|бабочк)|"
                       r"развед\w*\s+(?:\w+\s+)?в\s+наклон")),
     ("lateral_raise", _rx(r"отведен|" + _L + r"мах(?:и|ов)" + r"(?![а-я])")),
-    ("triceps_extension", _rx(r"француз|разгибан|трицепс")),
+    ("triceps_extension", _rx(r"француз|разгибан|трицепс")),  # not a press "на трицепс": see movement()
     ("curl", _rx(r"сгибан|бицепс|молот")),
-    ("bench", _rx(r"жим\w*\s+(?:\w+\s+){0,2}?леж|бенч")),
+    ("bench", _rx(r"жим\w*\s+(?:\w+\s+){0,2}?леж|бенч|жим\w*\s+(?:\w+\s+){0,3}?(?:наклонн|под\s+углом)")),
     ("overhead_press", _rx(r"жим\w*\s+(?:\w+\s+){0,3}?(?:сидя|стоя|над\s+голов)|армейск")),
     ("row", _rx(r"тяг\w*\s+(?:\w+\s+){0,3}?(?:горизонт|к\s+поясу|в\s+наклон|нижн)")),
     ("pulldown", _rx(r"тяг\w*\s+(?:\w+\s+){0,3}?(?:вертикал|верхн)|подтягиван")),
     ("squat", _rx(r"присед")),
     ("hinge", _rx(r"румын|станов")),
 ]
+_PRESS = _rx(_L + r"жим")
+# Variant words: two names transfer only with the same set (curls ignore seated / standing).
+_MODIFIERS: list[tuple[str, re.Pattern[str]]] = [
+    ("incline", _rx(r"наклонн|под\s+углом|накл\w*\s+скам")),
+    ("decline", _rx(r"головой\s+вниз|обратн\w*\s+наклон|отрицательн\w*\s+наклон")),
+    ("front", _rx(r"фронтал")),
+    ("seated", _rx(r"сидя")),
+    ("standing", _rx(r"стоя|армейск")),
+    ("close", _rx(r"узк")),
+    ("wide", _rx(r"широк")),
+    ("sumo", _rx(r"сумо")),
+    ("behind", _rx(r"из[\s-]за\s+голов|за\s+голов")),
+    ("overhead", _rx(r"над\s+голов")),
+    ("lying", _rx(r"леж")),
+    ("scott", _rx(r"скотт|парт")),
+    ("arnold", _rx(r"арнольд")),
+    ("hack", _rx(_L + r"(?:гакк?|хакк?)")),
+    ("rdl", _rx(r"румын")),
+    ("deadlift", _rx(r"станов")),
+    ("deficit", _rx(r"дефицит")),
+    ("pause", _rx(r"пауз")),
+]
+_CURL_IGNORES = frozenset({"seated", "standing"})
+# One arm / one leg, or one dumbbell held in both hands: no number from (or to) anything else.
+_UNILATERAL = _rx(r"болгарск|выпад|гоблет|одной\s+рук|одной\s+ног|одноруч|концентрир|сплит|пистолет|на\s+одну\s+")
+_SINGLE_DUMBBELL = _rx(r"гоблет|одной\s+гантел|одну\s+гантел|гантелью")
 _PRONATED = _rx(r"пронац|хват\w*\s+сверху|обратн\w*\s+хват")
 _NEUTRAL = _rx(r"молот|нейтрал")
 
@@ -427,7 +465,21 @@ def movement(name: str) -> str | None:
     key = normalize(name)
     if _LEGS.search(key):
         return None
-    return next((m for m, pattern in _MOVEMENTS if pattern.search(key)), None)
+    press = bool(_PRESS.search(key)) and "француз" not in key  # "жим узким хватом на трицепс" is a press
+    return next(
+        (m for m, pattern in _MOVEMENTS if pattern.search(key) and not (press and m == "triceps_extension")), None
+    )
+
+
+def modifiers(name: str) -> frozenset[str]:
+    """Variant words of the name (see _MODIFIERS); curls ignore seated / standing."""
+    key = normalize(name)
+    mods = frozenset(m for m, pattern in _MODIFIERS if pattern.search(key))
+    return mods - _CURL_IGNORES if movement(name) == "curl" else mods
+
+
+def unilateral(name: str) -> bool:
+    return bool(_UNILATERAL.search(normalize(name)))
 
 
 def grip(name: str) -> str | None:
@@ -443,7 +495,8 @@ def grip(name: str) -> str | None:
 
 
 def per_hand(name: str) -> bool:
-    return equipment(name) == "dumbbell"
+    """Dumbbells are logged per hand; one dumbbell in both hands (гоблет) is not «на руку»."""
+    return equipment(name) == "dumbbell" and not _SINGLE_DUMBBELL.search(normalize(name))
 
 
 # ---- related exercises ----
@@ -462,6 +515,17 @@ def _hand(name: str) -> str:
     return " на руку" if per_hand(name) else ""
 
 
+def _shared_words(a: str, b: str) -> int:
+    """Content words of `a` also in `b` (rough stems): the closest variant wins a transfer."""
+    wa, wb = _name_words(a), _name_words(b)
+    return sum(1 for w in wa if any(w == x or (min(len(w), len(x)) >= 4 and (w.startswith(x) or x.startswith(w)))
+                                    for x in wb))
+
+
+def _name_words(name: str) -> list[str]:
+    return [w[:6] for w in re.findall(r"[а-яa-z0-9]+", normalize(name)) if len(w) >= 3]
+
+
 def _first_set_of_last_session(history: list[HistoryWorkout], name: str) -> float | None:
     last = last_same_session(history, name)
     return last[0].weight if last else None
@@ -477,8 +541,9 @@ def related(history: list[HistoryWorkout], exercise: ProgramExercise) -> Suggest
         return Suggestion(None, no_number, "none")
     numbers: list[tuple[tuple[Any, ...], str, float, Record1rm, float]] = []
     hints: list[tuple[tuple[Any, ...], str, float]] = []
-    others: list[str] = []
+    others: list[tuple[str, str]] = []  # (exercise, why no number)
     order = _history_names(history)
+    mods_t, one_side_t, allowed = modifiers(name), unilateral(name), TRANSFER_EQUIPMENT.get(mv, frozenset())
     for src in order:
         if normalize(src) == normalize(name) or movement(src) != mv:
             continue
@@ -486,20 +551,26 @@ def related(history: list[HistoryWorkout], exercise: ProgramExercise) -> Suggest
         if rec is None:
             continue
         eq_s, grip_s = equipment(src), grip(src)
-        grip_differs = grip_t != grip_s
-        if eq_t in FREE_WEIGHTS and eq_s in FREE_WEIGHTS:
-            factor = 1.0 if eq_t == eq_s else EQ_FACTORS.get((eq_s, eq_t))  # type: ignore[arg-type]
-            if factor is None:
-                others.append(src)
-                continue
-            g = REVERSE_GRIP if grip_t == "pronated" and grip_s != "pronated" else 1.0
-            numbers.append(((grip_differs, eq_t != eq_s, -rec.e1rm, src), src, factor, rec, g))
-        elif eq_t is not None and eq_t == eq_s and eq_t in HINT_EQUIPMENT:
-            first = _first_set_of_last_session(history, src)
+        key = (grip_t != grip_s, eq_t != eq_s, -_shared_words(name, src), order.index(src), src)
+        if one_side_t or unilateral(src):
+            others.append((src, "упражнение на одну руку или ногу"))
+        elif eq_t in HINT_EQUIPMENT or eq_s in HINT_EQUIPMENT or eq_t is None or eq_s is None:
+            # Cables and machines: a starting point from the same kind of equipment (any variant), no number.
+            first = _first_set_of_last_session(history, src) if eq_t == eq_s and eq_t in HINT_EQUIPMENT else None
             if first:
-                hints.append(((grip_differs, order.index(src), src), src, first))
+                hints.append((key, src, first))
+            else:
+                others.append((src, EQUIPMENT_NAMES.get(eq_s or "", "другой снаряд")))
+        elif modifiers(src) != mods_t:
+            others.append((src, "другой вариант упражнения"))
+        elif eq_t in allowed and eq_s in allowed and (eq_t == eq_s or (eq_s, eq_t) in EQ_FACTORS):
+            factor = 1.0 if eq_t == eq_s else EQ_FACTORS[(eq_s, eq_t)]  # type: ignore[index]
+            g = REVERSE_GRIP if grip_t == "pronated" and grip_s != "pronated" else 1.0
+            numbers.append((key, src, factor, rec, g))
+        elif eq_t == eq_s:
+            others.append((src, "другое упражнение"))
         else:
-            others.append(src)
+            others.append((src, EQUIPMENT_NAMES.get(eq_s or "", "другой снаряд")))
     if numbers:
         _, src, factor, rec, g = min(numbers, key=lambda c: c[0])
         reps = progression_reps(exercise.prescription)
@@ -528,8 +599,7 @@ def related(history: list[HistoryWorkout], exercise: ProgramExercise) -> Suggest
         )
         return Suggestion(None, reason, "hint", hint_kg=first, related=src)
     if others:
-        src = others[0]
-        what = EQUIPMENT_NAMES.get(equipment(src) or "", "другой снаряд")
+        src, what = others[0]
         reason = (
             f"подбери по ощущениям: вес из «{src}» ({what}) сюда не переносится; "
             f"начни легко, рабочий вес — с 2 повторами в запасе"

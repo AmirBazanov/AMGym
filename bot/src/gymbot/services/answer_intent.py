@@ -296,9 +296,10 @@ _WEEKDAY = _rx(_W + r"(?:(?:в|во|на)\s+)?(понедельник\w*|вто�
                     r"воскресень[еяю])" + _E)
 _WEEKDAY_SHORT = _rx(_W + r"(?:в|во|на)\s+(пн|вт|ср|чт|пт|сб|вс)" + _E)
 _SHORT_DAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
-_OFFSET = _rx(_W + r"(послезавтра|завтра\w*|сегодня\w*)" + _E)
+_OFFSET = _rx(_W + r"(послезавтра(?:шн\w*)?|завтра(?:шн\w*)?|сегодня(?:шн\w*)?)" + _E)  # never "завтрак"
 _DATE_NUM = _rx(_W + r"(?:на\s+)?(\d{1,2})\s*(?:-?го|-?е)?\s+числ\w*|" + _W + r"на\s+(\d{1,2})\s*-?е" + _E)
-_DATE_DOT = _rx(_W + r"(\d{1,2})[./](\d{1,2})(?:[./]\d{2,4})?(?![\d.,])")
+# "9.10", "09.10": a two-digit month, never a weight ("12.5", "7.5 кг").
+_DATE_DOT = _rx(_W + r"(\d{1,2})[./](\d{2})(?:[./]\d{2,4})?(?![\d.,])(?!\s*(?:кг|kg|к(?![а-я])))")
 _NEXT = _rx(_W + r"(?:следующ\w*|ближайш\w*)\s+(?:тренировк\w*|трен\w*|занят\w*)" + _E)
 _TRAINING_Q = _rx(
     _W + r"(?:как\w*|что(?:\s+за)?|чем)\s+(?:[а-я]+\s+){0,3}?(?:тренировк\w*|трен[еяиу]?|упражнени\w*|"
@@ -309,12 +310,17 @@ _WEIGHTS_Q = _rx(
     _W + r"(?:(?:с\s+)?как\w*\s+(?:[а-я]+\s+){0,2}?вес\w*|(?:сколько|какой\s+вес)\s+(?:[а-я]+\s+){0,2}?"
     r"(?:ставить|брать|вешать|работать))" + _E
 )
+# Weights to work with, not the body weight: "какие веса", "с каким весом", "рабочий вес", "какой вес ставить".
+_WORKING_WEIGHTS = _rx(
+    _W + r"(?:вес(?:а|ами)|рабоч\w*)" + _E + r"|с\s+как\w*\s+вес\w*|(?:ставить|брать|вешать|работать)" + _E
+)
 # Advice about the day, not the day itself: the model answers.
 _PLAN_ADVICE = _rx(
     _W + r"(?:почему|зачем|облегч\w*|замен\w*|подтян\w*|стоит|можно|лучше|думаешь|считаешь|посовет\w*|совет\w*|"
     r"отдохн\w*|отдыхать|пропуст\w*|перенес\w*|перенест\w*|сдвин\w*|вместо|болит|устал\w*|сколько\s+подход\w*|"
     r"прибав\w*|добав\w*|увелич\w*|уменьш\w*|снизить|похудеть|ккал|калори\w*|бел(?:ок|ка)|еда|ест?ь|"
-    r"был\w*|делал\w*|сделал\w*|жал|ел|ела|съел\w*)" + _E
+    r"был\w*|делал\w*|сделал\w*|жал|ел|ела|съел\w*|прошл\w*|вешу|взвеш\w*|вес\w*\s+тела|"
+    r"(?:у\s+меня|мой)\s+вес\w*)" + _E
 )
 
 
@@ -324,7 +330,7 @@ def _when(t: str) -> tuple[tuple[str, Any] | None, str]:
         return ("next", 0), t[: m.start()] + t[m.end():]
     if m := _OFFSET.search(t):
         word = m.group(1)
-        days = 2 if word == "послезавтра" else 1 if word.startswith("завтра") else 0
+        days = 2 if word.startswith("послезавтра") else 1 if word.startswith("завтра") else 0
         return ("offset", days), t[: m.start()] + t[m.end():]
     if m := _WEEKDAY.search(t):
         word = m.group(1)
@@ -352,6 +358,8 @@ def plan_question(text: str) -> PlanQuestion | None:
     when, rest = _when(t)
     rest = " ".join(rest.split())
     weights = bool(_WEIGHTS_Q.search(t))
+    if weights and not _WORKING_WEIGHTS.search(t):  # "какой вес сегодня": the body weight, not the plan
+        weights = False
     if when is not None:
         if weights or _TRAINING_Q.search(t) or _WHAT_ON.match(rest) or when[0] == "next":
             return PlanQuestion(when, weights)

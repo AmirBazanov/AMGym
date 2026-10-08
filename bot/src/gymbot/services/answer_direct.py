@@ -615,6 +615,12 @@ async def _plan_day(
     return (nxt, dw) if dw is not None else None
 
 
+async def next_training_day(session: AsyncSession, user_id: int, ref: nw.ProgramRef, today: date) -> date | None:
+    """"Следующая тренировка": today while it is a program day without a workout yet, else the next one."""
+    trained = await last_training_day(session, user_id, today) == today
+    return nw.training_day_from(ref, today + timedelta(days=1) if trained else today)
+
+
 async def target_day(
     session: AsyncSession, user: User, settings: Settings, tz: ZoneInfo, now_utc: datetime, pq: PlanQuestion | None
 ) -> tuple[date | None, nw.DayWeights] | None:
@@ -626,7 +632,7 @@ async def target_day(
     today = now_utc.astimezone(tz).date()
     asked: date | None = None
     if pq is not None and pq.when is not None:
-        asked = (nw.training_day_from(ref, today + timedelta(days=1)) if pq.when[0] == "next"
+        asked = (await next_training_day(session, user.id, ref, today) if pq.when[0] == "next"
                  else resolve_day(pq.when, today))
     if asked is None:
         trained = await last_training_day(session, user.id, today) == today
@@ -670,7 +676,7 @@ async def plan_reply(
                     return plan_day_text(dw, today, recovery_note(dw, recovering, tz), only=found)
         return None
     if pq.when[0] == "next":
-        asked = nw.training_day_from(ref, today + timedelta(days=1))
+        asked = await next_training_day(session, user.id, ref, today)
         if asked is None:
             return None
     else:

@@ -14,9 +14,10 @@ import re
 _FENCE = re.compile(r"^\s*```")
 _HEADER = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)(?:\s+#+)?\s*$")
 _HRULE = re.compile(r"^\s*([-*_])(?:\s*\1){2,}\s*$")
-_BULLET = re.compile(r"^(\s*)[*+]\s+")
+_BULLET = re.compile(r"^(\s*)(?:\*|\+(?!\s*\d))\s+")  # "+ 2,5 кг к жиму" keeps its plus
 _SEPARATOR_CELL = re.compile(r"^:?-+:?$")
 _CODE_SPAN = re.compile(r"`([^`\n]+)`")
+_URL = re.compile(r"(?:https?://|www\.)[^\s<>()]+")
 _LINK = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
 _BOLD_ITALIC = re.compile(r"(?<![\w*])\*{3}(?=\S)(.+?)(?<=\S)\*{3}(?![\w*])")
 _BOLD_STAR = re.compile(r"(?<![\w*])\*{2}(?=\S)(.+?)(?<=\S)\*{2}(?![\w*])")
@@ -35,8 +36,13 @@ def _inline(text: str) -> str:
         spans.append(match.group(1))
         return f"\x00{len(spans) - 1}\x00"
 
+    def keep_all(match: re.Match[str]) -> str:
+        spans.append(match.group(0))
+        return f"\x00{len(spans) - 1}\x00"
+
     text = _CODE_SPAN.sub(keep, text)  # code content is not touched by the other rules
     text = _LINK.sub(r"\1 (\2)", text)
+    text = _URL.sub(keep_all, text)  # nor are URLs: "https://x.ru/a_b_c" keeps its underscores
     for pattern in (_BOLD_ITALIC, _BOLD_STAR, _BOLD_UNDER, _ITALIC_STAR, _ITALIC_UNDER, _STRIKE):
         text = pattern.sub(r"\1", text)
     return re.sub(r"\x00(\d+)\x00", lambda m: spans[int(m.group(1))], text)

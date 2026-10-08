@@ -65,6 +65,7 @@ def test_only_corrections_revise():
     flags = {user: ParseResult.model_validate_json(a).revises for user, a in EXAMPLES}
     assert flags == {
         "сделал жим лёжа 3 по 10 на 60": False,
+        "сгибания, 2 гантели по 15, 2х10": False,
         "съел 200г куриной грудки и 150г риса": False,
         "плов, касушку и пол лепёшки": False,
         "три куриные самсы": False,
@@ -275,3 +276,12 @@ def test_baseline_messages_carry_catalog_and_fact():
     assert "жим лёжа, румынская тяга" in msgs[0]["content"] and "{catalog}" not in msgs[0]["content"]
     assert msgs[1]["content"] == "Факт: жим лёжа 90 на 8"
     assert "пусто" in build_baseline_messages("x", [])[0]["content"]
+
+
+def test_dumbbell_weight_is_one_dumbbell():
+    # Dumbbells are logged per hand everywhere (gymbot.services.next_weights): "2 гантели по 15" = 15.
+    from gymbot.llm.prompts import BASELINE_SYSTEM_PROMPT
+
+    assert "гантели: одной" in SYSTEM_PROMPT and "вес одной гантели" in BASELINE_SYSTEM_PROMPT
+    answer = next(a for t, a in EXAMPLES if "гантели по 15" in t)
+    assert all(s.weight_kg == 15 for s in ParseResult.model_validate_json(answer).exercises[0].sets)

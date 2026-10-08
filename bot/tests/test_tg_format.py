@@ -111,3 +111,15 @@ def test_plain_text_unchanged():
 def test_idempotent(src):
     once = plain(src)
     assert plain(once) == once
+
+
+def test_plus_before_a_number_is_not_a_bullet():
+    assert plain("+ 2,5 кг к жиму") == "+ 2,5 кг к жиму"
+    assert plain("+2,5 кг к жиму") == "+2,5 кг к жиму"
+    assert plain("+ добавь подход") == "• добавь подход"
+
+
+def test_urls_keep_underscores_and_stars():
+    assert plain("смотри https://example.com/a_b_c и _это_") == "смотри https://example.com/a_b_c и это"
+    assert plain("[видео](https://x.ru/some_video_id)") == "видео (https://x.ru/some_video_id)"
+    assert plain("www.site.ru/_x_") == "www.site.ru/_x_"

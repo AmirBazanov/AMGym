@@ -99,3 +99,30 @@ def test_related_transfer_prefers_same_grip_then_same_equipment():
     target = nw.ProgramExercise("сгибания на бицепс с ez грифом хватом сверху", "medium", nw.Prescription(3, 8, 12))
     s = nw.related(h, target)  # both differ in grip: the same equipment (EZ) wins over the dumbbells
     assert s.related == "сгибания на бицепс с ez грифом хватом снизу"
+
+
+@pytest.mark.parametrize(
+    ("name", "movement", "mods", "unilateral", "per_hand"),
+    [
+        ("жим штанги лёжа узким хватом на трицепс", "bench", {"lying", "close"}, False, False),
+        ("французский жим с ez", "triceps_extension", set(), False, False),
+        ("румынская тяга со штангой", "hinge", {"rdl"}, False, False),
+        ("становая тяга со штангой", "hinge", {"deadlift"}, False, False),
+        ("фронтальный присед со штангой", "squat", {"front"}, False, False),
+        ("болгарские приседания с гантелями", "squat", set(), True, True),
+        ("гоблет-присед с гантелью", "squat", set(), True, False),
+        ("концентрированные сгибания с гантелью", "curl", set(), True, False),
+        ("сгибания с гантелями сидя", "curl", set(), False, True),  # curls ignore seated / standing
+        ("жим гантелей сидя", "overhead_press", {"seated"}, False, True),
+        ("жим гантелей на наклонной скамье", "bench", {"incline"}, False, True),
+    ],
+)
+def test_variants_and_unilateral(name, movement, mods, unilateral, per_hand):
+    assert nw.movement(name) == movement
+    assert nw.modifiers(name) == mods
+    assert (nw.unilateral(name), nw.per_hand(name)) == (unilateral, per_hand)
+
+
+def test_only_whitelisted_movements_transfer_numbers():
+    assert set(nw.TRANSFER_EQUIPMENT) == {"curl", "overhead_press", "bench", "lateral_raise"}
+    assert nw.TRANSFER_EQUIPMENT["lateral_raise"] == frozenset({"dumbbell"})

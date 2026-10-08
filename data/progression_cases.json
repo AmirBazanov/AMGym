@@ -1,5 +1,5 @@
 {
- "about": "Shared weight-suggestion test vectors: bot/src/gymbot/services/next_weights.py (pytest bot/tests/test_next_weights.py) and miniapp/src/progression.ts + plan.ts (vitest). Shapes are the Mini App's (store.ts, program.ts). kind=suggest: suggestWeight, then the related-exercise transfer, then scaleWeight(factor). Dumbbell weights are per hand. source: override | history | baseline | related | hint | none. reasonContains is checked by pytest only (Mini App reasons may differ).",
+ "about": "Shared weight-suggestion test vectors: bot/src/gymbot/services/next_weights.py (pytest bot/tests/test_next_weights.py) and miniapp/src/progression.ts + plan.ts (vitest). Shapes are the Mini App's (store.ts, program.ts). kind=suggest: suggestWeight, then the related-exercise transfer (whitelisted movements and equipment, same variant words, no unilateral, closest name), then scaleWeight(factor). Dumbbell weights are per hand. source: override | history | baseline | related | hint | none. reasonContains is checked by pytest only (Mini App reasons may differ).",
  "cases": [
   {
    "id": "own-double-progression-up",
@@ -3147,6 +3147,999 @@
    "expected": {
     "weight": null,
     "source": "none"
+   }
+  },
+  {
+   "id": "deadlift-to-rdl-no-number",
+   "kind": "suggest",
+   "description": "станова 180×1 -> румынская: another variant, no number",
+   "today": "2026-10-09",
+   "exercise": {
+    "name": "румынская тяга со штангой",
+    "intensity": "medium",
+    "order": 1,
+    "prescription": {
+     "sets": 3,
+     "reps_min": 10,
+     "reps_max": 12,
+     "drop_reps": null,
+     "raw": "3х10-12"
+    }
+   },
+   "history": [
+    {
+     "startedAt": "2026-10-05T15:00:00Z",
+     "exercises": [
+      {
+       "name": "становая тяга со штангой",
+       "sets": [
+        {
+         "weight": 180,
+         "reps": 1,
+         "done": true
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "baselines": [],
+   "overrides": [],
+   "factor": 1,
+   "expected": {
+    "weight": null,
+    "source": "none",
+    "reasonContains": [
+     "другой вариант"
+    ]
+   }
+  },
+  {
+   "id": "back-to-front-squat-no-number",
+   "kind": "suggest",
+   "description": "присед 140×5 -> фронтальный: another variant",
+   "today": "2026-10-09",
+   "exercise": {
+    "name": "фронтальный присед со штангой",
+    "intensity": "medium",
+    "order": 1,
+    "prescription": {
+     "sets": 3,
+     "reps_min": 8,
+     "reps_max": 12,
+     "drop_reps": null,
+     "raw": "3х8-12"
+    }
+   },
+   "history": [
+    {
+     "startedAt": "2026-10-05T15:00:00Z",
+     "exercises": [
+      {
+       "name": "присед со штангой",
+       "sets": [
+        {
+         "weight": 140,
+         "reps": 5,
+         "done": true
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "baselines": [],
+   "overrides": [],
+   "factor": 1,
+   "expected": {
+    "weight": null,
+    "source": "none"
+   }
+  },
+  {
+   "id": "squat-to-bulgarian-no-number",
+   "kind": "suggest",
+   "description": "unilateral: no number; two dumbbells are still per hand",
+   "today": "2026-10-09",
+   "exercise": {
+    "name": "болгарские приседания с гантелями",
+    "intensity": "medium",
+    "order": 1,
+    "prescription": {
+     "sets": 3,
+     "reps_min": 8,
+     "reps_max": 12,
+     "drop_reps": null,
+     "raw": "3х8-12"
+    }
+   },
+   "history": [
+    {
+     "startedAt": "2026-10-05T15:00:00Z",
+     "exercises": [
+      {
+       "name": "присед со штангой",
+       "sets": [
+        {
+         "weight": 140,
+         "reps": 5,
+         "done": true
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "baselines": [],
+   "overrides": [],
+   "factor": 1,
+   "expected": {
+    "weight": null,
+    "source": "none",
+    "perHand": true,
+    "reasonContains": [
+     "на одну руку или ногу"
+    ]
+   }
+  },
+  {
+   "id": "squat-to-goblet-no-number",
+   "kind": "suggest",
+   "description": "goblet: one dumbbell in both hands, never «на руку», no number",
+   "today": "2026-10-09",
+   "exercise": {
+    "name": "гоблет-присед с гантелью",
+    "intensity": "medium",
+    "order": 1,
+    "prescription": {
+     "sets": 3,
+     "reps_min": 8,
+     "reps_max": 12,
+     "drop_reps": null,
+     "raw": "3х8-12"
+    }
+   },
+   "history": [
+    {
+     "startedAt": "2026-10-05T15:00:00Z",
+     "exercises": [
+      {
+       "name": "присед со штангой",
+       "sets": [
+        {
+         "weight": 140,
+         "reps": 5,
+         "done": true
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "baselines": [],
+   "overrides": [],
+   "factor": 1,
+   "expected": {
+    "weight": null,
+    "source": "none",
+    "perHand": false
+   }
+  },
+  {
+   "id": "close-grip-bench-is-not-an-extension",
+   "kind": "suggest",
+   "description": "a press «на трицепс» is a press: nothing for the French press",
+   "today": "2026-10-09",
+   "exercise": {
+    "name": "французский жим с ez",
+    "intensity": "medium",
+    "order": 1,
+    "prescription": {
+     "sets": 3,
+     "reps_min": 8,
+     "reps_max": 12,
+     "drop_reps": null,
+     "raw": "3х8-12"
+    }
+   },
+   "history": [
+    {
+     "startedAt": "2026-10-05T15:00:00Z",
+     "exercises": [
+      {
+       "name": "жим штанги лёжа узким хватом на трицепс",
+       "sets": [
+        {
+         "weight": 90,
+         "reps": 5,
+         "done": true
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "baselines": [],
+   "overrides": [],
+   "factor": 1,
+   "expected": {
+    "weight": null,
+    "source": "none"
+   }
+  },
+  {
+   "id": "seated-press-dumbbells-to-barbell",
+   "kind": "suggest",
+   "description": "the same seated press: 12,5×12 -> 17,5 × 2 × 0,85 = 29,75 × 64,3 % = 19,1 -> 20",
+   "today": "2026-10-09",
+   "exercise": {
+    "name": "жим штанги сидя",
+    "intensity": "medium",
+    "order": 1,
+    "prescription": {
+     "sets": 3,
+     "reps_min": 8,
+     "reps_max": 12,
+     "drop_reps": null,
+     "raw": "3х8-12"
+    }
+   },
+   "history": [
+    {
+     "startedAt": "2026-10-07T14:00:00Z",
+     "exercises": [
+      {
+       "name": "сгибания с гантелями на бицепс с супинацией",
+       "sets": [
+        {
+         "weight": 20,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 20,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 20,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 17.5,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 17.5,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 15,
+         "reps": 8,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "сгибания с гантелями на бицепс с пронацией",
+       "sets": [
+        {
+         "weight": 12.5,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 10,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 10,
+         "reps": 10,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "французский жим в блоке из-за головы",
+       "sets": [
+        {
+         "weight": 60,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 60,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 60,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 60,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 50,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 40,
+         "reps": 10,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "жим гантелей сидя",
+       "sets": [
+        {
+         "weight": 12.5,
+         "reps": 12,
+         "done": true
+        },
+        {
+         "weight": 12.5,
+         "reps": 12,
+         "done": true
+        },
+        {
+         "weight": 12.5,
+         "reps": 12,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "отведения на дельты",
+       "sets": [
+        {
+         "weight": 7.5,
+         "reps": 15,
+         "done": true
+        },
+        {
+         "weight": 7.5,
+         "reps": 15,
+         "done": true
+        },
+        {
+         "weight": 7.5,
+         "reps": 10,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "отведения пек дек на заднюю дельту",
+       "sets": [
+        {
+         "weight": 35,
+         "reps": 12,
+         "done": true
+        },
+        {
+         "weight": 50,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 50,
+         "reps": 10,
+         "done": true
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "baselines": [],
+   "overrides": [],
+   "factor": 1,
+   "expected": {
+    "weight": 20,
+    "source": "related",
+    "reasonContains": [
+     "× 2 × 0,85"
+    ]
+   }
+  },
+  {
+   "id": "seated-to-standing-press-no-number",
+   "kind": "suggest",
+   "description": "seated vs standing: another variant",
+   "today": "2026-10-09",
+   "exercise": {
+    "name": "жим штанги стоя",
+    "intensity": "medium",
+    "order": 1,
+    "prescription": {
+     "sets": 3,
+     "reps_min": 8,
+     "reps_max": 12,
+     "drop_reps": null,
+     "raw": "3х8-12"
+    }
+   },
+   "history": [
+    {
+     "startedAt": "2026-10-07T14:00:00Z",
+     "exercises": [
+      {
+       "name": "сгибания с гантелями на бицепс с супинацией",
+       "sets": [
+        {
+         "weight": 20,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 20,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 20,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 17.5,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 17.5,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 15,
+         "reps": 8,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "сгибания с гантелями на бицепс с пронацией",
+       "sets": [
+        {
+         "weight": 12.5,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 10,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 10,
+         "reps": 10,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "французский жим в блоке из-за головы",
+       "sets": [
+        {
+         "weight": 60,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 60,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 60,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 60,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 50,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 40,
+         "reps": 10,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "жим гантелей сидя",
+       "sets": [
+        {
+         "weight": 12.5,
+         "reps": 12,
+         "done": true
+        },
+        {
+         "weight": 12.5,
+         "reps": 12,
+         "done": true
+        },
+        {
+         "weight": 12.5,
+         "reps": 12,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "отведения на дельты",
+       "sets": [
+        {
+         "weight": 7.5,
+         "reps": 15,
+         "done": true
+        },
+        {
+         "weight": 7.5,
+         "reps": 15,
+         "done": true
+        },
+        {
+         "weight": 7.5,
+         "reps": 10,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "отведения пек дек на заднюю дельту",
+       "sets": [
+        {
+         "weight": 35,
+         "reps": 12,
+         "done": true
+        },
+        {
+         "weight": 50,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 50,
+         "reps": 10,
+         "done": true
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "baselines": [],
+   "overrides": [],
+   "factor": 1,
+   "expected": {
+    "weight": null,
+    "source": "none"
+   }
+  },
+  {
+   "id": "flat-to-incline-no-number",
+   "kind": "suggest",
+   "description": "flat vs incline: another variant",
+   "today": "2026-10-09",
+   "exercise": {
+    "name": "жим гантелей на наклонной скамье",
+    "intensity": "medium",
+    "order": 1,
+    "prescription": {
+     "sets": 3,
+     "reps_min": 8,
+     "reps_max": 12,
+     "drop_reps": null,
+     "raw": "3х8-12"
+    }
+   },
+   "history": [
+    {
+     "startedAt": "2026-10-05T15:00:00Z",
+     "exercises": [
+      {
+       "name": "жим штанги лёжа",
+       "sets": [
+        {
+         "weight": 100,
+         "reps": 5,
+         "done": true
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "baselines": [],
+   "overrides": [],
+   "factor": 1,
+   "expected": {
+    "weight": null,
+    "source": "none"
+   }
+  },
+  {
+   "id": "flat-bench-barbell-to-dumbbells",
+   "kind": "suggest",
+   "description": "the same flat bench: 100×5 (116,7) ÷ 2 × 0,85 = 49,6 × 64,3 % = 31,9 -> 32 per hand",
+   "today": "2026-10-09",
+   "exercise": {
+    "name": "жим гантелей лёжа",
+    "intensity": "medium",
+    "order": 1,
+    "prescription": {
+     "sets": 3,
+     "reps_min": 8,
+     "reps_max": 12,
+     "drop_reps": null,
+     "raw": "3х8-12"
+    }
+   },
+   "history": [
+    {
+     "startedAt": "2026-10-05T15:00:00Z",
+     "exercises": [
+      {
+       "name": "жим штанги лёжа",
+       "sets": [
+        {
+         "weight": 100,
+         "reps": 5,
+         "done": true
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "baselines": [],
+   "overrides": [],
+   "factor": 1,
+   "expected": {
+    "weight": 32,
+    "source": "related",
+    "perHand": true
+   }
+  },
+  {
+   "id": "closest-variant-not-strongest",
+   "kind": "suggest",
+   "description": "two dumbbell curls: the one sharing more words (на бицепс сидя 18×8) wins over the stronger стоя 22×8: 22,8 × 1,7 × 64,3 % = 24,9 -> 25",
+   "today": "2026-10-09",
+   "exercise": {
+    "name": "сгибания на бицепс с ez грифом",
+    "intensity": "medium",
+    "order": 1,
+    "prescription": {
+     "sets": 3,
+     "reps_min": 8,
+     "reps_max": 12,
+     "drop_reps": null,
+     "raw": "3х8-12"
+    }
+   },
+   "history": [
+    {
+     "startedAt": "2026-10-05T15:00:00Z",
+     "exercises": [
+      {
+       "name": "сгибания с гантелями стоя",
+       "sets": [
+        {
+         "weight": 22,
+         "reps": 8,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "сгибания с гантелями на бицепс сидя",
+       "sets": [
+        {
+         "weight": 18,
+         "reps": 8,
+         "done": true
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "baselines": [],
+   "overrides": [],
+   "factor": 1,
+   "expected": {
+    "weight": 25,
+    "source": "related",
+    "reasonContains": [
+     "сидя"
+    ]
+   }
+  },
+  {
+   "id": "lateral-raise-dumbbells-only",
+   "kind": "suggest",
+   "description": "the same raise on dumbbells: 10×12 (14) × 60 % = 8,4 -> 8 per hand",
+   "today": "2026-10-09",
+   "exercise": {
+    "name": "махи гантелями в стороны",
+    "intensity": "medium",
+    "order": 1,
+    "prescription": {
+     "sets": 3,
+     "reps_min": 12,
+     "reps_max": 15,
+     "drop_reps": null,
+     "raw": "3х12-15"
+    }
+   },
+   "history": [
+    {
+     "startedAt": "2026-10-05T15:00:00Z",
+     "exercises": [
+      {
+       "name": "отведения гантелей в стороны",
+       "sets": [
+        {
+         "weight": 10,
+         "reps": 12,
+         "done": true
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "baselines": [],
+   "overrides": [],
+   "factor": 1,
+   "expected": {
+    "weight": 8,
+    "source": "related",
+    "perHand": true
+   }
+  },
+  {
+   "id": "lateral-raise-dumbbells-to-cable-no-number",
+   "kind": "suggest",
+   "description": "dumbbells -> cable: no number",
+   "today": "2026-10-09",
+   "exercise": {
+    "name": "отведения в кроссовере",
+    "intensity": "medium",
+    "order": 1,
+    "prescription": {
+     "sets": 3,
+     "reps_min": 12,
+     "reps_max": 15,
+     "drop_reps": null,
+     "raw": "3х12-15"
+    }
+   },
+   "history": [
+    {
+     "startedAt": "2026-10-05T15:00:00Z",
+     "exercises": [
+      {
+       "name": "отведения гантелей в стороны",
+       "sets": [
+        {
+         "weight": 10,
+         "reps": 12,
+         "done": true
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "baselines": [],
+   "overrides": [],
+   "factor": 1,
+   "expected": {
+    "weight": null,
+    "source": "none"
+   }
+  },
+  {
+   "id": "concentration-curl-no-number",
+   "kind": "suggest",
+   "description": "concentration curl: one arm, one dumbbell",
+   "today": "2026-10-09",
+   "exercise": {
+    "name": "концентрированные сгибания с гантелью",
+    "intensity": "medium",
+    "order": 1,
+    "prescription": {
+     "sets": 3,
+     "reps_min": 8,
+     "reps_max": 12,
+     "drop_reps": null,
+     "raw": "3х8-12"
+    }
+   },
+   "history": [
+    {
+     "startedAt": "2026-10-07T14:00:00Z",
+     "exercises": [
+      {
+       "name": "сгибания с гантелями на бицепс с супинацией",
+       "sets": [
+        {
+         "weight": 20,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 20,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 20,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 17.5,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 17.5,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 15,
+         "reps": 8,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "сгибания с гантелями на бицепс с пронацией",
+       "sets": [
+        {
+         "weight": 12.5,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 10,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 10,
+         "reps": 10,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "французский жим в блоке из-за головы",
+       "sets": [
+        {
+         "weight": 60,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 60,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 60,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 60,
+         "reps": 8,
+         "done": true
+        },
+        {
+         "weight": 50,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 40,
+         "reps": 10,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "жим гантелей сидя",
+       "sets": [
+        {
+         "weight": 12.5,
+         "reps": 12,
+         "done": true
+        },
+        {
+         "weight": 12.5,
+         "reps": 12,
+         "done": true
+        },
+        {
+         "weight": 12.5,
+         "reps": 12,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "отведения на дельты",
+       "sets": [
+        {
+         "weight": 7.5,
+         "reps": 15,
+         "done": true
+        },
+        {
+         "weight": 7.5,
+         "reps": 15,
+         "done": true
+        },
+        {
+         "weight": 7.5,
+         "reps": 10,
+         "done": true
+        }
+       ]
+      },
+      {
+       "name": "отведения пек дек на заднюю дельту",
+       "sets": [
+        {
+         "weight": 35,
+         "reps": 12,
+         "done": true
+        },
+        {
+         "weight": 50,
+         "reps": 10,
+         "done": true
+        },
+        {
+         "weight": 50,
+         "reps": 10,
+         "done": true
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "baselines": [],
+   "overrides": [],
+   "factor": 1,
+   "expected": {
+    "weight": null,
+    "source": "none",
+    "perHand": false
    }
   },
   {

@@ -149,3 +149,35 @@ def test_plan_question_leaves_advice_and_the_past_to_others(text):
 def test_past_date_with_month_is_not_the_plan():
     q = plan_question("какие веса 7.10")
     assert q is not None and resolve_day(q.when, TODAY) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "какой у меня вес сегодня", "какой вес тела сегодня", "какой вес сегодня", "сколько я вешу сегодня",
+        "как прошла тренировка сегодня", "что на завтрак", "что съесть на завтрак завтра",
+    ],
+)
+def test_plan_question_review_false_positives(text):
+    assert plan_question(text) is None
+
+
+@pytest.mark.parametrize("text", ["какие веса 12.5", "какие веса 7.5 кг", "что у меня 12.5"])
+def test_weights_are_not_dates(text):
+    q = plan_question(text)
+    assert q is None or q.when is None
+
+
+def test_working_weight_questions_still_count():
+    for text in ("какой вес ставить завтра", "какой рабочий вес завтра", "с каким весом завтра", "какие веса завтра"):
+        q = plan_question(text)
+        assert q is not None and q.weights and q.when == ("offset", 1), text
+    assert plan_question("какая завтрашняя тренировка").when == ("offset", 1)
+
+
+async def test_next_training_is_today_until_trained(db, settings):
+    friday_morning = datetime(2026, 10, 9, 5, tzinfo=UTC)  # 08:00 in Moscow, Friday is a program day
+    async with db() as s:
+        await _owner(s)
+    reply = await answer.respond(db, 42, "Amir", "какая следующая тренировка", [], settings, NoModel(), friday_morning)
+    assert reply.text.startswith("Сегодня, пт 09.10 — тренировка по программе")

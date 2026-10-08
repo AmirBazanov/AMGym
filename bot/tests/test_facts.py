@@ -172,8 +172,26 @@ def test_help_mentions_facts():
         "примерный максимум 95 кг",
     ],
 )
-def test_derived_offer_always(offer):
-    assert facts.derived_offer(offer, "что угодно 100 120 90 80 105 110 95") is True
+def test_derived_offer_markers(offer):
+    # A model marker about a lift is derived unless the user said the number himself.
+    assert facts.derived_offer(offer, "какая завтра тренировка и какие веса") is True
+    assert facts.derived_offer(offer, "что угодно 100 120 90 80 105 110 95") is False
+
+
+@pytest.mark.parametrize(
+    ("offer", "said"),
+    [
+        ("мой 1ПМ в жиме 100", "мой 1ПМ в жиме 100 кг"),
+        ("мой 1ПМ в жиме 100", "максимум в жиме сотка, ровно 100"),
+        ("пью ≈ 2 л воды", "пью литра два воды"),
+        ("колено ~90°", "колено сгибается градусов на 90"),
+        ("жим лёжа ~80 кг", "жму примерно восемьдесят"),
+        ("присед ~125 кг", "присед сто двадцать пять"),
+        ("гантели ~7.5 кг", "отведения с гантелями семь с половиной"),
+    ],
+)
+def test_derived_offer_keeps_what_the_user_said(offer, said):
+    assert facts.derived_offer(offer, said) is False
 
 
 @pytest.mark.parametrize(

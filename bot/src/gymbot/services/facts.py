@@ -175,21 +175,55 @@ def _numbers(text: str) -> set[float]:
     return {float(n.replace(",", ".")) for n in _NUMBER.findall(text)}
 
 
+_SPOKEN = {
+    "ноль": 0, "один": 1, "одна": 1, "одну": 1, "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5, "шесть": 6,
+    "семь": 7, "восемь": 8, "девять": 9, "десять": 10, "одиннадцать": 11, "двенадцать": 12, "тринадцать": 13,
+    "четырнадцать": 14, "пятнадцать": 15, "шестнадцать": 16, "семнадцать": 17, "восемнадцать": 18,
+    "девятнадцать": 19, "двадцать": 20, "тридцать": 30, "сорок": 40, "пятьдесят": 50, "шестьдесят": 60,
+    "семьдесят": 70, "восемьдесят": 80, "девяносто": 90, "сто": 100, "двести": 200, "триста": 300,
+    "четыреста": 400, "пятьсот": 500,
+}
+
+
+def _spoken(text: str) -> set[float]:
+    """Numbers said in words (voice messages): «сто двадцать пять» -> 125, «семь с половиной» -> 7.5."""
+    out: set[float] = set()
+    run: float | None = None
+    tokens = re.findall(r"[а-я]+", text)
+    for k, w in enumerate(tokens):
+        if w in _SPOKEN:
+            run = (run or 0) + _SPOKEN[w]
+            continue
+        if run is not None and w == "с" and tokens[k + 1: k + 2] == ["половиной"]:
+            run += 0.5
+        if run is not None and w not in ("с", "половиной"):
+            out.add(run)
+            run = None
+    if run is not None:
+        out.add(run)
+    return out
+
+
+def _said_numbers(text: str) -> set[float]:
+    t = text.casefold().replace("ё", "е")
+    return _numbers(t) | _spoken(t)
+
+
 def derived_offer(offer: str, said: str) -> bool:
     """True when the offered fact («Запомнить? «…»») is a number the model computed, not the user's own words.
 
     Incident: the diary answer offered «Запомнить: 1ПМ … на штанге ~50 кг», its own estimate, as if the
-    user had said it. Such an offer must not be shown. Compared lower-cased, ё = е.
+    user had said it. Such an offer is not shown. Compared lower-cased, ё = е.
 
-    - Always derived: 1ПМ / 1RM / e1RM, «Эпли», «≈», «по расчёту», «расчётн…», «оценочн…», «примерный максимум».
-    - With «~» or «%» about a lift or a weight in kg (`_LIFT`): derived only if some number of the offer
-      (12,5 == 12.5) is absent from `said`, the user's own message («жим ~80 кг» after «жму примерно 80»
-      is the user's number). Food portions («самса ~150 г», «творог 5 %») are never derived here.
-    - Anything else is not derived.
+    Derived only when all three hold: the offer is about a lift or a weight in kg (`_LIFT`); it has a model
+    marker (1ПМ / 1RM / e1RM, «Эпли», «≈», «~», «%», «по расчёту», «расчётн…», «оценочн…», «примерный
+    максимум»); and one of its numbers (12,5 == 12.5; the «1» of «1ПМ» does not count) is not in `said`,
+    the user's own message, digits or words («примерно восемьдесят» = 80). So «мой 1ПМ в жиме 100» after
+    the user said it, «≈ 2 л воды», «колено ~90°» and food portions («самса ~150 г») are still offered.
     """
     text = " ".join(offer.casefold().replace("ё", "е").split())
-    if _DERIVED_WORDS.search(text):
-        return True
-    if ("~" in text or "%" in text) and _LIFT.search(text):
-        return not _numbers(text) <= _numbers(said)
-    return False
+    marked = bool(_DERIVED_WORDS.search(text)) or any(c in text for c in "~%≈")
+    if not marked or not _LIFT.search(text):
+        return False
+    numbers = _numbers(re.sub(r"(?<!\w)(?:1\s?пм|1\s?rm|e1rm)(?!\w)", " ", text))
+    return not numbers <= _said_numbers(said)
