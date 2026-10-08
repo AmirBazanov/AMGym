@@ -5,7 +5,17 @@ import { describe, expect, it } from 'vitest'
 import raw from '../../data/progression_cases.json'
 import { scaleWeight, suggestFor } from './plan'
 import type { Intensity, Prescription, ProgramExercise } from './program'
-import { equipment, grip, movement, related, roundToStep, type Source } from './progression'
+import {
+  equipment,
+  grip,
+  modifiers,
+  movement,
+  perHand,
+  related,
+  roundToStep,
+  unilateral,
+  type Source,
+} from './progression'
 import type { Baseline, WeightOverride, Workout } from './store'
 
 interface CaseSet {
@@ -75,7 +85,7 @@ function toExercise(e: SuggestCase['exercise']): ProgramExercise {
 
 describe('shared progression vectors (data/progression_cases.json)', () => {
   it('has every vector, every kind and every source', () => {
-    expect(CASES).toHaveLength(37)
+    expect(CASES).toHaveLength(50)
     expect(new Set(CASES.map((c) => c.kind))).toEqual(new Set(['suggest', 'roundToStep', 'scaleWeight']))
     const sources = new Set(CASES.flatMap((c) => (c.kind === 'suggest' ? [c.expected.source] : [])))
     expect(sources).toEqual(new Set(['override', 'history', 'baseline', 'related', 'hint', 'none']))
@@ -145,6 +155,27 @@ describe('name classifiers (as next_weights.py)', () => {
 
   it.each(TABLE)('%s', (name, eq, mv, g) => {
     expect([equipment(name), movement(name), grip(name)]).toEqual([eq, mv, g])
+  })
+
+  // test_variants_and_unilateral in the pytest file.
+  const VARIANTS: [string, string, string[], boolean, boolean][] = [
+    ['жим штанги лёжа узким хватом на трицепс', 'bench', ['close', 'lying'], false, false],
+    ['французский жим с ez', 'triceps_extension', [], false, false],
+    ['румынская тяга со штангой', 'hinge', ['rdl'], false, false],
+    ['становая тяга со штангой', 'hinge', ['deadlift'], false, false],
+    ['фронтальный присед со штангой', 'squat', ['front'], false, false],
+    ['болгарские приседания с гантелями', 'squat', [], true, true],
+    ['гоблет-присед с гантелью', 'squat', [], true, false],
+    ['концентрированные сгибания с гантелью', 'curl', [], true, false],
+    ['сгибания с гантелями сидя', 'curl', [], false, true], // curls ignore seated / standing
+    ['жим гантелей сидя', 'overhead_press', ['seated'], false, true],
+    ['жим гантелей на наклонной скамье', 'bench', ['incline'], false, true],
+  ]
+
+  it.each(VARIANTS)('variant of %s', (name, mv, mods, oneSide, hand) => {
+    expect(movement(name)).toBe(mv)
+    expect([...modifiers(name)].sort()).toEqual([...mods].sort())
+    expect([unilateral(name), perHand(name)]).toEqual([oneSide, hand])
   })
 
   it('prefers the same grip, then the same equipment', () => {

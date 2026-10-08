@@ -320,15 +320,63 @@ const MOVEMENT_RX: [Movement, RegExp][] = [
     ),
   ],
   ['lateral_raise', rx(`отведен|${L}мах(?:и|ов)(?![а-я])`)],
-  ['triceps_extension', rx('француз|разгибан|трицепс')],
+  ['triceps_extension', rx('француз|разгибан|трицепс')], // not a press "на трицепс": see movement()
   ['curl', rx('сгибан|бицепс|молот')],
-  ['bench', rx(String.raw`жим${W}*\s+(?:${W}+\s+){0,2}?леж|бенч`)],
+  [
+    'bench',
+    rx(String.raw`жим${W}*\s+(?:${W}+\s+){0,2}?леж|бенч|жим${W}*\s+(?:${W}+\s+){0,3}?(?:наклонн|под\s+углом)`),
+  ],
   ['overhead_press', rx(String.raw`жим${W}*\s+(?:${W}+\s+){0,3}?(?:сидя|стоя|над\s+голов)|армейск`)],
   ['row', rx(String.raw`тяг${W}*\s+(?:${W}+\s+){0,3}?(?:горизонт|к\s+поясу|в\s+наклон|нижн)`)],
   ['pulldown', rx(String.raw`тяг${W}*\s+(?:${W}+\s+){0,3}?(?:вертикал|верхн)|подтягиван`)],
   ['squat', rx('присед')],
   ['hinge', rx('румын|станов')],
 ]
+const PRESS_RX = rx(`${L}жим`)
+/** Variant words: two names transfer only with the same set (curls ignore seated / standing). */
+export type Modifier =
+  | 'incline'
+  | 'decline'
+  | 'front'
+  | 'seated'
+  | 'standing'
+  | 'close'
+  | 'wide'
+  | 'sumo'
+  | 'behind'
+  | 'overhead'
+  | 'lying'
+  | 'scott'
+  | 'arnold'
+  | 'hack'
+  | 'rdl'
+  | 'deadlift'
+  | 'deficit'
+  | 'pause'
+const MODIFIER_RX: [Modifier, RegExp][] = [
+  ['incline', rx(String.raw`наклонн|под\s+углом|накл${W}*\s+скам`)],
+  ['decline', rx(String.raw`головой\s+вниз|обратн${W}*\s+наклон|отрицательн${W}*\s+наклон`)],
+  ['front', rx('фронтал')],
+  ['seated', rx('сидя')],
+  ['standing', rx('стоя|армейск')],
+  ['close', rx('узк')],
+  ['wide', rx('широк')],
+  ['sumo', rx('сумо')],
+  ['behind', rx(String.raw`из[\s-]за\s+голов|за\s+голов`)],
+  ['overhead', rx(String.raw`над\s+голов`)],
+  ['lying', rx('леж')],
+  ['scott', rx('скотт|парт')],
+  ['arnold', rx('арнольд')],
+  ['hack', rx(`${L}(?:гакк?|хакк?)`)],
+  ['rdl', rx('румын')],
+  ['deadlift', rx('станов')],
+  ['deficit', rx('дефицит')],
+  ['pause', rx('пауз')],
+]
+const CURL_IGNORES: readonly Modifier[] = ['seated', 'standing']
+// One arm / one leg, or one dumbbell held in both hands: no number from (or to) anything else.
+const UNILATERAL_RX = rx(String.raw`болгарск|выпад|гоблет|одной\s+рук|одной\s+ног|одноруч|концентрир|сплит|пистолет|на\s+одну\s+`)
+const SINGLE_DUMBBELL_RX = rx(String.raw`гоблет|одной\s+гантел|одну\s+гантел|гантелью`)
 const PRONATED_RX = rx(String.raw`пронац|хват${W}*\s+сверху|обратн${W}*\s+хват`)
 const NEUTRAL_RX = rx('молот|нейтрал')
 
@@ -341,7 +389,21 @@ export function equipment(name: string): Equipment | null {
 export function movement(name: string): Movement | null {
   const key = normName(name)
   if (LEGS_RX.test(key)) return null
-  return MOVEMENT_RX.find(([, r]) => r.test(key))?.[0] ?? null
+  // "жим узким хватом на трицепс" is a press, not an extension; the French press is.
+  const press = PRESS_RX.test(key) && !key.includes('француз')
+  return MOVEMENT_RX.find(([m, r]) => r.test(key) && !(press && m === 'triceps_extension'))?.[0] ?? null
+}
+
+/** Variant words of the name, sorted (see MODIFIER_RX); curls ignore seated / standing. */
+export function modifiers(name: string): Modifier[] {
+  const key = normName(name)
+  const curl = movement(name) === 'curl'
+  return MODIFIER_RX.filter(([m, r]) => r.test(key) && !(curl && CURL_IGNORES.includes(m))).map(([m]) => m)
+}
+
+/** One arm or one leg (болгарские, выпады, гоблет, одной рукой, концентрированные): never a transferred number. */
+export function unilateral(name: string): boolean {
+  return UNILATERAL_RX.test(normName(name))
 }
 
 /** Curls only: pronated / neutral / supinated (the default curl); null for other movements. */
@@ -353,9 +415,9 @@ export function grip(name: string): Grip | null {
   return 'supinated'
 }
 
-/** Dumbbell weights are per hand everywhere: in the history and in suggestions. */
+/** Dumbbells are logged per hand; one dumbbell in both hands (гоблет, «гантелью») is not «на руку». */
 export function perHand(name: string): boolean {
-  return equipment(name) === 'dumbbell'
+  return equipment(name) === 'dumbbell' && !SINGLE_DUMBBELL_RX.test(normName(name))
 }
 
 // ---- related exercises ----
@@ -386,8 +448,14 @@ const EQ_FACTOR_TEXT: Record<string, string> = {
   '0.4': '÷ 2 × 0,8',
   '0.9': '× 0,9',
 }
-const FREE_WEIGHTS: readonly (Equipment | null)[] = ['dumbbell', 'barbell', 'ez', 'smith']
 const HINT_EQUIPMENT: readonly (Equipment | null)[] = ['cable', 'machine']
+/** Movement -> equipment between which numbers transfer; other movements never get a number. */
+const TRANSFER_EQUIPMENT: Partial<Record<Movement, readonly Equipment[]>> = {
+  curl: ['dumbbell', 'barbell', 'ez'],
+  overhead_press: ['dumbbell', 'barbell', 'smith'],
+  bench: ['dumbbell', 'barbell', 'smith'],
+  lateral_raise: ['dumbbell'],
+}
 /** Reverse (pronated) curls are 60-70 % of supinated ones: the middle. */
 const REVERSE_GRIP = 0.65
 /** A transferred 1RM is an estimate: never the "heavy" share of it. */
@@ -425,16 +493,32 @@ function num1(n: number): string {
   return formatKg(Math.round(n * 10) / 10)
 }
 
+/** Content words of a name (3+ letters), cut to 6 letters: rough stems. */
+function nameWords(name: string): string[] {
+  return (normName(name).match(/[а-яa-z0-9]+/g) ?? []).filter((w) => w.length >= 3).map((w) => w.slice(0, 6))
+}
+
+/** Words of `a` also in `b` (equal, or one a prefix of the other when both have 4+ letters). */
+function sharedWords(a: string, b: string): number {
+  const wb = nameWords(b)
+  return nameWords(a).filter((w) =>
+    wb.some((x) => w === x || (Math.min(w.length, x.length) >= 4 && (w.startsWith(x) || x.startsWith(w)))),
+  ).length
+}
+
 const NO_NUMBER = 'истории нет: вес по ощущениям, 2 повтора в запасе'
 
 /**
  * The transfer from a related exercise, for an exercise without its own history and baseline (one hop,
  * real history only): "related" with a weight, "hint" with a starting point, or "none" with a reason.
- * - Same movement (from the name). Free weights convert from the related exercise's best Epley 1RM with
- *   EQ_FACTORS; a pronated curl from a non-pronated one × REVERSE_GRIP; the share never "heavy".
- * - Cables and machines never convert: between two of the same kind a hint, the first set of the related
- *   exercise's last session; otherwise no number. Unknown equipment is never "the same equipment".
- * - Source preference: same grip > same equipment > the highest 1RM > the name.
+ * The same checks, in the same order, as next_weights.py `related`:
+ * - Same movement (from the name). Unilateral or single-dumbbell on either side: no number, no hint.
+ * - Cable, machine or unknown equipment on either side: between two cables (or two machines) a hint, the
+ *   first set of the related exercise's last session; otherwise no number.
+ * - Different variant words (`modifiers`): no number.
+ * - Whitelisted pairs only (TRANSFER_EQUIPMENT): the related exercise's best Epley 1RM × EQ_FACTORS; a
+ *   pronated curl from a non-pronated one × REVERSE_GRIP; the share never "heavy".
+ * - Candidates: same grip > same equipment > the most shared name words > the most recent > the name.
  */
 export function related(history: Workout[], exercise: ProgramExercise): Suggestion {
   const { name } = exercise
@@ -442,32 +526,43 @@ export function related(history: Workout[], exercise: ProgramExercise): Suggesti
   const eqT = equipment(name)
   const gripT = grip(name)
   if (mv == null) return make(name, null, NO_NUMBER, 'none')
-  type Num = { key: (boolean | number | string)[]; src: string; factor: number; rec: Record1rm; g: number }
-  type Hint = { key: (boolean | number | string)[]; src: string; first: number }
+  type Key = (boolean | number | string)[]
+  type Num = { key: Key; src: string; factor: number; rec: Record1rm; g: number }
+  type Hint = { key: Key; src: string; first: number }
   const numbers: Num[] = []
   const hints: Hint[] = []
-  const others: string[] = []
+  const others: { src: string; why: string }[] = []
   const order = historyNames(history)
   const self = normName(name)
+  const modsT = modifiers(name).join(' ')
+  const oneSideT = unilateral(name)
+  const allowed = TRANSFER_EQUIPMENT[mv] ?? []
+  const what = (eq: Equipment | null) => (eq ? EQUIPMENT_NAMES[eq] : 'другой снаряд')
   for (const src of order) {
     if (normName(src) === self || movement(src) !== mv) continue
     const rec = bestE1rm(history, src)
     if (!rec) continue
     const eqS = equipment(src)
     const gripS = grip(src)
-    const gripDiffers = gripT !== gripS
-    if (FREE_WEIGHTS.includes(eqT) && FREE_WEIGHTS.includes(eqS)) {
+    const key: Key = [gripT !== gripS, eqT !== eqS, -sharedWords(name, src), order.indexOf(src), src]
+    if (oneSideT || unilateral(src)) {
+      others.push({ src, why: 'упражнение на одну руку или ногу' })
+    } else if (HINT_EQUIPMENT.includes(eqT) || HINT_EQUIPMENT.includes(eqS) || eqT == null || eqS == null) {
+      // Cables and machines: a starting point from the same kind of equipment (any variant), no number.
+      const first = eqT === eqS && HINT_EQUIPMENT.includes(eqT) ? lastSameSession(history, src)?.[0]?.weight : null
+      if (first) hints.push({ key, src, first })
+      else others.push({ src, why: what(eqS) })
+    } else if (modifiers(src).join(' ') !== modsT) {
+      others.push({ src, why: 'другой вариант упражнения' })
+    } else if (allowed.includes(eqT) && allowed.includes(eqS) && (eqT === eqS || `${eqS}>${eqT}` in EQ_FACTORS)) {
       const factor = eqT === eqS ? 1 : EQ_FACTORS[`${eqS}>${eqT}`]
-      if (factor == null) {
-        others.push(src)
-        continue
-      }
       const g = gripT === 'pronated' && gripS !== 'pronated' ? REVERSE_GRIP : 1
-      numbers.push({ key: [gripDiffers, eqT !== eqS, -rec.e1rm, src], src, factor, rec, g })
-    } else if (eqT != null && eqT === eqS && HINT_EQUIPMENT.includes(eqT)) {
-      const first = lastSameSession(history, src)?.[0]?.weight
-      if (first) hints.push({ key: [gripDiffers, order.indexOf(src), src], src, first })
-    } else others.push(src)
+      numbers.push({ key, src, factor, rec, g })
+    } else if (eqT === eqS) {
+      others.push({ src, why: 'другое упражнение' })
+    } else {
+      others.push({ src, why: what(eqS) })
+    }
   }
   if (numbers.length) {
     const { src, factor, rec, g } = numbers.reduce((a, b) => (cmpKey(b.key, a.key) < 0 ? b : a))
@@ -496,11 +591,9 @@ export function related(history: Workout[], exercise: ProgramExercise): Suggesti
     return make(name, null, reason, 'hint', { hintKg: first, related: src })
   }
   if (others.length) {
-    const src = others[0]
-    const eqS = equipment(src)
-    const what = eqS ? EQUIPMENT_NAMES[eqS] : 'другой снаряд'
+    const { src, why } = others[0]
     const reason =
-      `подбери по ощущениям: вес из «${src}» (${what}) сюда не переносится; ` +
+      `подбери по ощущениям: вес из «${src}» (${why}) сюда не переносится; ` +
       'начни легко, рабочий вес — с 2 повторами в запасе'
     return make(name, null, reason, 'none', { related: src })
   }
