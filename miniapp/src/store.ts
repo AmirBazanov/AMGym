@@ -1,7 +1,7 @@
 // Local-only state until the stage 2 API exists: everything lives in localStorage.
 // Shapes mirror the future server models (Workout -> exercises -> sets) so the swap is mechanical.
 import { useSyncExternalStore } from 'react'
-import { findProgram, getDay, getProgram, setServerPrograms, type Program, type ProgramDay } from './program'
+import { findProgram, getDay, getProgram, setServerPrograms, workoutDay, type Program, type ProgramDay } from './program'
 import {
   api,
   ApiError,
@@ -332,7 +332,7 @@ export const actions = {
     const a = state.active
     if (!a || isStarted(a)) return
     const program = findProgram(a.programId)
-    const day = program && getDay(program, a.week, a.weekday)
+    const day = program && workoutDay(program, a)
     if (!day) return
     const res = applyPlan(
       day,
@@ -591,7 +591,7 @@ function applyServer(server: ServerState) {
     ? refillSuggestions(
         a,
         next.activeSuggested,
-        program ? getDay(program, a.week, a.weekday) : undefined,
+        program ? workoutDay(program, a) : undefined,
         next.history,
         baselines,
         overridesFor(a, next),
@@ -643,7 +643,7 @@ function storeProgram(program: Program) {
   const a = state.active
   // The day the prepared workout was built from, read before the registry changes.
   const before = a && a.programId === program.id ? findProgram(a.programId) : undefined
-  const oldDay = a && before ? getDay(before, a.week, a.weekday) : undefined
+  const oldDay = a && before ? workoutDay(before, a) : undefined
   const keep = [state.programId, a?.programId, ...state.pending.map((w) => w.programId)]
   const programs = cacheProgram(state.programs, program, keep)
   setServerPrograms(programs)
@@ -687,7 +687,7 @@ function applyEdit(program: Program, switchedFrom: string | null) {
   const a = state.active
   // The day the prepared workout was built from (the template's on a fork), before the registry changes.
   const before = a ? findProgram(a.programId) : undefined
-  const oldDay = a && before ? getDay(before, a.week, a.weekday) : undefined
+  const oldDay = a && before ? workoutDay(before, a) : undefined
   const s = afterEdit(state, program, switchedFrom)
   const keep = [s.programId, s.active?.programId, ...s.pending.map((w) => w.programId)]
   const programs = cacheProgram(s.programs, program, keep)

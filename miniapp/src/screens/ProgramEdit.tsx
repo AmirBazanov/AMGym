@@ -11,6 +11,7 @@ import {
   draftFromDay,
   draftMatchesDay,
   draftOps,
+  findEditedDay,
   isTempKey,
   itemChange,
   LIMITS,
@@ -68,7 +69,6 @@ export function ProgramEdit({
 }) {
   const { programId, mode, history } = useStore()
   const program = findProgram(programId)
-  const day = program ? getDay(program, week, weekday) : undefined
   const online = useOnline()
 
   // The program the editor was opened on. It may become its copy (the first save, or one made on another
@@ -76,9 +76,13 @@ export function ProgramEdit({
   const [opened] = useState(programId)
   const switched = programId !== opened && program?.basedOn !== opened
   // The day the draft is based on and its program; a newer one (409, a live update) is taken over with rebaseDraft.
-  const [base, setBase] = useState<ProgramDay | undefined>(day)
+  const [base, setBase] = useState<ProgramDay | undefined>(() => (program ? getDay(program, week, weekday) : undefined))
   const [baseFrom, setBaseFrom] = useState(programId)
-  const [draft, setDraft] = useState<Draft>(() => (day ? draftFromDay(day) : []))
+  const [draft, setDraft] = useState<Draft>(() => (base ? draftFromDay(base) : []))
+  // The edited day in the current program, followed by its id: a move_day (the chat, another device) may
+  // have put it on another weekday and another day on the one it was opened on. Ops name its weekday now.
+  const at = base?.weekday ?? weekday
+  const day = program ? findEditedDay(program, week, base, at) : undefined
   const [notice, setNotice] = useState<string | null>(null)
   const [open, setOpen] = useState<ItemKey | null>(null)
   const [picker, setPicker] = useState<Picker | null>(null)
@@ -86,7 +90,7 @@ export function ProgramEdit({
 
   useEffect(() => {
     if (!day || day === base || switched) return
-    const edited = !!base && draftOps(week, weekday, base, draft).length > 0
+    const edited = !!base && draftOps(week, base.weekday, base, draft).length > 0
     if (edited && draftMatchesDay(day, draft)) {
       setNotice(SAVED_ALREADY)
       setDraft(draftFromDay(day))
@@ -102,7 +106,7 @@ export function ProgramEdit({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [day, switched])
 
-  const ops = useMemo(() => (base ? draftOps(week, weekday, base, draft) : []), [base, draft, week, weekday])
+  const ops = useMemo(() => (base ? draftOps(week, base.weekday, base, draft) : []), [base, draft, week])
 
   // Unsaved edits: Telegram asks before the Mini App is closed by a swipe or ✕.
   const dirty = ops.length > 0
@@ -139,7 +143,7 @@ export function ProgramEdit({
     } else if (out.kind === 'conflict') {
       // The store has cached the server's program (switched to it if it is the copy) before answering.
       const p = out.program ? findProgram(out.program.id) : undefined
-      const now = p ? getDay(p, week, weekday) : undefined
+      const now = p ? findEditedDay(p, week, base, at) : undefined
       if (now && draftMatchesDay(now, draft)) {
         haptic.success()
         setNotice(SAVED_ALREADY)
@@ -173,7 +177,7 @@ export function ProgramEdit({
         <div className="grow">
           <div className="eyebrow">{shown?.editable ? 'Моя программа' : 'Редактор'}</div>
           <h1 style={{ fontSize: 22 }}>
-            Неделя {week} · {WEEKDAY_LONG[weekday]}
+            Неделя {week} · {WEEKDAY_LONG[view.weekday]}
           </h1>
           <div className="hint">{dayFocus(view)}</div>
         </div>

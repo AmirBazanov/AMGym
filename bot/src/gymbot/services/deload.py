@@ -67,6 +67,11 @@ def summary(until: date) -> str:
     return f"Разгрузочная неделя до {WEEKDAYS[until.weekday()]} {until:%d.%m}: веса −{pct} %, подходов меньше."
 
 
+def span(first: date, last: date) -> str:
+    """«с пн 12.10 по вс 18.10»."""
+    return f"с {WEEKDAYS[first.weekday()]} {first:%d.%m} по {WEEKDAYS[last.weekday()]} {last:%d.%m}"
+
+
 def _aware(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None
@@ -92,25 +97,40 @@ def active(st: DeloadState | None, today: date) -> bool:
     return st is not None and st.started_on is not None and st.until is not None and st.started_on <= today <= st.until
 
 
+def scheduled(st: DeloadState | None, today: date) -> bool:
+    """A deload set to start after `today` ("следующая неделя — делоад" from the chat)."""
+    return st is not None and st.started_on is not None and st.until is not None and st.started_on > today
+
+
+def pending(st: DeloadState | None, today: date) -> bool:
+    """Running or scheduled: no offers, /deload can cancel it."""
+    return active(st, today) or scheduled(st, today)
+
+
 async def active_until(session: AsyncSession, user_id: int, today: date) -> date | None:
     """The last day of the deload running on `today`, else None (read by the day plan)."""
     st = await get_state(session, user_id)
     return st.until if active(st, today) else None
 
 
-async def start(session: AsyncSession, user_id: int, today: date, now: datetime) -> date:
-    """Start a deload week today (no commit); returns its last day."""
+async def start(
+    session: AsyncSession, user_id: int, today: date, now: datetime, start_on: date | None = None
+) -> date:
+    """Start a deload week on `start_on` (today by default; a later day schedules it), no commit; returns its
+    last day. Replaces any running or scheduled one."""
+    first = today if start_on is None or start_on < today else start_on
     st = await _state(session, user_id)
-    st.started_on, st.until = today, today + timedelta(days=DELOAD_DAYS - 1)
+    st.started_on, st.until = first, first + timedelta(days=DELOAD_DAYS - 1)
     st.ask_after = datetime.combine(st.until, datetime.min.time(), UTC) + AFTER_DELOAD
     st.updated_at = now
     return st.until
 
 
 async def cancel(session: AsyncSession, user_id: int, today: date, now: datetime) -> bool:
-    """Stop the running deload (no commit). Begun today: as if it never was; else it ended yesterday."""
+    """Stop the running or scheduled deload (no commit). Begun today or not yet: as if it never was; else it
+    ended yesterday."""
     st = await get_state(session, user_id)
-    if not active(st, today):
+    if not pending(st, today):
         return False
     assert st is not None and st.started_on is not None
     if st.started_on >= today:
@@ -130,8 +150,8 @@ async def postpone(session: AsyncSession, user_id: int, now: datetime, refuse: b
 
 
 def due(st: DeloadState | None, today: date, now: datetime) -> bool:
-    """An offer may be sent now: no deload running and the snooze is over."""
-    if active(st, today):
+    """An offer may be sent now: no deload running or scheduled and the snooze is over."""
+    if pending(st, today):
         return False
     ask_after = _aware(st.ask_after) if st is not None else None
     return ask_after is None or now >= ask_after
@@ -353,6 +373,9 @@ def status_text(st: DeloadState | None, v: Verdict, today: date) -> str:
     if active(st, today):
         assert st is not None and st.until is not None
         return summary(st.until).replace("Разгрузочная неделя до", "Идёт разгрузочная неделя до", 1)
+    if scheduled(st, today):
+        assert st is not None and st.started_on is not None and st.until is not None
+        return f"Разгрузочная неделя запланирована: {span(st.started_on, st.until)}."
     lines = ["Разгрузки сейчас нет."]
     if st is not None and st.started_on is not None and st.until is not None:
         lines.append(f"Последняя: {st.started_on:%d.%m}–{st.until:%d.%m}.")

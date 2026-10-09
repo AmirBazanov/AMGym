@@ -1,23 +1,26 @@
 """Program edits from the chat, no LLM: the routing gate, action validation, resolution, ops, preview, apply."""
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import func, select
 
-from gymbot.db.models import Exercise, Program, WeightOverride
+from gymbot.db.models import DeloadState, Exercise, Program, WeightOverride, Workout
 from gymbot.services import chat_edit as ce
 from gymbot.services import chat_settings as cs
+from gymbot.services import deload, saved_edits
 from gymbot.services import program_editor as pe
-from gymbot.services import saved_edits
 from gymbot.services.chat_edit import (
     AddA,
     ClarifyA,
     DayRef,
+    DeloadA,
+    MoveDayA,
     PrescribeA,
     RemoveA,
     ReorderA,
     ReplaceA,
+    SwapDaysA,
     WeightA,
 )
 from gymbot.services.programs import load_program
@@ -37,6 +40,13 @@ EDIT_YES = [
     "перенеси тренировку на завтра",
     "замени в пятницу французский жим на разгибания",
     "убери французский жим из пятничной тренировки",
+    # stage 2: swaps, moves and a deload week
+    "перенеси пятницу на субботу",
+    "поменяй местами руки и базу",
+    "следующая неделя — делоад",
+    "давай на этой неделе делоад",
+    "со следующей недели разгрузка",
+    "сделай разгрузочную неделю с понедельника",
 ]
 
 EDIT_NO = [
@@ -63,11 +73,25 @@ EDIT_NO = [
     "на жим 4 подхода по 8 с 80",
     "поставь таймер отдыха 2 минуты",
     "удали самсу за пятницу",
-    # stage 2 (deload, a lighter day) is not routed yet: these are mostly wellbeing
-    "следующая неделя — делоад",
+    # a lighter day waits for stage 3; how the user feels is wellbeing even next to "делоад"
     "сегодня облегчённо, −20 %",
     "болит плечо, сегодня облегчённо потренируюсь",
     "на этой неделе делоад, спал плохо",
+    "сделай на этой неделе делоад, устал",
+    "разгрузочная неделя, болит колено",
+    "делоад нужен, сил нет на этой неделе",
+    "завтра разгрузочный день на кефире",  # a diet's fasting day, not a deload week
+    "на этой неделе разгрузочные дни по еде",
+    "неделю на разгрузке по питанию",
+    "неделя разгрузки по углеводам",
+    "следующая неделя разгрузочная, диета",
+    # how the user feels is never an edit, whatever the branch
+    "перенеси тренировку на завтра, болит спина",
+    "перенеси тренировку на завтра, спал плохо",
+    "поменяй местами руки и базу, плечо ноет",
+    "сделай сегодня ноги вместо рук, потянул спину",
+    "на этой неделе делоад, чувствую себя плохо",
+    "следующая неделя — делоад, простуда",
     # settings own weights for today and program switches
     "поставь сегодня жим 85 кг",
     "поменяй программу на другую",
@@ -444,6 +468,215 @@ def test_compile_weight_last_one_said_wins(snap):
     assert [w.kg for w in plan.weights] == [85] and len(plan.lines) == 1
 
 
+# ---- compile_ops: swap, move, deload ----
+
+WED, FRI = 3, 5
+
+
+def swap(a, b, **kw):
+    return SwapDaysA(type="swap_days", a=a, b=b, **kw)
+
+
+def move(src, dst, **kw):
+    return MoveDayA(type="move_day", src=src, dst=dst, **kw)
+
+
+def test_compile_swap_today_with_a_labelled_day(snap):
+    plan = ce.compile_ops(snap, [swap(DayRef(when="today"), DayRef(focus="база"))])
+    assert plan.ops == [{"op": "move_day", "week": 1, "weekday": FRI, "weeks": [1], "toWeekday": WED}]
+    assert plan.lines == [
+        "пт 09.10: «База» вместо «Руки и плечи» (только неделя 1)",
+        "ср 07.10: «Руки и плечи» вместо «База» (только неделя 1)",
+    ]
+    assert plan.ready() and plan.forks and plan.live_topics() == ["program", "plan", "state"]
+
+
+def test_compile_swap_scope_all_weeks(snap):
+    plan = ce.compile_ops(snap, [swap(DayRef(weekday=FRI), DayRef(weekday=WED), scope="all_weeks")])
+    assert plan.ops[0]["weeks"] == list(range(1, 9))
+    assert "все недели" in plan.lines[0]
+
+
+def test_compile_move_today_to_a_free_tomorrow(snap):
+    plan = ce.compile_ops(snap, [move(DayRef(when="today"), DayRef(when="tomorrow"))])
+    assert plan.ops == [{"op": "move_day", "week": 1, "weekday": FRI, "weeks": [1], "toWeekday": 6}]
+    assert plan.lines == ["«Руки и плечи»: пт 09.10 → сб 10.10 (только неделя 1)"]
+    assert plan.notes == []
+
+
+def test_compile_move_onto_an_occupied_day_becomes_a_swap_with_a_note(snap):
+    plan = ce.compile_ops(snap, [move(DayRef(weekday=FRI), DayRef(weekday=WED))])
+    assert plan.ops == [{"op": "move_day", "week": 1, "weekday": FRI, "weeks": [1], "toWeekday": WED}]
+    assert len(plan.lines) == 2
+    assert any("уже занято" in n and "поменяю дни местами" in n for n in plan.move_notes)
+
+
+def test_compile_swap_with_a_rest_day_is_a_move_of_the_other_day(snap):
+    plan = ce.compile_ops(snap, [swap(DayRef(weekday=6), DayRef(focus="база"))])
+    assert plan.ops == [{"op": "move_day", "week": 1, "weekday": WED, "weeks": [1], "toWeekday": 6}]
+    assert plan.lines == ["«База»: ср 07.10 → сб 10.10 (только неделя 1)"]
+    assert plan.notes == []
+
+
+def test_compile_move_of_a_rest_day_is_a_note(snap):
+    plan = ce.compile_ops(snap, [move(DayRef(weekday=6), DayRef(weekday=FRI))])
+    assert plan.ops == [] and "тренировки нет" in plan.notes[0] and not plan.ready()
+
+
+def test_compile_swap_a_day_with_itself_is_a_note(snap):
+    plan = ce.compile_ops(snap, [swap(DayRef(weekday=FRI), DayRef(when="today"))])
+    assert plan.ops == [] and plan.notes == ["Это один и тот же день, менять нечего."]
+
+
+def test_compile_swap_two_rest_days_is_a_note(snap):
+    plan = ce.compile_ops(snap, [swap(DayRef(weekday=6), DayRef(weekday=7))])
+    assert plan.ops == [] and "тренировок нет" in plan.notes[0] and not plan.ready()
+
+
+def test_compile_swap_ambiguous_first_day_asks_and_the_pick_resolves(snap):
+    actions = [swap(DayRef(focus="руки"), DayRef(weekday=WED))]
+    plan = ce.compile_ops(snap, actions)
+    assert plan.ops == [] and not plan.ready()
+    assert plan.clarify.picks == [ce.Pick(0, "day", (1, 1)), ce.Pick(0, "day", (1, 5))]
+    done = ce.compile_ops(snap, actions, {(0, "day"): (1, 1)})
+    assert done.clarify is None
+    assert done.ops == [{"op": "move_day", "week": 1, "weekday": 1, "weeks": [1], "toWeekday": WED}]
+
+
+def test_compile_swap_ambiguous_second_day_asks_with_day2(snap):
+    actions = [swap(DayRef(weekday=WED), DayRef(focus="руки"))]
+    plan = ce.compile_ops(snap, actions)
+    assert plan.clarify is not None
+    assert [p.what for p in plan.clarify.picks] == ["day2", "day2"]
+    done = ce.compile_ops(snap, actions, {(0, "day2"): (1, 1)})
+    assert done.clarify is None
+    assert done.ops == [{"op": "move_day", "week": 1, "weekday": WED, "weeks": [1], "toWeekday": 1}]
+
+
+async def _check_workout(db, day_id: int, on: date) -> None:
+    async with db() as s:
+        user = await get_or_create_user(s, 42)
+        s.add(Workout(user_id=user.id, performed_on=on, program_day_id=day_id, source="miniapp"))
+        await s.commit()
+
+
+async def test_compile_swap_warns_about_a_checked_day(db, snap):
+    wed = snap.day(1, WED)
+    await _check_workout(db, wed.id, date(2026, 10, 7))
+    async with db() as s:
+        user = await get_or_create_user(s, 42)
+        fresh = await ce.load_snapshot(s, user, TODAY)
+    assert fresh.done == {wed.id}
+    plan = ce.compile_ops(fresh, [swap(DayRef(when="today"), DayRef(focus="база"))])
+    assert plan.ops
+    assert any("«База» уже отмечен ✓" in n and "переедет вместе с днём на пт 09.10" in n for n in plan.move_notes)
+    clean = ce.compile_ops(snap, [swap(DayRef(when="today"), DayRef(focus="база"))])
+    assert not any("✓" in n for n in clean.notes)
+
+
+def test_compile_move_into_the_past_warns(snap):
+    plan = ce.compile_ops(snap, [move(DayRef(weekday=FRI), DayRef(weekday=2))])
+    assert plan.ops and any("вт 06.10" in n and "уже прошёл" in n for n in plan.move_notes)
+
+
+def test_compile_deload_next_week_starts_next_monday(snap):
+    plan = ce.compile_ops(snap, [DeloadA(type="deload", week="next_week")])
+    assert plan.deload == ce.DeloadChange(date(2026, 10, 12), date(2026, 10, 18))
+    (line,) = plan.lines
+    assert line.startswith(ce.DELOAD_LINE) and "с пн 12.10 по вс 18.10 (7 дней)" in line
+    assert plan.ops == [] and plan.ready() and plan.live_topics() == ["plan"]
+
+
+def test_compile_deload_this_week_starts_today(snap):
+    plan = ce.compile_ops(snap, [DeloadA(type="deload", week="this_week")])
+    assert plan.deload == ce.DeloadChange(TODAY, date(2026, 10, 15))
+    assert "с пт 09.10 по чт 15.10" in plan.lines[0]
+
+
+def test_compile_deload_with_a_named_start(snap):
+    plan = ce.compile_ops(snap, [DeloadA(type="deload", start=date(2026, 10, 19))])
+    assert plan.deload.first == date(2026, 10, 19)
+
+
+def test_compile_deload_start_in_the_past_is_a_note(snap):
+    plan = ce.compile_ops(snap, [DeloadA(type="deload", start=date(2026, 10, 5))])
+    assert plan.deload is None and not plan.ready()
+    assert "уже прошёл" in plan.notes[0]
+
+
+def test_compile_deload_too_far_ahead_is_a_note(snap):
+    plan = ce.compile_ops(snap, [DeloadA(type="deload", start=date(2026, 12, 7))])
+    assert plan.deload is None and str(ce.DELOAD_AHEAD) in plan.notes[0]
+
+
+async def _snapshot_with_deload(db, first: date):
+    async with db() as s:
+        user = await get_or_create_user(s, 42)
+        await deload.start(s, user.id, TODAY, datetime(2026, 10, 9, 9, tzinfo=UTC), start_on=first)
+        snapshot = await ce.load_snapshot(s, user, TODAY)
+        await s.commit()
+    return snapshot
+
+
+async def test_compile_deload_already_running_is_a_note(db):
+    running = await _snapshot_with_deload(db, TODAY)
+    assert running.deload == (TODAY, date(2026, 10, 15))
+    plan = ce.compile_ops(running, [DeloadA(type="deload", week="next_week")])
+    assert plan.deload is None and not plan.ready()
+    assert "уже идёт" in plan.notes[0]
+
+
+async def test_compile_deload_already_scheduled_the_same_day_is_a_note(db):
+    scheduled = await _snapshot_with_deload(db, date(2026, 10, 12))
+    plan = ce.compile_ops(scheduled, [DeloadA(type="deload", week="next_week")])
+    assert plan.deload is None and "уже запланирована" in plan.notes[0]
+
+
+async def test_compile_deload_replaces_a_scheduled_one_on_another_day(db):
+    scheduled = await _snapshot_with_deload(db, date(2026, 10, 12))
+    plan = ce.compile_ops(scheduled, [DeloadA(type="deload", week="this_week")])
+    assert plan.deload.first == TODAY and "вместо запланированной с пн 12.10 по вс 18.10" in plan.lines[0]
+
+
+def test_compile_deload_last_one_said_wins(snap):
+    plan = ce.compile_ops(snap, [DeloadA(type="deload", week="this_week"), DeloadA(type="deload", week="next_week")])
+    assert plan.deload.first == date(2026, 10, 12) and len(plan.lines) == 1
+
+
+def test_drop_ops_keeps_the_deload_line(snap):
+    plan = ce.compile_ops(snap, [
+        swap(DayRef(weekday=FRI), DayRef(weekday=WED)), DeloadA(type="deload", week="next_week"),
+    ])
+    assert len(plan.lines) == 3
+    plan.drop_ops("Не получилось")
+    assert plan.ops == [] and plan.notes[0] == "Не получилось"
+    assert len(plan.lines) == 1 and plan.lines[0].startswith(ce.DELOAD_LINE)
+    assert plan.deload is not None and plan.ready()
+    assert plan.move_notes == []  # no warnings about a move that will not happen
+
+
+def test_compile_swap_today_with_the_legs_day_by_composition(snap):
+    """«сделай сегодня ноги вместо рук»: the template has no «Ноги» label, the squat day (Wednesday) is it."""
+    plan = ce.compile_ops(snap, [swap(DayRef(when="today"), DayRef(focus="ноги"))])
+    assert plan.clarify is None
+    assert plan.ops == [{"op": "move_day", "week": 1, "weekday": FRI, "weeks": [1], "toWeekday": WED}]
+
+
+def test_parse_actions_swap_move_and_deload():
+    valid, notes = ce.parse_actions({"actions": [
+        {"type": "swap_days", "a": {"weekday": 5}, "b": {"focus": "база"}, "scope": "all_weeks"},
+        {"type": "move_day", "src": {"when": "today"}, "dst": {"when": "tomorrow"}},
+        {"type": "deload", "week": "next_week", "start": None},
+        {"type": "deload", "week": "someday"},
+        {"type": "swap_days", "a": None, "b": None},
+    ]})
+    assert notes == []
+    assert [type(a) for a in valid] == [SwapDaysA, MoveDayA, DeloadA, DeloadA, SwapDaysA]
+    assert valid[0].a.weekday == 5 and valid[0].scope == "all_weeks"
+    assert valid[2].week == "next_week" and valid[3].week is None
+    assert valid[4].a == DayRef() and valid[4].b == DayRef()
+
+
 # ---- preview and apply on the database ----
 
 
@@ -581,3 +814,213 @@ async def test_apply_skips_a_day_that_has_passed(db):
     assert not any(ln.startswith("Вес на ") for ln in plan.lines)  # «Готово» does not list it
     async with db() as session:
         assert (await session.scalars(select(WeightOverride))).all() == []
+
+
+async def test_apply_swap_forks_and_swaps_in_the_copy(db):
+    s, session, user, up, plan = await staged(db, [swap(DayRef(when="today"), DayRef(focus="база"))])
+    template_slug, template_version = plan.slug, plan.version
+    try:
+        assert await ce.apply(session, user, up, plan, TODAY, "сегодня базу вместо рук") == []
+        await session.commit()
+    finally:
+        await s.__aexit__(None, None, None)
+    owned, versions = await count_programs(db)
+    assert owned == 1 and versions[template_slug] == template_version
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        copy = await ce.load_snapshot(session, user, TODAY)
+        assert not copy.template
+        assert copy.day(1, FRI).focus == "База" and copy.day(1, WED).focus == "Руки и плечи"
+        assert copy.day(2, FRI).focus == "Руки и плечи" and copy.day(2, WED).focus == "База"  # this week only
+
+
+async def test_preview_of_a_swap_writes_nothing(db):
+    s, session, user, up, plan = await staged(db, [swap(DayRef(when="today"), DayRef(focus="база"))])
+    try:
+        await ce.preview(session, user, up, plan)
+        assert plan.copy_name and plan.copy_name.endswith(pe.COPY_MARK)
+    finally:
+        await s.__aexit__(None, None, None)
+    assert (await count_programs(db))[0] == 0
+
+
+async def test_apply_deload_writes_the_state(db):
+    s, session, user, up, plan = await staged(db, [DeloadA(type="deload", week="next_week")])
+    try:
+        assert await ce.apply(session, user, up, plan, TODAY, "следующая неделя — делоад") == []
+        await session.commit()
+    finally:
+        await s.__aexit__(None, None, None)
+    async with db() as session:
+        st = await session.scalar(select(DeloadState))
+    assert (st.started_on, st.until) == (date(2026, 10, 12), date(2026, 10, 18))
+    assert (await count_programs(db))[0] == 0  # a deload alone never forks the program
+
+
+async def test_apply_deload_after_midnight_starts_today_with_a_note(db):
+    s, session, user, up, plan = await staged(db, [DeloadA(type="deload", week="this_week")])
+    try:
+        notes = await ce.apply(session, user, up, plan, date(2026, 10, 10), "x")
+        await session.commit()
+    finally:
+        await s.__aexit__(None, None, None)
+    assert notes == ["Разгрузка начнётся сегодня, до пт 16.10."]
+    async with db() as session:
+        st = await session.scalar(select(DeloadState))
+    assert (st.started_on, st.until) == (date(2026, 10, 10), date(2026, 10, 16))
+
+
+async def test_apply_swap_and_deload_in_one_plan(db):
+    s, session, user, up, plan = await staged(db, [
+        swap(DayRef(weekday=FRI), DayRef(weekday=WED)), DeloadA(type="deload", week="next_week"),
+    ])
+    assert plan.ops and plan.deload and plan.live_topics() == ["program", "plan", "state"]
+    try:
+        await ce.apply(session, user, up, plan, TODAY, "x", datetime(2026, 10, 9, 9, tzinfo=UTC))
+        await session.commit()
+    finally:
+        await s.__aexit__(None, None, None)
+    assert (await count_programs(db))[0] == 1
+    async with db() as session:
+        st = await session.scalar(select(DeloadState))
+        user = await get_or_create_user(session, 42)
+        copy = await ce.load_snapshot(session, user, TODAY)
+    assert st.started_on == date(2026, 10, 12)
+    assert copy.day(1, FRI).focus == "База"
+    assert copy.deload == (date(2026, 10, 12), date(2026, 10, 18))
+
+
+def test_edit_schema_lists_every_action_type_the_parser_accepts():
+    from gymbot.llm import structured
+
+    def type_consts(node):
+        if isinstance(node, dict):
+            enum = node.get("properties", {}).get("type", {}).get("enum")
+            if enum:
+                yield from enum
+            for v in node.values():
+                yield from type_consts(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from type_consts(v)
+
+    in_schema = set(type_consts(structured.EDIT))
+    assert {"swap_days", "move_day", "deload"} <= in_schema
+    for t in ("swap_days", "move_day", "deload"):  # and the chat side parses what the schema allows
+        valid, _ = ce.parse_actions({"actions": [{"type": t}]})
+        assert len(valid) == 1
+    assert in_schema == {"replace", "remove", "add", "prescribe", "reorder", "weight", "swap_days", "move_day",
+                         "deload", "clarify"}
+
+
+# ---- review fixes: moves run last, one per command, chat checks, day weights, a changed deload ----
+
+
+async def _apply(db, actions, today=TODAY):
+    s, session, user, up, plan = await staged(db, actions)
+    try:
+        notes = await ce.apply(session, user, up, plan, today, "x")
+        await session.commit()
+    finally:
+        await s.__aexit__(None, None, None)
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        copy = await ce.load_snapshot(session, user, TODAY)
+    return plan, notes, copy
+
+
+def _names(day):
+    return [i.name for i in day.items]
+
+
+async def test_swap_then_add_lands_in_the_day_the_preview_names(db):
+    """The add is resolved against Friday's «Руки и плечи» before the swap: it must end up there (now on
+    Wednesday), not in «База» that came to Friday."""
+    plan, _, copy = await _apply(db, [
+        swap(DayRef(when="today"), DayRef(focus="база")), AddA(type="add", day=DayRef(weekday=FRI), name="молотки"),
+    ])
+    assert [op["op"] for op in plan.ops] == ["add", "move_day"]
+    assert any(ln.startswith("пт «Руки и плечи»: добавить молотки") for ln in plan.lines)
+    arms, base = copy.day(1, WED), copy.day(1, FRI)
+    assert arms.focus == "Руки и плечи" and "молотки" in _names(arms)
+    assert base.focus == "База" and "молотки" not in _names(base)
+
+
+async def test_swap_then_remove_removes_from_the_day_the_preview_names(db):
+    plan, _, copy = await _apply(db, [
+        swap(DayRef(weekday=FRI), DayRef(weekday=WED)), RemoveA(type="remove", day=DayRef(weekday=FRI), exercise=FRENCH),
+    ])
+    assert [op["op"] for op in plan.ops] == ["remove", "move_day"]
+    assert copy.day(1, WED).focus == "Руки и плечи" and FRENCH not in _names(copy.day(1, WED))
+    assert len(copy.day(1, FRI).items) == 4  # «База» untouched
+
+
+def test_second_move_in_one_command_is_a_note(snap):
+    plan = ce.compile_ops(snap, [
+        swap(DayRef(weekday=FRI), DayRef(weekday=WED)), move(DayRef(weekday=1), DayRef(weekday=2)),
+    ])
+    assert [op["op"] for op in plan.ops] == ["move_day"] and plan.ops[0]["weekday"] == FRI
+    assert any("одну пару дней" in n for n in plan.notes)
+
+
+async def test_swap_warns_about_a_chat_workout_on_the_date(db, snap):
+    async with db() as s:
+        user = await get_or_create_user(s, 42)
+        s.add(Workout(user_id=user.id, performed_on=date(2026, 10, 7), source="chat"))
+        await s.commit()
+    async with db() as s:
+        fresh = await ce.load_snapshot(s, await get_or_create_user(s, 42), TODAY)
+    assert fresh.done_dates == {date(2026, 10, 7)} and fresh.done == set()
+    plan = ce.compile_ops(fresh, [swap(DayRef(when="today"), DayRef(focus="база"))])
+    assert any(n.startswith("Ср 07.10 уже отмечен сделанным по записи из чата") for n in plan.move_notes)
+    assert not any("из чата" in n for n in ce.compile_ops(snap, [swap(DayRef(when="today"), DayRef(focus="база"))]).move_notes)
+
+
+async def _override(db, name: str, day: date, kg: float) -> None:
+    async with db() as s:
+        user = await get_or_create_user(s, 42)
+        ex = await s.scalar(select(Exercise).where(Exercise.name == name))
+        s.add(WeightOverride(user_id=user.id, exercise_id=ex.id, day=day, weight_kg=kg))
+        await s.commit()
+
+
+async def _overrides(db) -> dict[tuple[str, date], float]:
+    async with db() as s:
+        rows = (await s.execute(
+            select(Exercise.name, WeightOverride.day, WeightOverride.weight_kg)
+            .join(Exercise, Exercise.id == WeightOverride.exercise_id)
+        )).all()
+    return {(n, d): float(kg) for n, d, kg in rows}
+
+
+async def test_day_weights_follow_a_moved_day(db):
+    await _override(db, FRENCH, date(2026, 10, 9), 30)
+    await _apply(db, [move(DayRef(when="today"), DayRef(when="tomorrow"))])
+    assert await _overrides(db) == {(FRENCH, date(2026, 10, 10)): 30.0}
+
+
+async def test_day_weights_swap_both_ways_and_a_weight_on_the_target_stays(db):
+    fri, wed = date(2026, 10, 9), date(2026, 10, 7)
+    await _override(db, FRENCH, fri, 30)  # Friday's arms day -> Wednesday
+    await _override(db, "жим лёжа", wed, 80)  # Wednesday's base day -> Friday, but Friday has its own
+    await _override(db, "жим лёжа", fri, 85)
+    await _apply(db, [swap(DayRef(weekday=FRI), DayRef(weekday=WED))])
+    assert await _overrides(db) == {(FRENCH, wed): 30.0, ("жим лёжа", fri): 85.0}
+
+
+async def test_deload_changed_after_the_preview_is_not_overwritten(db):
+    s, _session, _user, _up, plan = await staged(db, [DeloadA(type="deload", week="next_week")])
+    await s.__aexit__(None, None, None)
+    async with db() as other:  # /deload started one in between
+        u = await get_or_create_user(other, 42)
+        await deload.start(other, u.id, TODAY, datetime(2026, 10, 9, 9, tzinfo=UTC))
+        await other.commit()
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        up = await active_program(session, user, TODAY)
+        notes = await ce.apply(session, user, up, plan, TODAY, "x")
+        await session.commit()
+        st = await session.scalar(select(DeloadState))
+    assert len(notes) == 1 and "изменилась" in notes[0]
+    assert (st.started_on, st.until) == (TODAY, date(2026, 10, 15))
+    assert plan.deload is None and not any(ln.startswith(ce.DELOAD_LINE) for ln in plan.lines)

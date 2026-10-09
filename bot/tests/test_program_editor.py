@@ -5,7 +5,8 @@ its 4th is «жим гантелей сидя» in weeks 1-3 and «отведе�
 first exercise is «жим лёжа 30°» in weeks 3-5 and «жим лёжа» in weeks 1, 2, 6, 7, 8. Dates are never hard-coded:
 they come from /api/state `startDate` (the suite also runs with a shifted clock)."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
@@ -15,6 +16,7 @@ from sqlalchemy import delete, func, select
 from gymbot.db.models import Exercise, Program, ProgramDay, ProgramItem, ProgramWeek
 from gymbot.services import live
 from gymbot.services import next_weights as nw
+from gymbot.services.programs import monday_of
 from gymbot.services.users import get_or_create_user
 
 TEMPLATE = "arms_specialization_8w"
@@ -712,7 +714,7 @@ def _ops_weekday_out_of_range(ids):
 
 
 def _ops_unknown_kind(ids):
-    return [{"op": "move_day", "week": 1, "weekday": 1, "toWeekday": 2}]
+    return [{"op": "copy_week", "fromWeek": 1, "toWeeks": [2]}]
 
 
 def _ops_nonsense_kind(ids):
@@ -1155,3 +1157,163 @@ async def test_plan_day_of_the_edited_week_names_the_new_exercise(client, auth, 
         week2, _, items2 = nw.program_day(ref, monday + timedelta(days=7))
         assert week2 == 2
         assert [i.name for i in items2] == MONDAY_WEEK1
+
+
+# ---- 12: move_day ----
+
+
+def mv(weekday, to, week=1, **extra) -> dict:
+    return {"op": "move_day", "week": week, "weekday": weekday, "toWeekday": to, **extra}
+
+
+def local_today(settings) -> date:
+    return datetime.now(ZoneInfo(settings.timezone)).date()
+
+
+async def start_program(client, auth, started_on: date) -> None:
+    r = await client.put(
+        "/api/settings", json={"programId": TEMPLATE, "startDate": started_on.isoformat()}, headers=auth
+    )
+    assert r.status_code == 200, r.text
+
+
+def weekdays(program: dict, week: int) -> list[int]:
+    (w,) = [w for w in program["weeks"] if w["number"] == week]
+    return [d["weekday"] for d in w["days"]]
+
+
+async def test_move_day_to_a_free_weekday_in_one_week(client, auth, copy):
+    template = copy
+    monday = day_of(template, 1, 1)
+
+    body = await ok(client, auth, copy["id"], copy["version"], [mv(1, 2)])
+
+    program = body["program"]
+    assert body["results"] == [{"op": 0, "weeks": [1], "skipped": []}]
+    assert weekdays(program, 1) == [2, 3, 5]  # kept sorted
+    moved = day_of(program, 1, 2)
+    assert moved["id"] == monday["id"]
+    assert [e["name"] for e in moved["exercises"]] == MONDAY_WEEK1
+    assert [e["id"] for e in moved["exercises"]] == [e["id"] for e in monday["exercises"]]
+    for w in range(2, 9):
+        assert weekdays(program, w) == [1, 3, 5]
+
+
+async def test_move_day_onto_an_occupied_weekday_swaps_the_days(client, auth, copy):
+    template = copy
+    monday, wednesday = day_of(template, 1, 1), day_of(template, 1, 3)
+
+    program = (await ok(client, auth, copy["id"], copy["version"], [mv(1, 3)]))["program"]
+
+    assert weekdays(program, 1) == [1, 3, 5]
+    new_wed, new_mon = day_of(program, 1, 3), day_of(program, 1, 1)
+    assert new_wed["id"] == monday["id"] and new_mon["id"] == wednesday["id"]
+    assert [e["name"] for e in new_wed["exercises"]] == MONDAY_WEEK1
+    assert [e["name"] for e in new_mon["exercises"]] == [e["name"] for e in wednesday["exercises"]]
+    assert changed_days(template, program) == {(1, 1), (1, 3)}
+
+
+async def test_move_day_over_weeks_skips_the_weeks_that_are_over(client, auth, settings):
+    await start_program(client, auth, monday_of(local_today(settings)) - timedelta(days=14))  # week 3 now
+    template = await get_program(client, auth)
+
+    body = await ok(client, auth, TEMPLATE, 1, [mv(1, 2, week=3, weeks=ALL_WEEKS)])
+
+    (res,) = body["results"]
+    assert res["weeks"] == [3, 4, 5, 6, 7, 8]
+    assert skipped(res) == {1: "неделя уже прошла", 2: "неделя уже прошла"}
+    program = body["program"]
+    for w in (1, 2):  # the past is untouched
+        assert weekdays(program, w) == [1, 3, 5]
+        assert names(program, w, 1) == names(template, w, 1)
+    for w in range(3, 9):
+        assert weekdays(program, w) == [2, 3, 5]
+
+
+async def test_move_day_of_a_week_that_is_over_is_422(client, auth, settings):
+    await start_program(client, auth, monday_of(local_today(settings)) - timedelta(days=14))
+    before = await get_program(client, auth)
+
+    r = await patch(client, auth, TEMPLATE, 1, [mv(1, 2, week=2)])
+
+    assert r.status_code == 422, r.text
+    assert await get_program(client, auth) == before
+    assert await program_count(client, auth) == 1
+
+
+@pytest.mark.parametrize(
+    "op",
+    [mv(1, 0), mv(1, 8), mv(1, 1), mv(2, 4)],
+    ids=["to-0", "to-8", "same-weekday", "no-day-in-source-week"],
+)
+async def test_move_day_invalid_is_422_and_changes_nothing(client, auth, op):
+    before = await get_program(client, auth)
+    r = await patch(client, auth, TEMPLATE, 1, [op])
+    assert r.status_code == 422, r.text
+    assert await get_program(client, auth) == before
+    assert await program_count(client, auth) == 1
+
+
+async def test_move_day_in_other_weeks_without_that_day_is_skipped(client, auth):
+    copy_prog = await make_copy(client, auth)
+    moved = (await ok(client, auth, copy_prog["id"], copy_prog["version"], [mv(3, 4)]))["program"]
+    assert weekdays(moved, 1) == [1, 4, 5]  # week 1 has no Wednesday any more
+
+    body = await ok(client, auth, moved["id"], moved["version"], [mv(3, 2, week=2, weeks=[1, 2])])
+
+    (res,) = body["results"]
+    assert res["weeks"] == [2]
+    assert skipped(res) == {1: "нет этого дня"}
+    assert weekdays(body["program"], 2) == [1, 2, 5]
+
+
+async def test_move_day_on_the_template_forks_and_keeps_base_day_and_the_check(client, auth, db, settings):
+    started = monday_of(local_today(settings))
+    await start_program(client, auth, started)
+    template = await get_program(client, auth)
+    monday = day_of(template, 1, 1)
+    post = {
+        "id": "w1", "programId": TEMPLATE, "week": 1, "weekday": 1, "programDayId": monday["id"],
+        "startedAt": f"{started.isoformat()}T09:00:00Z", "finishedAt": f"{started.isoformat()}T10:00:00Z",
+        "exercises": [
+            {"name": e["name"], "target": "x", "dropset": False, "sets": [{"weight": 20, "reps": 10}]}
+            for e in monday["exercises"][:2]
+        ],
+    }
+    r = await client.post("/api/workouts", json=post, headers=auth)
+    assert r.status_code == 200, r.text
+    before = await state(client, auth)
+    (h,) = before["history"]
+    assert h["weekday"] == 1
+
+    body = await ok(client, auth, TEMPLATE, 1, [mv(1, 2)])
+
+    assert body["switchedFrom"] == TEMPLATE
+    assert await get_program(client, auth, TEMPLATE) == template  # the template never changes
+    copy_prog = body["program"]
+    assert weekdays(copy_prog, 1) == [2, 3, 5]
+    moved = day_of(copy_prog, 1, 2)
+    async with db() as s:
+        row = await s.get(ProgramDay, moved["id"])
+        assert row.base_day_id == monday["id"] and row.weekday == 2
+    after = await state(client, auth)
+    (h2,) = after["history"]
+    assert (h2["week"], h2["weekday"]) == (1, 2)  # the ✓ moved with the day
+    assert h2["programDayId"] == moved["id"]
+
+
+async def test_move_day_dry_run_changes_nothing(client, auth, published):
+    template = await get_program(client, auth)
+    before_state = await state(client, auth)
+
+    dry = await ok(client, auth, TEMPLATE, 1, [mv(1, 3), mv(5, 6)], dryRun=True)
+
+    assert dry["results"] == [
+        {"op": 0, "weeks": [1], "skipped": []},
+        {"op": 1, "weeks": [1], "skipped": []},
+    ]
+    assert dry["program"] == template
+    assert await get_program(client, auth) == template
+    assert await state(client, auth) == before_state
+    assert await program_count(client, auth) == 1
+    assert published == []

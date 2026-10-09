@@ -20,6 +20,7 @@ import {
   programPosition,
   WEEKDAY_LONG,
   WEEKDAY_SHORT,
+  workoutDay,
   type ProgramDay,
 } from '../program'
 import {
@@ -246,8 +247,16 @@ function DayPreview({ dp }: { dp: DayPlanState }) {
   const suggested = nextTrainingDay(program, pos.week, pos.weekday)
   const [week, setWeek] = useState(suggested.week)
   const chipsRef = useScrollActive<HTMLDivElement>(week)
-  const [weekday, setWeekday] = useState(suggested.weekday)
+  const [chosen, setWeekday] = useState(suggested.weekday)
   const [sheet, setSheet] = useState<string | null>(null)
+  const weekDays = program.weeks.find((w) => w.number === week)?.days ?? []
+  // The chosen weekday may have lost its day to a live update (a day moved from the chat): show the
+  // suggested one in that week, else the week's first, instead of an empty day.
+  const weekday = weekDays.some((d) => d.weekday === chosen)
+    ? chosen
+    : week === suggested.week && weekDays.some((d) => d.weekday === suggested.weekday)
+      ? suggested.weekday
+      : (weekDays[0]?.weekday ?? chosen)
   const day = getDay(program, week, weekday)
   const mode = planMode(state)
   const isToday = !pos.finished && !pos.notStarted && week === pos.week && weekday === pos.weekday
@@ -257,7 +266,6 @@ function DayPreview({ dp }: { dp: DayPlanState }) {
   const applied = day
     ? applyPlan(day, mode === 'adjusted' ? visiblePlan(dp) : null, history, localISODate(), week, baselines, overrides)
     : null
-  const weekDays = program.weeks.find((w) => w.number === week)?.days ?? []
   const doneHere = run.some((w) => w.week === week && w.weekday === weekday)
   const label = pos.finished
     ? 'Программа завершена'
@@ -460,7 +468,7 @@ function ActiveWorkout({ workout, dp }: { workout: Workout; dp: DayPlanState }) 
   const [sheet, setSheet] = useState<string | null>(null)
   const now = useNow(true)
   const program = getProgram(workout.programId)
-  const day = getDay(program, workout.week, workout.weekday)
+  const day = workoutDay(program, workout)
   const mode = planMode(state)
   const plan = visiblePlan(dp)
   // Look exercises up in what the workout was built from, so replaced ones keep their prescription.

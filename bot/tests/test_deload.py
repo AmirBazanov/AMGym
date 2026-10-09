@@ -522,6 +522,95 @@ async def test_cancel_is_a_no_op_without_a_state(db):
         assert await deload.cancel(s, user.id, TODAY, NOW) is False
 
 
+# ---- scheduled (a start day after today) ----
+
+NEXT_MON = date(2026, 10, 12)
+
+
+async def test_start_in_the_future_is_scheduled_not_active(db, settings):
+    uid = await stalled_user(db)
+    async with db() as s:
+        until = await deload.start(s, uid, TODAY, NOW, start_on=NEXT_MON)
+        await s.commit()
+    assert until == NEXT_MON + timedelta(days=6)
+    st = await state_of(db, uid)
+    assert (st.started_on, st.until) == (NEXT_MON, until)
+    assert not deload.active(st, TODAY) and deload.scheduled(st, TODAY) and deload.pending(st, TODAY)
+    assert deload.active(st, NEXT_MON) and not deload.scheduled(st, NEXT_MON) and deload.pending(st, NEXT_MON)
+    assert deload.active(st, until) and not deload.pending(st, until + timedelta(days=1))
+    async with db() as s:
+        assert await deload.active_until(s, uid, TODAY) is None  # today's plan stays normal
+        assert await deload.active_until(s, uid, NEXT_MON) == until
+    assert aware(st.ask_after) == datetime(2026, 10, 18, tzinfo=UTC) + deload.AFTER_DELOAD
+
+
+async def test_no_offers_while_a_deload_is_scheduled(db, settings):
+    uid = await stalled_user(db)
+    async with db() as s:
+        await deload.start(s, uid, TODAY, NOW, start_on=NEXT_MON)
+        await s.commit()
+    st = await state_of(db, uid)
+    assert not deload.due(st, TODAY, NOW) and not deload.due(st, TODAY, NOW + timedelta(days=30))
+    for days in (0, 1, 3):
+        assert await offer(db, settings, uid, NOW + timedelta(days=days)) is None
+
+
+async def test_cancel_a_scheduled_deload_clears_it(db):
+    async with db() as s:
+        user = await get_or_create_user(s, 42, "A")
+        await deload.start(s, user.id, TODAY, NOW, start_on=NEXT_MON)
+        await s.commit()
+        uid = user.id
+    async with db() as s:
+        assert await deload.cancel(s, uid, TODAY, NOW) is True
+        await s.commit()
+    st = await state_of(db, uid)
+    assert st.started_on is None and st.until is None and aware(st.ask_after) == NOW + timedelta(days=14)
+    assert not deload.pending(st, TODAY)
+    async with db() as s:
+        assert await deload.cancel(s, uid, TODAY, NOW) is False
+
+
+async def test_start_on_in_the_past_clamps_to_today(db):
+    async with db() as s:
+        user = await get_or_create_user(s, 42, "A")
+        until = await deload.start(s, user.id, TODAY, NOW, start_on=TODAY - timedelta(days=3))
+        await s.commit()
+        uid = user.id
+    assert until == TODAY + timedelta(days=6)
+    st = await state_of(db, uid)
+    assert st.started_on == TODAY and deload.active(st, TODAY)
+
+
+async def test_a_scheduled_deload_replaces_a_running_one(db):
+    async with db() as s:
+        user = await get_or_create_user(s, 42, "A")
+        await deload.start(s, user.id, TODAY, NOW)
+        await deload.start(s, user.id, TODAY, NOW, start_on=NEXT_MON)
+        await s.commit()
+        uid = user.id
+    st = await state_of(db, uid)
+    assert st.started_on == NEXT_MON and not deload.active(st, TODAY)
+
+
+def test_scheduled_and_pending_pure():
+    st = DeloadState(user_id=1, started_on=NEXT_MON, until=NEXT_MON + timedelta(days=6))
+    assert deload.scheduled(st, TODAY) and not deload.scheduled(st, NEXT_MON)
+    assert not deload.scheduled(None, TODAY) and not deload.scheduled(DeloadState(user_id=1), TODAY)
+    assert not deload.pending(None, TODAY) and not deload.pending(DeloadState(user_id=1), TODAY)
+
+
+def test_span_text():
+    assert deload.span(NEXT_MON, date(2026, 10, 18)) == "с пн 12.10 по вс 18.10"
+
+
+def test_status_text_for_a_scheduled_deload():
+    st = DeloadState(user_id=1, started_on=NEXT_MON, until=date(2026, 10, 18))
+    assert deload.status_text(st, deload.Verdict(), TODAY) == (
+        "Разгрузочная неделя запланирована: с пн 12.10 по вс 18.10."
+    )
+
+
 # ---- status text ----
 
 
@@ -765,6 +854,20 @@ async def test_deload_command_while_running(db, settings):
     assert buttons(m.answer.await_args.kwargs["reply_markup"]) == ["deload:cancel"]
 
 
+async def test_deload_command_while_scheduled_offers_cancel(db, settings, published):
+    uid = await uid_of(db)
+    async with db() as s:
+        s.add(DeloadState(user_id=uid, started_on=TODAY + timedelta(days=4), until=TODAY + timedelta(days=10)))
+        await s.commit()
+    m = msg()
+    await hd.show_status(m, settings, db)
+    assert m.answer.await_args.args[0] == "Разгрузочная неделя запланирована: с пн 12.10 по вс 18.10."
+    assert buttons(m.answer.await_args.kwargs["reply_markup"]) == ["deload:cancel"]
+    await hd.on_button(cb("cancel"), settings, db)
+    st = await state_of(db, uid)
+    assert st.started_on is None and st.until is None
+
+
 async def test_ask_shows_the_confirmation_and_changes_nothing(db, settings, published):
     uid = await uid_of(db)
     c = cb("ask")
@@ -981,3 +1084,16 @@ async def test_migration_0013_round_trip(tmp_path):
             assert (await conn.execute(text("SELECT count(*) FROM deload_states"))).scalar_one() == 0
     finally:
         await engine.dispose()
+
+
+async def test_yes_on_an_old_offer_keeps_a_scheduled_deload(db, settings, published):
+    uid = await uid_of(db)
+    first, last = TODAY + timedelta(days=4), TODAY + timedelta(days=10)
+    async with db() as s:
+        s.add(DeloadState(user_id=uid, started_on=first, until=last))
+        await s.commit()
+    c = cb("yes")
+    await hd.on_button(c, settings, db)
+    st = await state_of(db, uid)
+    assert (st.started_on, st.until) == (first, last)
+    assert shown(c).startswith("Разгрузочная неделя уже запланирована с ") and published == []

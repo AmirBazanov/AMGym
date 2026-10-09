@@ -367,7 +367,8 @@ export function getExercises(): Promise<CatalogExercise[]> {
   return api<CatalogExercise[]>('/exercises')
 }
 
-// ---- Program editor: PATCH /api/programs/{slug} (spec section «API», phase 2: replace/prescribe/add/remove/reorder) ----
+// ---- Program editor: PATCH /api/programs/{slug} (spec section «API», phase 2: replace/prescribe/add/remove/reorder;
+// phase 3: move_day) ----
 
 /** ProgramItem.id, or the `tempId` of an `add` earlier in the same request. */
 export type ItemRef = number | string
@@ -393,6 +394,20 @@ export type ProgramOp =
   | ({ op: 'add'; week: number; weekday: number; tempId: string; name: string; position: number; weeks?: number[] } & OpPrescription)
   | { op: 'remove'; week: number; weekday: number; itemId: ItemRef; weeks?: number[] }
   | { op: 'reorder'; week: number; weekday: number; itemIds: ItemRef[]; weeks?: number[] }
+  | MoveDayOp
+
+/**
+ * The day on `weekday` moves to `toWeekday`; a day already there takes `weekday` (a swap). Only the weekday
+ * changes: ProgramDay.id, items and focus stay, so workouts linked to the day (✓) move with it. Weeks before
+ * the current program week are skipped (reason «неделя уже прошла»); the source week there is a 422.
+ */
+export interface MoveDayOp {
+  op: 'move_day'
+  week: number
+  weekday: number
+  toWeekday: number // 1 = Monday .. 7 = Sunday
+  weeks?: number[]
+}
 
 export interface ProgramPatch {
   version: number

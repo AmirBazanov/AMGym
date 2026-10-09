@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from test_log_text import FakeLLM as _FakeLLM
 from test_log_text import callback, message
 
-from gymbot.db.models import Program
+from gymbot.db.models import DeloadState, Program
 from gymbot.handlers import chat_edit as hce
 from gymbot.handlers import log_text
 from gymbot.services import chat_edit as ce
@@ -189,7 +189,10 @@ async def test_weekday_delete_rejected_by_the_edit_model_reaches_saved_edits(set
     assert llm.edit_calls() == 1 and handle.await_count == 1
 
 
-@pytest.mark.parametrize("text", ["сделал жим 80×8", "что сегодня?", "удали последнюю запись", "запиши самочувствие"])
+@pytest.mark.parametrize("text", [
+    "сделал жим 80×8", "что сегодня?", "удали последнюю запись", "запиши самочувствие",
+    "на этой неделе делоад, спал плохо", "разгрузочная неделя, болит колено",
+])
 async def test_non_commands_never_reach_the_edit_model(text, settings, db, llm):
     await run(text, settings, db, llm)
     assert llm.edit_calls() == 0 and hce.EDITS == {}
@@ -276,7 +279,7 @@ async def test_program_changed_between_preview_and_apply(settings, db, llm, publ
         up = await active_program(s, user, TODAY)
         other = next(i for i in snap.day(1, 5).items if i.name == "жим сидя в смите")
         op = {"op": "remove", "week": 1, "weekday": 5, "weeks": [1], "itemId": other.id}
-        await pe.edit_program(s, user, up, snap.slug, snap.version, [op])
+        await pe.edit_program(s, user, up, snap.slug, snap.version, [op], today=TODAY)
         await s.commit()
     cb = callback(f"eapply:{token}")
     await hce.apply_edit(cb, settings, db)
@@ -361,3 +364,65 @@ async def test_notes_only_plan_gives_way_to_saved_edits(settings, db, llm, monke
     llm.answers.append(data)
     msg = await run("убери становую тягу из пятничной тренировки", settings, db, llm)
     assert handle.await_count == 1 and hce.EDITS == {} and msg.answer.await_count == 0
+
+
+def deload_next_week():
+    return {"actions": [{"type": "deload", "week": "next_week", "start": None}], "summary": ""}
+
+
+async def deload_row(db):
+    async with db() as s:
+        return await s.scalar(select(DeloadState))
+
+
+async def test_deload_preview_apply_publishes_the_plan(settings, db, llm, published):
+    llm.answers.append(deload_next_week())
+    msg = await run("следующая неделя — делоад", settings, db, llm)
+    assert llm.edit_calls() == 1 and llm.parser_calls() == 0
+    assert "Что изменю" in shown(msg) and "Разгрузочная неделя с пн 12.10 по вс 18.10" in shown(msg)
+    assert "Создам" not in shown(msg)
+    assert await deload_row(db) is None  # the preview wrote nothing
+
+    cb = callback(f"eapply:{token_of(msg)}")
+    await hce.apply_edit(cb, settings, db)
+    st = await deload_row(db)
+    assert (st.started_on, st.until) == (date(2026, 10, 12), date(2026, 10, 18))
+    assert len(published) == 1 and published[0][1:] == ("plan",)
+    assert "Готово" in cb.message.edit_text.await_args.args[0]
+    assert await owned_programs(db) == 0
+
+    again = callback(f"eapply:{token_of(msg)}")
+    await hce.apply_edit(again, settings, db)
+    again.answer.assert_awaited_with(hce.STALE, show_alert=True)
+    assert len(published) == 1
+
+
+async def test_swap_preview_has_both_dates_and_apply_publishes_everything(settings, db, llm, published):
+    llm.answers.append({"actions": [{
+        "type": "swap_days", "a": {"weekday": None, "focus": None, "when": "today"},
+        "b": {"weekday": None, "focus": "база", "when": None}, "scope": None,
+    }], "summary": ""})
+    msg = await run("сделай сегодня базу вместо рук", settings, db, llm)
+    assert "пт 09.10" in shown(msg) and "ср 07.10" in shown(msg) and "Создам твою копию" in shown(msg)
+    assert await owned_programs(db) == 0
+
+    cb = callback(f"eapply:{token_of(msg)}")
+    await hce.apply_edit(cb, settings, db)
+    snap = await active_snapshot(db)
+    assert snap.day(1, 5).focus == "База" and snap.day(1, 3).focus == "Руки и плечи"
+    assert snap.day(2, 5).focus == "Руки и плечи"
+    assert len(published) == 1 and published[0][1:] == ("program", "plan", "state")
+    assert await owned_programs(db) == 1
+
+
+async def test_swap_plus_deload_in_one_confirmation(settings, db, llm, published):
+    llm.answers.append({"actions": [
+        {"type": "move_day", "src": {"when": "today"}, "dst": {"when": "tomorrow"}},
+        {"type": "deload", "week": "next_week", "start": None},
+    ], "summary": ""})
+    msg = await run("перенеси тренировку на завтра и со следующей недели разгрузка", settings, db, llm)
+    assert "пт 09.10 → сб 10.10" in shown(msg) and "Разгрузочная неделя с пн 12.10" in shown(msg)
+    await hce.apply_edit(callback(f"eapply:{token_of(msg)}"), settings, db)
+    assert (await deload_row(db)).started_on == date(2026, 10, 12)
+    assert (await active_snapshot(db)).day(1, 6).focus == "Руки и плечи"
+    assert published[0][1:] == ("program", "plan", "state")

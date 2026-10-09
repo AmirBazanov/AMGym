@@ -12,6 +12,7 @@ import {
   draftOps,
   editOutcome,
   externalFork,
+  findEditedDay,
   formatWeeks,
   itemChange,
   moveItem,
@@ -39,7 +40,7 @@ import {
   type Draft,
   type Rx,
 } from './programEdit'
-import type { Intensity, Program, ProgramDay, ProgramExercise } from './program'
+import { workoutDay, type Intensity, type Program, type ProgramDay, type ProgramExercise } from './program'
 import type { Workout } from './store'
 
 // ---------- fixtures ----------
@@ -1713,5 +1714,149 @@ describe('externalFork', () => {
     expect(externalFork(synced('tpl'), { id: 'tpl.u1', basedOn: 'other' })).toBeNull()
     expect(externalFork({ ...synced('tpl'), programId: 'tpl' }, copy)).toBeNull()
     expect(externalFork(synced('tpl'), { id: 'tpl', basedOn: 'tpl' })).toBeNull()
+  })
+})
+
+// ---------- move_day (phase 3, from the chat) ----------
+
+describe('applyOps: move_day', () => {
+  const move = (over: Partial<Extract<ProgramOp, { op: 'move_day' }>> = {}): ProgramOp => ({ op: 'move_day', week: 2, weekday: 1, toWeekday: 2, ...over })
+  const days = (p: Program, week: number) => weekOf(p, week).days.map((d) => [d.id, d.weekday, d.title])
+
+  it('moves the day to a free weekday: same id and exercises, title from the weekday', () => {
+    const r = applied(buildProgram(), [move({ toWeekday: 5 })])
+    expect(days(r.program, 2)).toEqual([
+      [23, 3, 'среда'],
+      [21, 5, 'пятница'],
+    ])
+    expect(names(dayOf(r.program, 2, 5))).toEqual(names(mon(2)))
+    expect(days(r.program, 1)).toEqual(days(buildProgram(), 1)) // only the op's week
+    expect(r.results).toEqual([{ op: 0, weeks: [2], skipped: [] }])
+  })
+
+  it('swaps with the day already on the target weekday, days stay sorted', () => {
+    const r = applied(buildProgram(), [move({ toWeekday: 3 })])
+    expect(days(r.program, 2)).toEqual([
+      [23, 1, 'понедельник'],
+      [21, 3, 'среда'],
+    ])
+    expect(dayOf(r.program, 2, 3).focus).toBe('Руки и плечи')
+  })
+
+  it('does not touch the input program', () => {
+    const p = buildProgram()
+    applied(p, [move({ toWeekday: 3 })])
+    expect(days(p, 2)).toEqual([
+      [21, 1, 'понедельник'],
+      [23, 3, 'среда'],
+    ])
+  })
+
+  it('a later op of the request sees the day on its new weekday', () => {
+    const r = applied(buildProgram(), [move({ toWeekday: 4 }), { op: 'remove', week: 2, weekday: 4, itemId: 202 }])
+    expect(names(dayOf(r.program, 2, 4))).toEqual(['жим лёжа', 'отведения на дельты'])
+    expect(applyOps(buildProgram(), [move({ toWeekday: 4 }), { op: 'remove', week: 2, weekday: 1, itemId: 202 }])).toMatchObject({ ok: false, op: 1 })
+  })
+
+  it('weeks: a missing day is a skip; earlier weeks are skipped with the server reason when currentWeek is known', () => {
+    const p = buildProgram()
+    weekOf(p, 4).days = weekOf(p, 4).days.filter((d) => d.weekday !== 1)
+    const r = applyOps(p, [move({ toWeekday: 3, weeks: WEEKS })], { currentWeek: 2 })
+    expect(r).toMatchObject({ ok: true, results: [{ op: 0, weeks: [2, 3], skipped: [{ week: 1, reason: 'неделя уже прошла' }, { week: 4, reason: 'нет этого дня' }] }] })
+    if (!r.ok) return
+    expect(days(r.program, 1)).toEqual(days(buildProgram(), 1))
+    expect(dayOf(r.program, 3, 1).id).toBe(33)
+  })
+
+  it('without currentWeek every week moves (the server decides)', () => {
+    expect(applied(buildProgram(), [move({ toWeekday: 3, weeks: WEEKS })]).results[0]).toEqual({ op: 0, weeks: WEEKS, skipped: [] })
+  })
+
+  it('errors: the same weekday, out of range, the source week already past, no such day', () => {
+    expect(applyOps(buildProgram(), [move({ toWeekday: 1 })])).toEqual({ ok: false, op: 0, error: 'День уже стоит на этом дне недели' })
+    expect(applyOps(buildProgram(), [move({ toWeekday: 0 })])).toMatchObject({ ok: false, op: 0 })
+    expect(applyOps(buildProgram(), [move({ toWeekday: 8 })])).toMatchObject({ ok: false, op: 0 })
+    expect(applyOps(buildProgram(), [move({ week: 1 })], { currentWeek: 2 })).toEqual({ ok: false, op: 0, error: 'Неделя 1 уже прошла, переносить в ней нельзя' })
+    expect(applyOps(buildProgram(), [move({ weekday: 2, toWeekday: 4 })])).toEqual({ ok: false, op: 0, error: 'Нет такого дня' })
+  })
+
+  it('summarize groups the past-week skips; opLabel names the move', () => {
+    const o: ProgramOp[] = [move({ week: 3, toWeekday: 3, weeks: WEEKS })]
+    const r = applyOps(buildProgram(), o, { currentWeek: 3 })
+    if (!r.ok) throw new Error(r.error)
+    const label = opLabel(o[0], mon(3), draftFromDay(mon(3)))
+    expect(label).toBe('перенос дня: пн → ср')
+    expect(summarize(o, r.results, (op) => opLabel(op, mon(3), []))).toEqual({
+      changed: [3, 4],
+      skipped: [{ weeks: [1, 2], reason: 'неделя уже прошла', what: label }],
+    })
+  })
+
+  it('the server results with the past-week reason pass through editOutcome as they are', () => {
+    const out = editOutcome(200, {
+      program: { id: 'tpl.u1', name: 'x', source: null, version: 2, editable: true, basedOn: 'tpl', weeks: [] },
+      switchedFrom: 'tpl',
+      results: [{ op: 0, weeks: [3], skipped: [{ week: 2, reason: 'неделя уже прошла' }] }],
+    })
+    expect(out).toMatchObject({ kind: 'saved', results: [{ skipped: [{ week: 2, reason: 'неделя уже прошла' }] }] })
+  })
+})
+
+describe('findEditedDay: the editor follows its day after a move_day', () => {
+  const swapped = () => applied(buildProgram(), [{ op: 'move_day', week: 1, weekday: 1, toWeekday: 3 }]).program
+
+  it('by id when the day moved and another one took its weekday', () => {
+    const base = mon(1)
+    const day = findEditedDay(swapped(), 1, base)
+    expect(day?.id).toBe(11)
+    expect(day?.weekday).toBe(3)
+  })
+
+  it('unchanged program: the same day', () => {
+    expect(findEditedDay(buildProgram(), 1, mon(1))?.id).toBe(11)
+  })
+
+  it('another program (a fork, new ids): the day with the same exercises, else the weekday', () => {
+    const copy = swapped()
+    copy.weeks.forEach((w) => w.days.forEach((d) => (d.id = (d.id ?? 0) + 1000)))
+    expect(findEditedDay(copy, 1, mon(1))?.id).toBe(1011)
+    dayOf(copy, 1, 3).exercises.pop() // edited in the copy: no day alike, back to the weekday
+    expect(findEditedDay(copy, 1, mon(1))?.id).toBe(1013)
+  })
+
+  it('no base: the weekday given', () => {
+    expect(findEditedDay(swapped(), 1, undefined, 3)?.id).toBe(11)
+    expect(findEditedDay(swapped(), 9, mon(1))).toBeUndefined()
+  })
+
+  it('rebaseDraft onto the moved day keeps the edits and sends its new weekday', () => {
+    const base = mon(1)
+    const draft = removeItem(draftFromDay(base), 102)
+    const moved = findEditedDay(swapped(), 1, base)!
+    const rebased = rebaseDraft(base, moved, draft, 1)
+    expect(rebased?.map((i) => i.key)).toEqual([101, 103])
+    expect(draftOps(1, moved.weekday, moved, rebased!)).toEqual([{ op: 'remove', week: 1, weekday: 3, itemId: 102 }])
+  })
+
+  it('rebaseDraft onto the day that took the weekday (old lookup) does not fit: null, not a silent edit of it', () => {
+    const base = mon(1)
+    const draft = removeItem(draftFromDay(base), 102)
+    const other = dayOf(swapped(), 1, 1)
+    expect(other.id).toBe(13)
+    expect(rebaseDraft(base, other, draft, 1)).toBeNull()
+  })
+})
+
+describe('workoutDay: a started workout keeps its day after a move_day', () => {
+  const swapped = () => applied(buildProgram(), [{ op: 'move_day', week: 1, weekday: 1, toWeekday: 3 }]).program
+
+  it('by programDayId wherever the day stands now', () => {
+    expect(workoutDay(swapped(), { week: 1, weekday: 1, programDayId: 11 })?.weekday).toBe(3)
+  })
+
+  it('without programDayId, or one not in the program: by week and weekday', () => {
+    expect(workoutDay(swapped(), { week: 1, weekday: 1 })?.id).toBe(13)
+    expect(workoutDay(swapped(), { week: 1, weekday: 1, programDayId: null })?.id).toBe(13)
+    expect(workoutDay(swapped(), { week: 1, weekday: 1, programDayId: 999 })?.id).toBe(13)
   })
 })

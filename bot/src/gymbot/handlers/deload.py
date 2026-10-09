@@ -66,7 +66,7 @@ async def show_status(message: Message, settings: Settings, sessionmaker: Sessio
         await session.commit()
         st = await deload.get_state(session, user.id)
         verdict = await deload.evaluate(session, user, today, tz, settings.programs_dir)
-    running = deload.active(st, today)
+    running = deload.pending(st, today)  # a scheduled one can be cancelled too
     await message.answer(deload.status_text(st, verdict, today), reply_markup=status_keyboard(running))
 
 
@@ -98,6 +98,9 @@ async def on_button(cb: CallbackQuery, settings: Settings, sessionmaker: Session
             if deload.active(st, today):
                 assert st is not None and st.until is not None
                 text = f"Разгрузочная неделя уже идёт до {_day(st.until)}."
+            elif deload.scheduled(st, today):  # an old offer pressed after one was set from the chat
+                assert st is not None and st.started_on is not None and st.until is not None
+                text = f"Разгрузочная неделя уже запланирована {deload.span(st.started_on, st.until)}. Отменить: /deload"
             else:
                 until = await deload.start(session, user.id, today, now)
                 text = STARTED.format(until=_day(until))

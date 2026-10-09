@@ -425,7 +425,12 @@ const SKIP = {
   last: 'последнее упражнение дня',
   full: `в дне уже ${LIMITS.dayMax} упражнений`,
   otherSet: 'другой набор упражнений',
+  pastWeek: 'неделя уже прошла', // move_day before the current program week (server PAST_WEEK)
 } as const
+
+/** ProgramDay titles as the server derives them from the weekday (programs.WEEKDAY_TITLES). */
+const DAY_TITLES = ['', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье']
+const DAY_SHORT = ['', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс']
 
 function cloneProgram(p: Program): Program {
   return {
@@ -447,8 +452,11 @@ export function opWeeks(op: { week: number; weeks?: number[] }): number[] {
  * other weeks the same weekday and the exercise with the same name (the server: same exercise_id) as the
  * edited one before the op; no match is a skip, not an error. The edited week's failures are errors.
  * Names stay as typed (the server may map an alias to its canonical name).
+ * `move_day` changes only the day's weekday (a swap with a day already there); `currentWeek` (the program
+ * week of today) makes earlier weeks skips and an earlier source week an error, as on the server; without
+ * it the client does not know and leaves that to the server.
  */
-export function applyOps(program: Program, ops: readonly ProgramOp[]): ApplyResult {
+export function applyOps(program: Program, ops: readonly ProgramOp[], opts: { currentWeek?: number } = {}): ApplyResult {
   const prog = cloneProgram(program)
   const temp = new Map<string, ProgramExercise>()
   const results: OpResult[] = []
@@ -470,7 +478,33 @@ export function applyOps(program: Program, ops: readonly ProgramOp[]): ApplyResu
     const res: OpResult = { op: i, weeks: [], skipped: [] }
     const skip = (week: number, reason: string) => res.skipped.push({ week, reason })
 
-    if (op.op === 'add') {
+    if (op.op === 'move_day') {
+      const to = op.toWeekday
+      if (!Number.isInteger(to) || to < 1 || to > 7) return fail(i, 'День недели должен быть от 1 до 7')
+      if (to === op.weekday) return fail(i, 'День уже стоит на этом дне недели')
+      const current = opts.currentWeek
+      if (current != null && op.week < current) return fail(i, `Неделя ${op.week} уже прошла, переносить в ней нельзя`)
+      for (const n of weeks) {
+        if (current != null && n < current) {
+          skip(n, SKIP.pastWeek)
+          continue
+        }
+        const day: ProgramDay | undefined = n === op.week ? src : dayOf(n, op.weekday)
+        if (!day) {
+          skip(n, SKIP.noDay)
+          continue
+        }
+        const other = dayOf(n, to) // looked up before the move, or it would find the moved day
+        day.weekday = to
+        day.title = DAY_TITLES[to]
+        if (other) {
+          other.weekday = op.weekday
+          other.title = DAY_TITLES[op.weekday] ?? String(op.weekday)
+        }
+        prog.weeks.find((x) => x.number === n)!.days.sort((a, b) => a.weekday - b.weekday)
+        res.weeks.push(n)
+      }
+    } else if (op.op === 'add') {
       const name = cleanName(op.name)
       for (const n of weeks) {
         const day: ProgramDay | undefined = n === op.week ? src : dayOf(n, op.weekday)
@@ -612,6 +646,26 @@ export function rebaseDraft(oldDay: ProgramDay, newDay: ProgramDay, draft: Draft
   return out
 }
 
+/**
+ * The day the editor holds (`base`) in a newer version of the program, in `week`: the one with base's
+ * ProgramDay.id wherever it stands now (a move_day from the chat or another device may have put it on
+ * another weekday, and another day on its old one), else, when base has no id or the program is another
+ * one (a fork: new ids), the day with the same exercises (a copy's day as made from the template's), else
+ * the one on `weekday` (base's own when absent).
+ */
+export function findEditedDay(program: Program, week: number, base: ProgramDay | undefined, weekday = base?.weekday): ProgramDay | undefined {
+  const days = program.weeks.find((w) => w.number === week)?.days ?? []
+  if (base?.id != null) {
+    const same = days.find((d) => d.id === base.id)
+    if (same) return same
+    const names = (d: ProgramDay) => d.exercises.map((e) => normalizeName(e.name)).sort().join('\u0000')
+    const key = names(base)
+    const alike = days.filter((d) => names(d) === key)
+    if (alike.length === 1) return alike[0]
+  }
+  return days.find((d) => d.weekday === weekday)
+}
+
 /** The day already is the draft (names in order, prescriptions): e.g. a save that timed out but went through. */
 export function draftMatchesDay(day: ProgramDay, draft: Draft): boolean {
   const ex = day.exercises
@@ -675,6 +729,8 @@ export function opLabel(op: ProgramOp, base: ProgramDay, draft: Draft): string {
       return `убрать ${nameOf(op.itemId)}`
     case 'reorder':
       return 'порядок упражнений'
+    case 'move_day':
+      return `перенос дня: ${DAY_SHORT[op.weekday] ?? op.weekday} → ${DAY_SHORT[op.toWeekday] ?? op.toWeekday}`
   }
 }
 

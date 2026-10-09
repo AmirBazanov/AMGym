@@ -68,6 +68,21 @@ export function getDay(program: Program, week: number, weekday: number): Program
   return program.weeks.find((w) => w.number === week)?.days.find((d) => d.weekday === weekday)
 }
 
+/**
+ * The day a workout was built from: its ProgramDay.id when the program has it (a move_day may have put the
+ * day on another weekday and another day on the workout's), else the day on its week and weekday.
+ */
+export function workoutDay(
+  program: Program,
+  w: { week: number; weekday: number; programDayId?: number | null },
+): ProgramDay | undefined {
+  if (w.programDayId != null) {
+    const own = program.weeks.find((x) => x.number === w.week)?.days.find((d) => d.id === w.programDayId)
+    if (own) return own
+  }
+  return getDay(program, w.week, w.weekday)
+}
+
 export function programExerciseNames(program: Program): string[] {
   const seen = new Set<string>()
   for (const w of program.weeks) for (const d of w.days) for (const e of d.exercises) seen.add(e.name)

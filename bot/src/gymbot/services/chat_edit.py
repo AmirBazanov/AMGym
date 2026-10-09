@@ -1,6 +1,7 @@
-"""Program edits from the chat: "убери французский жим из дня рук", "поставь на сгибания 30 кг".
+"""Program edits from the chat: "убери французский жим из дня рук", "поставь на сгибания 30 кг", "поменяй
+местами руки и спину", "перенеси тренировку на завтра", "следующая неделя — делоад".
 
-Plan: docs/plans/2026-10-09-chat-program-control.md (stage 1). Flow (handlers/chat_edit.py):
+Plan: docs/plans/2026-10-09-chat-program-control.md (stages 1 and 2). Flow (handlers/chat_edit.py):
 1. `is_edit_command` — a conservative regex, checked in process_text before saved_edits (a question, a past
    tense verb, saved-record words and settings vocabulary never route here).
 2. One `complete_json(purpose="edit")` call with EDIT_SYSTEM_PROMPT (gymbot.llm.prompts_edit) and
@@ -8,9 +9,12 @@ Plan: docs/plans/2026-10-09-chat-program-control.md (stage 1). Flow (handlers/ch
    answers with intentions by name (`parse_actions`, each validated on its own), never with ids or weeks.
 3. `compile_ops` resolves days (weekday, today/tomorrow, focus or the exercises of the day), exercises (only
    within that day) and scopes (weeks) into the program editor's PATCH ops (gymbot.services.program_editor)
-   and weights for a day (WeightOverride). Ambiguity is a `Clarify` with buttons, never a guess.
+   and weights for a day (WeightOverride). A swap or a move of days is one `move_day` op (the editor swaps
+   when the target weekday is taken); a deload is a start date for gymbot.services.deload. Ambiguity is a
+   `Clarify` with buttons, never a guess.
 4. `preview` dry-runs `edit_program` (rolled back) for the skipped weeks; "✅ Применить" -> `apply` runs the
-   same `edit_program` with the version seen in the preview, then the overrides, in one transaction.
+   same `edit_program` with the version seen in the preview, then the overrides and the deload, in one
+   transaction.
 
 A message the model turned into at least one valid action is consumed by this path; with no valid action the
 text goes on as usual (saved edits, settings, the parser). Weights in kg, days are local dates (TIMEZONE).
@@ -37,8 +41,8 @@ from pydantic import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gymbot.db.models import Exercise, User, UserProgram, WeightOverride
-from gymbot.services import baselines, overrides
+from gymbot.db.models import Exercise, User, UserProgram, WeightOverride, Workout
+from gymbot.services import baselines, deload, overrides
 from gymbot.services import chat_settings as cs
 from gymbot.services import program_editor as pe
 from gymbot.services.advice import NEXT_DAY_SEARCH
@@ -90,6 +94,20 @@ _RECORDS = re.compile(
     r"(?<!\w)(?:запис\w*|вчера\w*|позавчера\w*|сегодняшн\w*|за\s+(?:понедельник|вторник|среду|четверг|пятницу|"
     r"субботу|воскресенье))(?!\w)"
 )
+# A deload week: "следующая неделя — делоад", "давай на этой неделе разгрузку". Not "облегчённо" (stage 3).
+_DELOAD = re.compile(r"(?<!\w)(?:делоад\w*|дилоад\w*|разгрузк\w*|разгрузочн\w*)(?!\w)")
+_DELOAD_WHEN = re.compile(r"(?<!\w)(?:недел\w*|с\s+понедельник\w*)(?!\w)")
+# How the user feels ("на этой неделе делоад, спал плохо", "перенеси тренировку на завтра, болит спина"): a
+# wellbeing record for the parser, never a program edit.
+_WELLBEING = re.compile(
+    r"(?<!\w)(?:бол(?:ит|ят|ел\w*|ело|ь|и|ью)|болезн\w*|спал\w*|сплю|выспал\w*|недосып\w*|сон|сна|сном|"
+    r"устал\w*|усталост\w*|энерги\w*|сил|сил[аыу]|разбит\w*|самочувств\w*|простыл\w*|заболел\w*|"
+    r"ноет|ныть|тянет|потянул\w*|травм\w*|простуд\w*|температур\w*|чувству\w*|плохо)(?!\w)"
+)
+# A diet's unloading days ("на этой неделе разгрузочные дни по еде") are food, not a deload week.
+_DELOAD_FOOD = re.compile(
+    r"(?<!\w)(?:ед[аеуы]|едой|питани\w*|кефир\w*|яблок\w*|углевод\w*|калори\w*|диет\w*|голод\w*)(?!\w)"
+)
 # Program start or switch ("перенеси старт программы", "начни программу заново") stays with settings.
 _PROGRAM_START = re.compile(
     r"(?<!\w)(?:старт\w*|начал\w*|заново|сначала|с\s+понедельника|с\s+\d|переключ\w*|выбер\w*|запуст\w*|"
@@ -117,6 +135,11 @@ def is_edit_command(text: str) -> bool:
         return False
     if (cs.NORM.search(norm) or cs.SET_MACRO.search(norm)) and not structure:  # "белок 170 в день"
         return False
+    if _WELLBEING.search(norm):
+        return False
+    deload_word = _DELOAD.search(norm)
+    if deload_word and _DELOAD_FOOD.search(norm):
+        return False
     verb = _EDIT_VERB.search(norm)
     instead = _INSTEAD.search(norm)
     # (a) an imperative and a word about the program's structure ("вместо" counts once: verb or structure)
@@ -128,8 +151,10 @@ def is_edit_command(text: str) -> bool:
     # "поставь сегодня жим 85 кг" is a settings command (chat_settings owns weights for today).
     if _SET_WEIGHT.search(norm) and _KG.search(norm) and not cs.REPS.search(norm) and not cs.is_settings_request(text):
         return True
-    # (c) a lighter week or day ("следующая неделя — делоад") waits for stage 2: today it is mostly wellbeing
-    # ("сегодня облегчённо потренируюсь, болит плечо") and belongs to the parser.
+    # (c) a deload week without a verb: "следующая неделя — делоад", "давай на этой неделе делоад" (how the
+    # user feels and a diet are excluded above; "облегчённо" for a day waits for stage 3)
+    if deload_word and _DELOAD_WHEN.search(norm):
+        return True
     # (d) a prescription without a verb: "на разгибания 4 подхода по 10–12"
     return _branch_set(norm)
 
@@ -168,7 +193,7 @@ class _Action(BaseModel):
     def _scope(cls, v: Any) -> Any:
         return v if v in ("this_week", "from_this_week", "all_weeks") else None
 
-    @field_validator("day", mode="before", check_fields=False)
+    @field_validator("day", "a", "b", "src", "dst", mode="before", check_fields=False)
     @classmethod
     def _day(cls, v: Any) -> Any:
         return {} if v is None else v
@@ -249,6 +274,37 @@ class WeightA(_Action):
     date: dt.date | None = None  # "ГГГГ-ММ-ДД"; None: the nearest program day with the exercise
 
 
+class SwapDaysA(_Action):
+    """Two days of a week change places ("поменяй местами руки и спину", "сделай сегодня ноги вместо рук")."""
+
+    type: Literal["swap_days"]
+    a: DayRef = Field(default_factory=DayRef)
+    b: DayRef = Field(default_factory=DayRef)
+    scope: Scope | None = None
+
+
+class MoveDayA(_Action):
+    """A day goes to another weekday; a day already there takes its place ("перенеси тренировку на завтра")."""
+
+    type: Literal["move_day"]
+    src: DayRef = Field(default_factory=DayRef)
+    dst: DayRef = Field(default_factory=DayRef)
+    scope: Scope | None = None
+
+
+class DeloadA(_Action):
+    """A deload week (gymbot.services.deload): this week = from today, next week = from next Monday."""
+
+    type: Literal["deload"]
+    week: Literal["this_week", "next_week"] | None = None
+    start: dt.date | None = None  # "ГГГГ-ММ-ДД" when a day is named ("с 20 октября")
+
+    @field_validator("week", mode="before")
+    @classmethod
+    def _week(cls, v: Any) -> Any:
+        return v if v in ("this_week", "next_week") else None
+
+
 class ClarifyA(_Action):
     type: Literal["clarify"]
     question: str = Field(min_length=1, max_length=300)
@@ -263,7 +319,8 @@ class ClarifyA(_Action):
 
 
 Action = Annotated[
-    ReplaceA | RemoveA | AddA | PrescribeA | ReorderA | WeightA | ClarifyA, Field(discriminator="type")
+    ReplaceA | RemoveA | AddA | PrescribeA | ReorderA | WeightA | SwapDaysA | MoveDayA | DeloadA | ClarifyA,
+    Field(discriminator="type"),
 ]
 _ACTION: TypeAdapter[Any] = TypeAdapter(Action)
 MAX_ACTIONS = 10
@@ -318,6 +375,7 @@ class ItemView:
 
 @dataclass
 class DayView:
+    id: int  # ProgramDay.id
     week: int
     weekday: int  # 1 = Monday
     focus: str | None
@@ -326,6 +384,21 @@ class DayView:
     @property
     def label(self) -> str:
         return WEEKDAYS[self.weekday - 1] + (f" «{self.focus}»" if self.focus else "")
+
+    @property
+    def title(self) -> str:
+        """«Руки и плечи», or the first exercises for a day without a label."""
+        if self.focus:
+            return f"«{self.focus}»"
+        names = [i.name for i in self.items[:2]]
+        return "«" + ", ".join(names) + ("…" if len(self.items) > 2 else "") + "»"
+
+
+def date_of(started_on: date, week: int, weekday: int) -> date | None:
+    """The calendar day of (week, weekday): program weeks are 7-day blocks from `started_on`, which is not
+    always a Monday, so the weekday is looked up inside the block."""
+    first = started_on + timedelta(days=7 * (week - 1))
+    return next((d for k in range(7) if (d := first + timedelta(days=k)).isoweekday() == weekday), None)
 
 
 @dataclass
@@ -344,6 +417,10 @@ class Snapshot:
     known: list[str]  # every exercise name (logged ones too): a name outside it is a new exercise
     exercise_ids: dict[str, int]  # catalog name -> Exercise.id
     weights: dict[tuple[date, str], float] = field(default_factory=dict)  # overrides, today..+NEXT_DAY_SEARCH
+    done: set[int] = field(default_factory=set)  # ProgramDay ids with a workout in the current cycle (✓)
+    deload: tuple[date, date] | None = None  # a running or scheduled deload: first and last day
+    # Dates of the current program week with a workout logged in the chat (no program day: its ✓ is by date)
+    done_dates: set[date] = field(default_factory=set)
 
     def position(self, d: date) -> Position:
         return program_position(self.started_on, len(self.weeks), d)
@@ -365,6 +442,9 @@ class Snapshot:
     def all_weeks(self) -> list[int]:
         return sorted(self.weeks)
 
+    def date_of(self, week: int, weekday: int) -> date | None:
+        return date_of(self.started_on, week, weekday)
+
 
 async def load_snapshot(session: AsyncSession, user: User, today: date) -> Snapshot:
     up: UserProgram = await active_program(session, user, today)
@@ -380,7 +460,7 @@ async def load_snapshot(session: AsyncSession, user: User, today: date) -> Snaps
                 )
                 for i in sorted(d.items, key=lambda i: i.order)
             ]
-            days[d.weekday] = DayView(w.number, d.weekday, d.focus, items)
+            days[d.weekday] = DayView(d.id, w.number, d.weekday, d.focus, items)
     catalog = await baselines.catalog(session, user.id)
     ids = await overrides.exercise_ids(session, catalog)
     rows = await session.execute(
@@ -393,9 +473,41 @@ async def load_snapshot(session: AsyncSession, user: User, today: date) -> Snaps
         )
     )
     weights = {(day, name): float(kg) for day, name, kg in rows}
+    day_ids = [d.id for w in program.weeks for d in w.days]
+    done = set(
+        (
+            await session.scalars(
+                select(Workout.program_day_id).where(
+                    Workout.user_id == user.id,
+                    Workout.program_day_id.in_(day_ids),
+                    Workout.performed_on >= up.started_on,
+                )
+            )
+        ).all()
+    )
+    pos = program_position(up.started_on, len(program.weeks), today)
+    week_start = up.started_on + timedelta(days=7 * (pos.week - 1))
+    done_dates = set(
+        (
+            await session.scalars(
+                select(Workout.performed_on).where(
+                    Workout.user_id == user.id,
+                    Workout.program_day_id.is_(None),
+                    Workout.performed_on >= week_start,
+                    Workout.performed_on < week_start + timedelta(days=7),
+                )
+            )
+        ).all()
+    )
+    st = await deload.get_state(session, user.id)
+    running = None
+    if deload.pending(st, today):
+        assert st is not None and st.started_on is not None and st.until is not None
+        running = (st.started_on, st.until)
     return Snapshot(
         user.id, today, program.slug, program.name, program.version, program.owner_user_id is None,
         up.started_on, weeks, catalog, await exercise_catalog(session), ids, weights,
+        {d for d in done if d is not None}, running, done_dates,
     )
 
 
@@ -450,6 +562,10 @@ def prompt_context(snap: Snapshot) -> str:
     todays = [f"{name} {overrides.kg(kg)} кг" for (d, name), kg in snap.weights.items() if d == today]
     if todays:
         lines.append("Веса на сегодня: " + ", ".join(todays) + ".")
+    if snap.deload is not None:
+        first, last = snap.deload
+        state = "идёт" if first <= today else "запланирована"
+        lines.append(f"Разгрузочная неделя {state}: {deload.span(first, last)}.")
     lines.append("Каталог упражнений: " + (", ".join(snap.catalog) or "пусто"))
     return "\n".join(lines)
 
@@ -585,10 +701,11 @@ def scope_words(weeks: list[int], week: int, all_weeks: list[int]) -> str:
 
 @dataclass(frozen=True)
 class Pick:
-    """What a clarify button fixes: action `action`'s day (week, weekday) or item (ProgramItem.id)."""
+    """What a clarify button fixes: action `action`'s day (week, weekday; "day2" for the second day of a swap
+    or move) or item (ProgramItem.id)."""
 
     action: int
-    what: Literal["day", "item", "after"]
+    what: Literal["day", "day2", "item", "after"]
     value: Any
 
 
@@ -608,6 +725,17 @@ class WeightChange:
 
 
 @dataclass
+class DeloadChange:
+    first: date
+    last: date
+    replaces: tuple[date, date] | None = None  # the running or scheduled deload the preview saw
+
+
+DELOAD_LINE = "Разгрузочная неделя "  # preview lines that stay when the program part cannot be applied
+WEIGHT_LINE = "Вес "
+
+
+@dataclass
 class EditPlan:
     """Resolved changes. `lines` is the preview (and the summary after "Применить"), `notes` what is
     skipped; `ops` are program_editor PATCH ops against `slug` at `version`."""
@@ -616,30 +744,53 @@ class EditPlan:
     version: int
     name: str
     forks: bool  # the active program is a template: the first edit makes the user's copy
+    today: date  # the day the plan was compiled for (the dry run's current program week)
     ops: list[dict[str, Any]] = field(default_factory=list)
     op_labels: list[str] = field(default_factory=list)  # per op, for the skipped weeks
     weights: list[WeightChange] = field(default_factory=list)
+    deload: DeloadChange | None = None
     lines: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    move_notes: list[str] = field(default_factory=list)  # warnings about moved days, shown after `notes`
+    # A swap or a move is one op, kept apart and appended after every other op (`finish`): the other ops are
+    # resolved against the days as they are now, so they must run before the days change places.
+    move_op: dict[str, Any] | None = None
+    move_label: str = ""
     clarify: Clarify | None = None
     copy_name: str | None = None  # set by `preview` when a copy would be made
 
+    def finish(self) -> EditPlan:
+        """Put the swap or move after every other op (called once, at the end of compile_ops)."""
+        if self.move_op is not None:
+            self.ops.append(self.move_op)
+            self.op_labels.append(self.move_label)
+        return self
+
     def ready(self) -> bool:
-        return self.clarify is None and bool(self.ops or self.weights)
+        return self.clarify is None and bool(self.ops or self.move_op or self.weights or self.deload)
 
     def live_topics(self) -> list[Any]:
-        return ["program", "plan", "state"] if self.ops else ["state"]
+        topics: list[Any] = []
+        if self.ops or self.move_op:
+            topics += ["program", "plan", "state"]
+        if self.weights and "state" not in topics:
+            topics.append("state")
+        if self.deload is not None and "plan" not in topics:
+            topics.append("plan")
+        return topics
 
     def drop_ops(self, note: str) -> None:
-        """The program part cannot be applied (the dry run failed): keep only the weights."""
-        self.lines = [ln for ln in self.lines if ln.startswith("Вес ")]
-        self.ops, self.op_labels = [], []
+        """The program part cannot be applied (the dry run failed): keep only the weights and the deload."""
+        self.lines = [ln for ln in self.lines if ln.startswith((WEIGHT_LINE, DELOAD_LINE))]
+        self.ops, self.op_labels, self.move_notes = [], [], []
+        self.move_op = None
         self.notes.insert(0, note)
 
 
 DEFAULT_SETS, DEFAULT_REPS = 3, (8, 12)
 NEW_EXERCISE = "новое упражнение, истории нет"
-SKIP_REASON = {pe.NO_ITEM: "там другое упражнение", pe.NO_DAY: "нет этого дня"}
+SKIP_REASON = {pe.NO_ITEM: "там другое упражнение", pe.NO_DAY: "нет этого дня", pe.PAST_WEEK: "неделя уже прошла"}
+DELOAD_AHEAD = 28  # days: the latest start of a deload set from the chat
 
 
 def _canonical(snap: Snapshot, name: str) -> tuple[str, bool]:
@@ -661,9 +812,15 @@ class _Need(Exception):
 
 
 def _pick_day(
-    snap: Snapshot, n: int, ref: DayRef, exercise: str | None, picks: dict[tuple[int, str], Any], about: str | None
+    snap: Snapshot,
+    n: int,
+    ref: DayRef,
+    exercise: str | None,
+    picks: dict[tuple[int, str], Any],
+    about: str | None,
+    key: Literal["day", "day2"] = "day",
 ) -> DayView:
-    if (fixed := picks.get((n, "day"))) is not None:
+    if (fixed := picks.get((n, key))) is not None:
         day = snap.day(*fixed)
         if day is None:
             raise _Need(note="Этого дня в программе больше нет, повтори команду.")
@@ -684,7 +841,7 @@ def _pick_day(
     what = f" для «{about}»" if about else ""
     raise _Need(
         Clarify(f"Какой день{what}?", [d.label for d in options],
-                [Pick(n, "day", (d.week, d.weekday)) for d in options])
+                [Pick(n, key, (d.week, d.weekday)) for d in options])
     )
 
 
@@ -755,11 +912,135 @@ def _date(d: date) -> str:
     return f"{WEEKDAYS[d.weekday()]} {d:%d.%m}"
 
 
+def _deload(snap: Snapshot, a: DeloadA, plan: EditPlan) -> None:
+    today = snap.today
+    if a.start is not None:
+        first = a.start
+    elif a.week == "next_week":
+        first = today + timedelta(days=7 - today.weekday())  # next Monday
+    else:
+        first = today
+    if first < today:
+        plan.notes.append(f"Разгрузку с {_date(first)} не начать: этот день уже прошёл.")
+        return
+    if first > today + timedelta(days=DELOAD_AHEAD):
+        plan.notes.append(f"Разгрузку можно запланировать не дальше чем на {DELOAD_AHEAD} дней вперёд.")
+        return
+    replaced = ""
+    if snap.deload is not None:
+        start, end = snap.deload
+        if start <= today:
+            plan.notes.append(f"Разгрузочная неделя уже идёт: {deload.span(start, end)}. Отменить: /deload")
+            return
+        if start == first:
+            plan.notes.append(f"Разгрузочная неделя уже запланирована: {deload.span(start, end)}.")
+            return
+        replaced = f"; вместо запланированной {deload.span(start, end)}"
+    last = first + timedelta(days=deload.DELOAD_DAYS - 1)
+    pct = round((1 - deload.WEIGHT_FACTOR) * 100)
+    plan.deload = DeloadChange(first, last, snap.deload)
+    plan.lines = [ln for ln in plan.lines if not ln.startswith(DELOAD_LINE)]  # the last one said wins
+    plan.lines.append(
+        f"{DELOAD_LINE}{deload.span(first, last)} ({deload.DELOAD_DAYS} дней): веса −{pct} %, "
+        f"подходов на треть меньше{replaced}"
+    )
+
+
+def _slot(
+    snap: Snapshot,
+    n: int,
+    ref: DayRef,
+    picks: dict[tuple[int, str], Any],
+    key: Literal["day", "day2"],
+    week: int | None,
+    about: str | None,
+) -> tuple[int, int, DayView | None]:
+    """(week, weekday, the day there or None for a rest day) for one side of a swap or a move. A weekday is
+    taken in `week` (the other side's week when that one is today/tomorrow) or the current week; a label
+    must name a training day."""
+    if picks.get((n, key)) is None and (ref.when is not None or ref.weekday is not None):
+        if ref.when is not None:
+            d = snap.today + timedelta(days=1 if ref.when == "tomorrow" else 0)
+            pos = snap.position(d)
+            if pos.not_started or pos.finished:
+                state = "ещё не началась" if pos.not_started else "уже пройдена"
+                raise _Need(note=f"Программа {state}: переносить нечего.")
+            w, wd = pos.week, pos.weekday
+        else:
+            w, wd = week or snap.week, ref.weekday or 1
+        day = snap.day(w, wd)
+        return w, wd, day if day is not None and day.items else None
+    day = _pick_day(snap, n, ref, None, picks, about, key)
+    return day.week, day.weekday, day
+
+
+def _when_week(snap: Snapshot, ref: DayRef) -> int | None:
+    if ref.when is None:
+        return None
+    return snap.position(snap.today + timedelta(days=1 if ref.when == "tomorrow" else 0)).week
+
+
+def _move(snap: Snapshot, n: int, a: SwapDaysA | MoveDayA, plan: EditPlan, picks: dict[tuple[int, str], Any]) -> None:
+    """swap_days and move_day -> one move_day op (the editor swaps when the target weekday is taken)."""
+    if plan.move_op is not None:
+        raise _Need(note="За раз переношу или меняю местами одну пару дней: следующий перенос — отдельной командой.")
+    first, second = (a.a, a.b) if isinstance(a, SwapDaysA) else (a.src, a.dst)
+    week = _when_week(snap, first) or _when_week(snap, second)
+    wa, da, day_a = _slot(snap, n, first, picks, "day", week, None)
+    wb, db, day_b = _slot(snap, n, second, picks, "day2", week or wa, None)
+    if wa != wb:
+        raise _Need(note="Дни в разных неделях программы: переношу и меняю местами только внутри одной недели.")
+    if da == db:
+        raise _Need(note="Это один и тот же день, менять нечего.")
+    date_a, date_b = snap.date_of(wa, da), snap.date_of(wa, db)
+
+    def when(d: date | None, weekday: int) -> str:
+        return _date(d) if d is not None else WEEKDAYS[weekday - 1]
+
+    if day_a is None and day_b is None:
+        raise _Need(note=f"{when(date_a, da).capitalize()} и {when(date_b, db)} по программе тренировок нет.")
+    if isinstance(a, MoveDayA) and day_a is None:
+        raise _Need(note=f"{when(date_a, da).capitalize()} по программе тренировки нет, переносить нечего.")
+    if day_a is None:  # "сделай сегодня ноги" on a rest day: the other day comes here
+        assert day_b is not None
+        src, dst, src_date, dst_date, other = day_b, da, date_b, date_a, None
+    else:
+        src, dst, src_date, dst_date, other = day_a, db, date_a, date_b, day_b
+    all_weeks = snap.all_weeks()
+    weeks = scope_weeks(a.scope or "this_week", src.week, all_weeks)
+    where = scope_words(weeks, src.week, all_weeks)
+    plan.move_op = _op("move_day", src, weeks, toWeekday=dst)
+    src_when, dst_when = when(src_date, src.weekday), when(dst_date, dst)
+    if other is None:
+        plan.move_label = f"перенос {WEEKDAYS[src.weekday - 1]} → {WEEKDAYS[dst - 1]}"
+        plan.lines.append(f"{src.title}: {src_when} → {dst_when} ({where})")
+    else:
+        plan.move_label = f"обмен {WEEKDAYS[src.weekday - 1]} ⇄ {WEEKDAYS[dst - 1]}"
+        plan.lines.append(f"{src_when}: {other.title} вместо {src.title} ({where})")
+        plan.lines.append(f"{dst_when}: {src.title} вместо {other.title} ({where})")
+        if isinstance(a, MoveDayA):
+            plan.move_notes.append(f"{dst_when.capitalize()} уже занято ({other.title}) — поменяю дни местами.")
+    for day, to, to_weekday in ((src, dst_date, dst), (other, src_date, src.weekday)):
+        if day is None:
+            continue
+        if day.id in snap.done:
+            plan.move_notes.append(
+                f"{day.title} уже отмечен ✓ — отметка переедет вместе с днём на {when(to, to_weekday)}."
+            )
+        elif to is not None and to < snap.today:
+            plan.move_notes.append(f"{day.title} окажется на {_date(to)} — этот день уже прошёл.")
+    for d in (src_date, dst_date):  # a chat workout has no program day: the Mini App places its ✓ by date
+        if d is not None and d in snap.done_dates and src.week == snap.week:
+            plan.move_notes.append(
+                f"{_date(d).capitalize()} уже отмечен сделанным по записи из чата — отметка останется на дате."
+            )
+
+
 def compile_ops(snap: Snapshot, actions: list[Any], picks: dict[tuple[int, str], Any] | None = None) -> EditPlan:
     """Actions -> PATCH ops, weights, preview lines and notes; the first ambiguity stops with `clarify`
     (answered by a Pick, then compiled again from the start)."""
     picks = picks or {}
-    plan = EditPlan(snap.slug, snap.version, snap.name, snap.template)
+    plan = EditPlan(snap.slug, snap.version, snap.name, snap.template, snap.today)
     all_weeks = snap.all_weeks()
     temp = 0
     for n, a in enumerate(actions):
@@ -772,7 +1053,13 @@ def compile_ops(snap: Snapshot, actions: list[Any], picks: dict[tuple[int, str],
         if isinstance(a, WeightA):
             _weight(snap, a, plan)
             continue
+        if isinstance(a, DeloadA):
+            _deload(snap, a, plan)
+            continue
         try:
+            if isinstance(a, SwapDaysA | MoveDayA):
+                _move(snap, n, a, plan, picks)
+                continue
             said = getattr(a, "exercise", None)
             about = said or getattr(a, "name", None) or (a.order[0] if isinstance(a, ReorderA) else None)
             day = _pick_day(snap, n, a.day, said, picks, about)
@@ -878,7 +1165,7 @@ def compile_ops(snap: Snapshot, actions: list[Any], picks: dict[tuple[int, str],
                 return plan
             if need.note:
                 plan.notes.append(need.note)
-    return plan
+    return plan.finish()
 
 
 def skip_lines(plan: EditPlan, results: list[pe.OpResult]) -> list[str]:
@@ -901,7 +1188,9 @@ async def preview(session: AsyncSession, user: User, up: UserProgram, plan: Edit
     if not plan.ops:
         return
     try:
-        outcome = await pe.edit_program(session, user, up, plan.slug, plan.version, plan.ops, dry_run=True)
+        outcome = await pe.edit_program(
+            session, user, up, plan.slug, plan.version, plan.ops, today=plan.today, dry_run=True
+        )
         skipped = skip_lines(plan, outcome.results)
         copy_name = outcome.program.name if outcome.switched_from else None
     finally:
@@ -910,14 +1199,66 @@ async def preview(session: AsyncSession, user: User, up: UserProgram, plan: Edit
     plan.copy_name = copy_name
 
 
+async def _move_overrides(
+    session: AsyncSession, user_id: int, started_on: date, ops: list[dict[str, Any]], outcome: pe.Outcome
+) -> None:
+    """Day weights (WeightOverride, by date) follow the days a move_day moved: the moved day's exercises from
+    its old date to the new one and, in a swap, the other day's back. A weight already set for that exercise
+    on the target date stays (the moved one is dropped)."""
+    program = outcome.program
+    moves: list[tuple[date, date, set[int]]] = []  # from, to, exercises of the day that moved
+    for n, op in enumerate(ops):
+        if op.get("op") != "move_day":
+            continue
+        result = next((r for r in outcome.results if r.op == n), None)
+        for w in result.weeks if result is not None else []:
+            a, b = date_of(started_on, w, op["weekday"]), date_of(started_on, w, op["toWeekday"])
+            if a is None or b is None:
+                continue
+            for pw in program.weeks:
+                if pw.number != w:
+                    continue
+                for d in pw.days:
+                    if d.weekday == op["toWeekday"]:  # the moved day, now on toWeekday
+                        moves.append((a, b, {i.exercise_id for i in d.items}))
+                    elif d.weekday == op["weekday"]:  # the day it swapped with
+                        moves.append((b, a, {i.exercise_id for i in d.items}))
+    if not moves:
+        return
+    days = {d for a, b, _ in moves for d in (a, b)}
+    rows = (
+        await session.scalars(
+            select(WeightOverride).where(WeightOverride.user_id == user_id, WeightOverride.day.in_(days))
+        )
+    ).all()
+    moving = [(r, to) for r in rows for a, to, exs in moves if r.day == a and r.exercise_id in exs]
+    staying = {(r.exercise_id, r.day) for r in rows} - {(r.exercise_id, r.day) for r, _ in moving}
+    new = [(r.exercise_id, to, r.weight_kg) for r, to in moving if (r.exercise_id, to) not in staying]
+    for r, _ in moving:
+        await session.delete(r)
+    await session.flush()  # the unique (user, exercise, day) must be free before the rows come back
+    for exercise_id, to, kg in new:
+        session.add(WeightOverride(user_id=user_id, exercise_id=exercise_id, day=to, weight_kg=kg))
+    await session.flush()
+
+
 async def apply(
-    session: AsyncSession, user: User, up: UserProgram, plan: EditPlan, today: date, raw_text: str
+    session: AsyncSession,
+    user: User,
+    up: UserProgram,
+    plan: EditPlan,
+    today: date,
+    raw_text: str,
+    now: dt.datetime | None = None,
 ) -> list[str]:
     """Write the plan (the caller commits once): the program ops through edit_program with the version of
-    the preview, then the weights. Raises EditError / Conflict (nothing is written then). Returns notes."""
+    the preview, then the weights, then the deload. Raises EditError / Conflict (nothing is written then).
+    Returns notes."""
     notes: list[str] = []
+    started_on = up.started_on
+    outcome = None
     if plan.ops:
-        await pe.edit_program(session, user, up, plan.slug, plan.version, plan.ops)
+        outcome = await pe.edit_program(session, user, up, plan.slug, plan.version, plan.ops, today=today)
         log.info(
             "program edit from chat: user %s, %s v%s, ops %s, text %r",
             user.id, plan.slug, plan.version, plan.ops, raw_text,
@@ -930,4 +1271,20 @@ async def apply(
         await overrides.upsert(session, user.id, w.exercise_id, w.day, w.kg)
     if plan.weights and not plan.ops:
         log.info("weights from chat: user %s, %s, text %r", user.id, [(w.name, w.day, w.kg) for w in plan.weights], raw_text)
+    if outcome is not None:
+        await _move_overrides(session, user.id, started_on, plan.ops, outcome)
+    if plan.deload is not None:
+        st = await deload.get_state(session, user.id)
+        now_there = (st.started_on, st.until) if st is not None and deload.pending(st, today) else None
+        if now_there != plan.deload.replaces:  # started or cancelled elsewhere (/deload) since the preview
+            notes.append("Разгрузка изменилась после предпросмотра (/deload), её не трогаю — повтори команду.")
+            plan.lines = [ln for ln in plan.lines if not ln.startswith(DELOAD_LINE)]
+            plan.deload = None
+            return notes
+        until = await deload.start(
+            session, user.id, today, now or dt.datetime.now(dt.UTC), start_on=plan.deload.first
+        )
+        if plan.deload.first < today:  # the preview was made before midnight: it starts today instead
+            notes.append(f"Разгрузка начнётся сегодня, до {_date(until)}.")
+        log.info("deload from chat: user %s, %s..%s, text %r", user.id, plan.deload.first, until, raw_text)
     return notes

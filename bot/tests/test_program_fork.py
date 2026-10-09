@@ -373,12 +373,12 @@ async def test_two_first_edits_from_the_same_stale_state_make_one_copy(client, a
         up2 = await active_program(s2, u2, today(settings))  # stale once s1 commits
         assert up1.id == up2.id
 
-        won = await pe.edit_program(s1, u1, up1, TEMPLATE, 1, [op])
+        won = await pe.edit_program(s1, u1, up1, TEMPLATE, 1, [op], today=today(settings))
         winner = won.program.slug
         await s1.commit()
 
         with pytest.raises(pe.Conflict) as e:
-            await pe.edit_program(s2, u2, up2, TEMPLATE, 1, [op])
+            await pe.edit_program(s2, u2, up2, TEMPLATE, 1, [op], today=today(settings))
         assert e.value.reason == "version"
         assert e.value.program is not None and e.value.program.slug == winner
         await s2.rollback()

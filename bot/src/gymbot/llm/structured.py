@@ -217,6 +217,26 @@ class _EditWeight(BaseModel):
     date: str | None
 
 
+class _EditSwapDays(BaseModel):
+    type: Literal["swap_days"]
+    a: _EditDay
+    b: _EditDay
+    scope: _EditScope
+
+
+class _EditMoveDay(BaseModel):
+    type: Literal["move_day"]
+    src: _EditDay
+    dst: _EditDay
+    scope: _EditScope
+
+
+class _EditDeload(BaseModel):
+    type: Literal["deload"]
+    week: Literal["this_week", "next_week"] | None
+    start: str | None
+
+
 class _EditClarify(BaseModel):
     type: Literal["clarify"]
     question: str
@@ -225,7 +245,16 @@ class _EditClarify(BaseModel):
 
 class EditAnswer(BaseModel):
     actions: list[
-        _EditReplace | _EditRemove | _EditAdd | _EditPrescribe | _EditReorder | _EditWeight | _EditClarify
+        _EditReplace
+        | _EditRemove
+        | _EditAdd
+        | _EditPrescribe
+        | _EditReorder
+        | _EditWeight
+        | _EditSwapDays
+        | _EditMoveDay
+        | _EditDeload
+        | _EditClarify
     ]
     summary: str
 

@@ -13,7 +13,8 @@ In the same transaction:
 - the snapshot of the workout in progress (active_workouts) gets the copy's slug and day.
 Template item ids in the request are translated to the copy's items (`Fork.items`).
 
-Edits (`apply_ops`), in order, each seeing the previous ones: replace, prescribe, add, remove, reorder.
+Edits (`apply_ops`), in order, each seeing the previous ones: replace, prescribe, add, remove, reorder,
+move_day.
 - `week`/`weekday` name the source day; `itemId` is a ProgramItem.id of that day or the `tempId` of an
   `add` earlier in the request (the item it made in the source week).
 - `weeks` (optional) are all the weeks to change and must include `week`; without it only `week` changes.
@@ -24,6 +25,11 @@ Edits (`apply_ops`), in order, each seeing the previous ones: replace, prescribe
   at another Exercise, found by name or alias (get_or_create_exercise) or created. ProgramDay rows are never
   deleted (workouts reference them); ProgramItem rows may be.
 - One exercise at most once per day, 1..20 exercises per day, prescriptions within the limits below.
+- `move_day` moves the day to `toWeekday`; a day already there takes the source's weekday (a swap). Only
+  `ProgramDay.weekday` changes: the row keeps its id, items, `focus` and `base_day_id`, so the workouts linked
+  to it (the ✓ of the current week) move with it, a workout in progress stays on its `programDayId`, and
+  `targets_json` snapshots are untouched. Weeks before the current program week (`program_position` on
+  `today`) are never moved: skipped, or EditError for the source week.
 
 Optimistic locking: the request carries the version it was made against; a mismatch is `Conflict`
 (-> 409 with the current program). The version grows by one per applied PATCH; a new copy starts at 1 with
@@ -35,6 +41,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, TypeAdapter, ValidationError
@@ -58,6 +65,7 @@ from gymbot.services.programs import (
     find_day,
     get_or_create_exercise,
     load_program,
+    program_position,
     targets_snapshot,
     visible_program,
     visible_to,
@@ -75,7 +83,7 @@ NAME_MAX = 200
 SLUG_MAX = 100  # programs.slug
 PROGRAM_NAME_MAX = 200  # programs.name
 COPY_MARK = " · моя"
-LATER_OPS = frozenset({"move_day", "copy_week", "rename"})  # phase 3
+LATER_OPS = frozenset({"copy_week", "rename"})  # phase 3
 
 # Reasons for a skipped week (shown in the Mini App's scope preview).
 NO_DAY = "нет этого дня"
@@ -84,6 +92,7 @@ ALREADY_THERE = "упражнение уже есть в дне"
 LAST_ITEM = "последнее упражнение дня"
 DAY_FULL = f"в дне уже {MAX_ITEMS} упражнений"
 OTHER_SET = "другой набор упражнений"
+PAST_WEEK = "неделя уже прошла"
 
 
 class EditError(Exception):
@@ -150,7 +159,14 @@ class ReorderOp(_DayOp):
     itemIds: list[ItemRef] = Field(max_length=MAX_ITEMS * 2)
 
 
-Op = Annotated[ReplaceOp | PrescribeOp | AddOp | RemoveOp | ReorderOp, Field(discriminator="op")]
+class MoveDayOp(_DayOp):
+    op: Literal["move_day"]
+    toWeekday: int
+
+
+Op = Annotated[
+    ReplaceOp | PrescribeOp | AddOp | RemoveOp | ReorderOp | MoveDayOp, Field(discriminator="op")
+]
 _OPS: TypeAdapter[Any] = TypeAdapter(Op)
 
 
@@ -375,6 +391,7 @@ class _Ctx:
     session: AsyncSession
     program: Program
     items: dict[int, int]  # template item id -> copy item id (a fork in this request)
+    current_week: int  # the program week of `today` (move_day never touches earlier weeks)
     temp: dict[str, int] = field(default_factory=dict)  # tempId -> item id in the source week
 
     def item(self, day: ProgramDay, ref: int | str) -> ProgramItem:
@@ -544,22 +561,53 @@ async def _reorder(ctx: _Ctx, op: ReorderOp, src: ProgramDay, weeks: list[int], 
         result.weeks.append(w)
 
 
+async def _move_day(ctx: _Ctx, op: MoveDayOp, src: ProgramDay, weeks: list[int], result: OpResult) -> None:
+    if not 1 <= op.toWeekday <= 7:
+        raise EditError("День недели должен быть от 1 до 7.")
+    if op.toWeekday == op.weekday:
+        raise EditError("День уже стоит на этом дне недели.")
+    if op.week < ctx.current_week:
+        raise EditError(f"Неделя {op.week} уже прошла, переносить в ней нельзя.")
+    for w in weeks:
+        if w < ctx.current_week:
+            _skip(result, w, PAST_WEEK)
+            continue
+        day = src if w == op.week else ctx.day(w, op.weekday)
+        if day is None:
+            _skip(result, w, NO_DAY)
+            continue
+        other = ctx.day(w, op.toWeekday)
+        day.weekday = op.toWeekday
+        if other is not None:
+            other.weekday = op.weekday
+        for pw in ctx.program.weeks:  # same members, sorted like on load (order_by only applies then)
+            if pw.number == w:
+                pw.days.sort(key=lambda d: d.weekday)
+        result.weeks.append(w)
+
+
 _HANDLERS = {
     ReplaceOp: _replace,
     PrescribeOp: _prescribe,
     AddOp: _add,
     RemoveOp: _remove,
     ReorderOp: _reorder,
+    MoveDayOp: _move_day,
 }
 
 
 async def apply_ops(
-    session: AsyncSession, program: Program, ops: list[Any], items: dict[int, int] | None = None
+    session: AsyncSession,
+    program: Program,
+    ops: list[Any],
+    items: dict[int, int] | None = None,
+    *,
+    current_week: int = 1,
 ) -> list[OpResult]:
     """Apply `ops` (parse_ops) to `program` (tree loaded, the user's copy) in order. `items` translates
-    template item ids after a fork in this request. Raises EditError on the first invalid op (the caller
-    rolls back). Flushes."""
-    ctx = _Ctx(session, program, items or {})
+    template item ids after a fork in this request; `current_week` is the program week of today. Raises
+    EditError on the first invalid op (the caller rolls back). Flushes."""
+    ctx = _Ctx(session, program, items or {}, current_week)
     results = []
     for n, op in enumerate(ops):
         weeks = _targets(op, program)
@@ -636,11 +684,13 @@ async def edit_program(
     version: int,
     raw_ops: Any,
     *,
+    today: date,
     dry_run: bool = False,
 ) -> Outcome:
     """PATCH /api/programs/{slug} without the commit. Raises LookupError (unknown or another user's program),
-    EditError (422), Conflict (409). `up` is the user's active program choice. `dry_run` only changes the log:
-    the caller rolls the session back."""
+    EditError (422), Conflict (409). `up` is the user's active program choice, `today` the user's local day
+    (the current program week for move_day). `dry_run` only changes the log: the caller rolls the session
+    back."""
     program = await visible_program(session, user.id, slug)
     if program is None:
         raise LookupError(slug)
@@ -665,7 +715,8 @@ async def edit_program(
         if bumped.rowcount != 1:  # type: ignore[attr-defined]  # a concurrent PATCH won
             raise Conflict("version", await _reload(session, program.id))
         target, items, switched = program, {}, None
-    results = await apply_ops(session, target, ops, items)
+    current_week = program_position(up.started_on, len(target.weeks), today).week
+    results = await apply_ops(session, target, ops, items, current_week=current_week)
     if fork is not None:  # after apply_ops: a request that fails with 422 copied nothing
         log.log(
             logging.DEBUG if dry_run else logging.INFO,

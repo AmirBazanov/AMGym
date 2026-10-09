@@ -6,8 +6,8 @@ question with buttons, or notes); anything else (not a command, no valid action,
 the text goes on as usual.
 
 Nothing is written until "✅ Применить": it runs program_editor.edit_program with the version the preview was
-built against (a change in between, from the Mini App or another command, answers CHANGED), then the weights,
-and publishes "program", "plan", "state" so the open Mini App reloads. Clarify buttons fix the day or the
+built against (a change in between, from the Mini App or another command, answers CHANGED), then the weights
+and the deload, and publishes "program", "plan", "state" (only what changed) so the open Mini App reloads. Clarify buttons fix the day or the
 exercise and rebuild the preview without the model; the model's own question is answered by asking it again
 with the chosen option. Previews live in memory (EDITS, by token) for TTL; a restart, an older preview or a
 second tap answers STALE.
@@ -75,7 +75,7 @@ def _bullets(lines: list[str]) -> str:
 
 def render(plan: ce.EditPlan, notes: list[str]) -> str:
     """Plain text of the preview, a clarifying question, or only notes; the first line is the heading."""
-    all_notes = [*notes, *plan.notes]
+    all_notes = [*notes, *plan.notes, *plan.move_notes]
     if plan.clarify is not None:
         return plan.clarify.question
     if not plan.ready():
@@ -221,13 +221,14 @@ async def apply_edit(cb: CallbackQuery, settings: Settings, sessionmaker: Sessio
         await cb.answer(STALE, show_alert=True)
         return
     plan = pending.plan
-    today = _local_day(utcnow(), settings)
+    now = utcnow()
+    today = _local_day(now, settings)
     try:
         async with sessionmaker() as session:
             user = await get_or_create_user(session, cb.from_user.id, cb.from_user.full_name)
             user_id = user.id
             up = await active_program(session, user, today)
-            notes = await ce.apply(session, user, up, plan, today, pending.raw)
+            notes = await ce.apply(session, user, up, plan, today, pending.raw, now)
             await session.commit()
     except pe.Conflict:
         await _edit(cb, CHANGED)
