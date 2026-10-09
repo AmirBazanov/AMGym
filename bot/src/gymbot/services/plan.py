@@ -46,7 +46,7 @@ from gymbot.db.models import DayPlan, Exercise, User, UserProgram, Workout, Work
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.prompts import build_plan_messages, format_facts
 from gymbot.services import day_adjustments as dayadj
-from gymbot.services import deload, live
+from gymbot.services import deload, live, tg_html
 from gymbot.services.facts import active_facts
 from gymbot.services.nutrition import _aware, day_summary
 from gymbot.services.programs import find_day, load_program, normalize, program_position
@@ -728,4 +728,33 @@ def plan_text(built: Built) -> str:
         if e.reason:
             line += f" — {e.reason}"
         lines.append(line)
+    return "\n".join(lines)
+
+
+def plan_html(built: Built) -> str:
+    """`plan_text` as Telegram HTML: a header with an emoji, a card row per exercise (gymbot.services.tg_html)."""
+    esc = tg_html.escape
+    out, items = built.out, built.items
+    if not out.adjusted:
+        head = "🏋️ <b>Сегодня по программе</b>, без поправок"
+        rows = [tg_html.card_row(i, _cap(it.name), esc(_sets_text(it.sets, it.reps_min, it.reps_max, it)))
+                for i, it in enumerate(items, 1)]
+        return head + "\n\n" + "\n\n".join(rows)
+    if out.readiness == "rest":
+        return "😴 <b>Сегодня лучше отдохнуть</b>" + (f": {esc(out.summary)}" if out.summary else ".")
+    head = "🪶 <b>Сегодня: лёгкая версия.</b>" if out.readiness == "light" else "🛠 <b>Сегодня: план с поправками.</b>"
+    lines = [f"{head} {esc(out.summary)}" if out.summary else head, ""]
+    rows = []
+    for i, (e, it) in enumerate(zip(out.exercises, items, strict=False), 1):
+        if e.skip:
+            rows.append(tg_html.card_row(i, _cap(e.name), "⏭ пропуск", e.reason or "", struck=True))
+            continue
+        meta = [esc(_sets_text(e.sets, e.repsMin, e.repsMax, it))]
+        if e.weightFactor != 1:
+            pct = round((e.weightFactor - 1) * 100)
+            meta.append(f"вес <b>{'−' if pct < 0 else '+'}{abs(pct)} %</b>")
+        if e.replaceWith:
+            meta.append(f"вместо «{esc(e.name)}»")
+        rows.append(tg_html.card_row(i, _cap(e.replaceWith or e.name), " · ".join(meta), e.reason or ""))
+    lines.append("\n\n".join(rows))
     return "\n".join(lines)

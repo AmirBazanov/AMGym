@@ -331,9 +331,9 @@ async def respond(
         if pq is not None:
             await active_program(session, user, now_utc.astimezone(tz).date())
             await session.commit()
-            if (text := await direct.plan_reply(session, user, settings, question, pq, tz, now_utc)) is not None:
+            if (day := await direct.plan_reply(session, user, settings, question, pq, tz, now_utc)) is not None:
                 log.info("diary answer: the program day from the database")
-                return Reply(text, DIRECT, html=bold_head(text))
+                return Reply(day.text, DIRECT, html=day.html)
         q = classify(question)
         if q is not None and (text := await direct.reply(session, user, question, q, tz, now_utc)) is not None:
             log.info("diary answer: %s from the database", q.intent.value)

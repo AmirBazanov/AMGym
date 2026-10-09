@@ -97,6 +97,26 @@ def to_html(text: str) -> str:
     return render(text, HTML)
 
 
+_NUMBERS = ("1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟")
+
+
+def num(i: int) -> str:
+    """The keycap emoji of a 1-based row number («1️⃣»); «▫️» past 10."""
+    return _NUMBERS[i - 1] if 1 <= i <= len(_NUMBERS) else "▫️"
+
+
+def card_row(i: int, title: str, meta: str = "", detail: str = "", *, struck: bool = False) -> str:
+    """One exercise of a day card: «1️⃣ <b>Жим лёжа</b>» (or struck through), then the meta line
+    («3×8–12 · <b>60 кг</b>», already HTML) and an italic detail line (plain text, escaped here)."""
+    name = f"<s>{escape(title)}</s>" if struck else f"<b>{escape(title)}</b>"
+    lines = [f"{num(i)} {name}"]
+    if meta:
+        lines.append(meta)
+    if detail:
+        lines.append(f"<i>{escape(detail)}</i>")
+    return "\n".join(lines)
+
+
 def bold_head(text: str) -> str:
     """Text from the database -> HTML: the first line of a reply with more lines is its heading and goes
     bold («План на …:», «Сегодня: 6 упражнений, …»); everything is escaped, nothing else changes."""

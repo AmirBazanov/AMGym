@@ -5,7 +5,16 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import SendMessage
 
 from gymbot.services.tg_format import plain
-from gymbot.services.tg_html import bold_head, escape, send_html, send_model_text, strip_tags, to_html
+from gymbot.services.tg_html import (
+    bold_head,
+    card_row,
+    escape,
+    num,
+    send_html,
+    send_model_text,
+    strip_tags,
+    to_html,
+)
 
 
 def bad_request(message: str) -> TelegramBadRequest:
@@ -153,3 +162,15 @@ def test_nul_and_minus_lines() -> None:
     assert to_html("a\x000\x00b") == "a0b"
     assert to_html("- 2,5 кг на руку") == "- 2,5 кг на руку"
     assert to_html("- жим") == "• жим"
+
+
+# ---- day cards: num, card_row ----
+
+
+def test_card_row_numbers_and_escapes_the_name_and_the_detail():
+    assert num(1) == "1️⃣" and num(10) == "🔟" and num(11) == "▫️" and num(0) == "▫️"
+    assert card_row(2, "жим <узко>", "3×8 · <b>60 кг</b>", "как в прошлый раз & точка") == (
+        "2️⃣ <b>жим &lt;узко&gt;</b>\n3×8 · <b>60 кг</b>\n<i>как в прошлый раз &amp; точка</i>"
+    )
+    assert card_row(3, "пек дек", "⏭ пропуск", struck=True) == "3️⃣ <s>пек дек</s>\n⏭ пропуск"
+    assert card_row(4, "жим") == "4️⃣ <b>жим</b>"

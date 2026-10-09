@@ -21,6 +21,7 @@ Only reads. Days are local dates in TIMEZONE (Workout.performed_on is one alread
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -31,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gymbot.config import Settings
 from gymbot.db.models import Exercise, User, Workout, WorkoutSet
-from gymbot.services import active_workout, nutrition
+from gymbot.services import active_workout, nutrition, tg_html
 from gymbot.services import next_weights as nw
 from gymbot.services.advice import epley, group_label, recovery_times
 from gymbot.services.answer_intent import (
@@ -548,9 +549,8 @@ def row_line(r: nw.DayRow) -> str:
     return f"• {title} {sets_text(r)} — {weight_text(r.suggestion)}"
 
 
-def recovery_note(dw: nw.DayWeights, recovering: dict[str, datetime], tz: ZoneInfo) -> str:
-    """Groups of the day that are still recovering at the start of it: '… восстановятся к пт 09.10 17:00 (48 ч
-    после тренировки) — тренировка после этого времени в самый раз.' A program day is never called off."""
+def _recovering(dw: nw.DayWeights, recovering: dict[str, datetime], tz: ZoneInfo) -> list[tuple[datetime, str, str]]:
+    """(when, «Бицепс, трицепс», «восстановятся») for the day's groups still recovering at its start."""
     groups = list(dict.fromkeys(group_label(r.name) for r in dw.rows if r.suggestion is not None))
     start = datetime.combine(dw.day, datetime.min.time(), tz)
     until: dict[datetime, list[str]] = {}
@@ -558,10 +558,17 @@ def recovery_note(dw: nw.DayWeights, recovering: dict[str, datetime], tz: ZoneIn
         at = recovering.get(g)
         if at is not None and at > start:
             until.setdefault(at.astimezone(tz), []).append(g)
+    return [
+        (at, _cap(", ".join(names)), "восстановится" if len(names) == 1 else "восстановятся")
+        for at, names in sorted(until.items())
+    ]
+
+
+def recovery_note(dw: nw.DayWeights, recovering: dict[str, datetime], tz: ZoneInfo) -> str:
+    """Groups of the day that are still recovering at the start of it: '… восстановятся к пт 09.10 17:00 (48 ч
+    после тренировки) — тренировка после этого времени в самый раз.' A program day is never called off."""
     lines = []
-    for at, names in sorted(until.items()):
-        who = _cap(", ".join(names))
-        verb = "восстановится" if len(names) == 1 else "восстановятся"
+    for at, who, verb in _recovering(dw, recovering, tz):
         when = f"{WEEKDAYS[at.weekday()]} {at:%d.%m %H:%M}"
         if at.date() == dw.day:
             lines.append(f"{who} {verb} к {when} (48 ч после тренировки) — тренировка после {at:%H:%M} в самый раз.")
@@ -569,6 +576,25 @@ def recovery_note(dw: nw.DayWeights, recovering: dict[str, datetime], tz: ZoneIn
             lines.append(
                 f"{who} {verb} только к {when} (48 ч после тренировки): тренировка по программе остаётся; "
                 "если мышцы забиты, напиши — план дня станет легче."
+            )
+    return "\n".join(lines)
+
+
+def recovery_note_html(dw: nw.DayWeights, recovering: dict[str, datetime], tz: ZoneInfo) -> str:
+    """`recovery_note` as a card footer: «⏳ <b>Бицепс, трицепс</b> восстановятся к <b>19:50</b> …»."""
+    esc = tg_html.escape
+    lines = []
+    for at, who, verb in _recovering(dw, recovering, tz):
+        when = f"{WEEKDAYS[at.weekday()]} {at:%d.%m %H:%M}"
+        if at.date() == dw.day:
+            lines.append(
+                f"⏳ <b>{esc(who)}</b> {verb} к <b>{at:%H:%M}</b> (48 ч после тренировки) — "
+                f"тренировка после {at:%H:%M} в самый раз."
+            )
+        else:
+            lines.append(
+                f"⏳ <b>{esc(who)}</b> {verb} только к <b>{esc(when)}</b> (48 ч после тренировки): тренировка "
+                "по программе остаётся; если мышцы забиты, напиши — план дня станет легче."
             )
     return "\n".join(lines)
 
@@ -588,6 +614,64 @@ def plan_day_text(dw: nw.DayWeights, today: date, note: str = "", only: list[str
     if note:
         lines.append(note)
     return "\n".join(lines)
+
+
+_CALC = re.compile(r": 1ПМ ≈ (?:.*?≈ )?([\d,]+) кг, ")
+_HINT = "подбери по ощущениям: "
+
+
+def _short_reason(reason: str) -> str:
+    """The reason of a weight without the arithmetic: «по «X» 20×8 на руку → 1ПМ ≈ 43,1 кг, 64 % для 12
+    повторов»; a hint loses its «подбери по ощущениям: » head (the meta line says it)."""
+    reason = _CALC.sub(r" → 1ПМ ≈ \1 кг, ", reason)
+    return reason.removeprefix(_HINT)
+
+
+def row_html(i: int, r: nw.DayRow) -> str:
+    """`row_line` as a card row: the name bold, sets × reps and the weight on the second line, the reason
+    in italics on the third."""
+    esc = tg_html.escape
+    title = _cap(r.name)
+    if r.suggestion is None:
+        return tg_html.card_row(i, title, "⏭ пропуск", r.note or "", struck=True)
+    s = r.suggestion
+    meta = esc(sets_text(r))
+    if s.weight is None:
+        meta += " · по ощущениям"
+    else:
+        meta += f" · <b>{kg(s.weight)} кг</b>" + (" на руку" if s.per_hand else "")
+    if r.name != r.program_name:
+        meta += f" · вместо «{esc(r.program_name)}»"
+    reason = _short_reason(s.reason)
+    if s.factor != 1 and s.base_weight is not None:
+        reason += f"; по плану дня −{round((1 - s.factor) * 100)} % от {kg(s.base_weight)}"
+    return tg_html.card_row(i, title, meta, reason)
+
+
+def plan_day_html(dw: nw.DayWeights, today: date, note_html: str = "", only: list[str] | None = None) -> str:
+    """`plan_day_text` as Telegram HTML: a header line, a card row per exercise, footers (see tg_html)."""
+    esc = tg_html.escape
+    rows = [r for r in dw.rows if only is None or r.program_name in only or r.name in only]
+    lines = [f"🏋️ <b>{esc(day_label(dw.day, today))}</b> · по программе, неделя {dw.week}"]
+    if dw.rest:
+        lines.append("😴 План дня советует отдохнуть" + (f": {esc(dw.summary)}" if dw.summary else ".") + " Если всё же идёшь:")
+    elif dw.summary:
+        lines.append(f"<i>{esc(dw.summary)}</i>")
+    lines += ["", "\n\n".join(row_html(i, r) for i, r in enumerate(rows, 1))]
+    footer = []
+    if any(r.suggestion is not None and r.suggestion.per_hand for r in rows):
+        footer.append("🤲 Гантели — вес одной гантели (на руку).")
+    if note_html:
+        footer.append(note_html)
+    if footer:
+        lines += ["", *footer]
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class PlanReply:
+    text: str  # plain: the dialog memory and the checks
+    html: str  # the same for Telegram (parse_mode=HTML)
 
 
 def weights_block(dw: nw.DayWeights, today: date) -> str:
@@ -646,7 +730,7 @@ async def target_day(
 async def plan_reply(
     session: AsyncSession, user: User, settings: Settings, question: str, pq: PlanQuestion, tz: ZoneInfo,
     now_utc: datetime,
-) -> str | None:
+) -> PlanReply | None:
     """The program day with weights for a PlanQuestion, or None (the model answers: no program, a past date,
     an exercise that is not in the program)."""
     ref = await nw.program_ref(session, user, settings)
@@ -673,7 +757,10 @@ async def plan_reply(
             if day and any(it.name in found for it in day[2]):
                 dw = await nw.day_weights(session, user, settings, tz, now_utc, d, ref)
                 if dw is not None:
-                    return plan_day_text(dw, today, recovery_note(dw, recovering, tz), only=found)
+                    return PlanReply(
+                        plan_day_text(dw, today, recovery_note(dw, recovering, tz), only=found),
+                        plan_day_html(dw, today, recovery_note_html(dw, recovering, tz), only=found),
+                    )
         return None
     if pq.when[0] == "next":
         asked = await next_training_day(session, user.id, ref, today)
@@ -685,9 +772,13 @@ async def plan_reply(
             return None
     found_day = await _plan_day(session, user, settings, tz, now_utc, ref, asked)
     if found_day is None:
-        return f"{day_label(asked, today)}: по программе тренировки нет, и в ближайшие дни тоже."
+        text = f"{day_label(asked, today)}: по программе тренировки нет, и в ближайшие дни тоже."
+        return PlanReply(text, f"🛌 {tg_html.escape(text)}")
     day, dw = found_day
     text = plan_day_text(dw, today, recovery_note(dw, recovering, tz))
+    html = plan_day_html(dw, today, recovery_note_html(dw, recovering, tz))
     if day != asked:
-        text = f"{day_label(asked, today)} по программе отдых. Ближайшая тренировка:\n{text}"
-    return text
+        rest = f"{day_label(asked, today)} по программе отдых. Ближайшая тренировка:"
+        text = f"{rest}\n{text}"
+        html = f"🛌 {tg_html.escape(rest)}\n\n{html}"
+    return PlanReply(text, html)

@@ -471,10 +471,10 @@ async def test_plan_command_light_day(db, settings, monkeypatch):
     msg = _message()
     await plan_handler.show_plan(msg, settings.model_copy(update={"miniapp_url": "https://x.test/app"}), db,
                                  llm.client)
-    text = msg.answer.await_args.args[0]
-    assert text.startswith("Сегодня: лёгкая версия")
-    assert "• Сгибания с гантелями на бицепс с супинацией 5×8–12, вес −10 %" in text
-    assert "• Жим гантелей сидя 2× дропсет 12-6-6, вес −30 %" in text
+    text = msg.answer.await_args.args[0]  # Telegram HTML (gymbot.services.tg_html), the plain text is plan_text
+    assert text.startswith("🪶 <b>Сегодня: лёгкая версия.</b>") and msg.answer.await_args.kwargs["parse_mode"] == "HTML"
+    assert "1️⃣ <b>Сгибания с гантелями на бицепс с супинацией</b>\n5×8–12 · вес <b>−10 %</b>" in text
+    assert "<b>Жим гантелей сидя</b>\n2× дропсет 12-6-6 · вес <b>−30 %</b>" in text
     kb = msg.answer.await_args.kwargs["reply_markup"]
     assert kb.inline_keyboard[0][0].web_app.url == "https://x.test/app"
 
@@ -485,14 +485,14 @@ async def test_plan_command_rest_and_normal_and_no_training(db, settings, monkey
     msg = _message()
     await plan_handler.show_plan(msg, settings, db, None)
     text = msg.answer.await_args.args[0]
-    assert text.startswith("Сегодня по программе, без поправок")
-    assert "• Сгибания с гантелями на бицепс с супинацией 6×8–12" in text
+    assert text.startswith("🏋️ <b>Сегодня по программе</b>, без поправок")
+    assert "1️⃣ <b>Сгибания с гантелями на бицепс с супинацией</b>\n6×8–12" in text
     assert msg.answer.await_args.kwargs.get("reply_markup") is None  # no MINIAPP_URL
 
     await _wellbeing(db, uid, NOW - timedelta(hours=1), sleep_hours=Decimal(3))
     msg = _message()
     await plan_handler.show_plan(msg, settings, db, None)
-    assert msg.answer.await_args.args[0].startswith("Сегодня лучше отдохнуть: Спал 3 ч")
+    assert msg.answer.await_args.args[0].startswith("😴 <b>Сегодня лучше отдохнуть</b>: Спал 3 ч")
 
     monkeypatch.setattr(plan, "utcnow", lambda: NOW + timedelta(days=1))
     msg = _message()
@@ -504,7 +504,7 @@ async def test_plan_command_starts_program_for_a_new_user(db, settings, monkeypa
     monkeypatch.setattr(plan, "utcnow", lambda: NOW)
     msg = _message()
     await plan_handler.show_plan(msg, settings, db, None)
-    assert msg.answer.await_args.args[0].startswith("Сегодня по программе")
+    assert msg.answer.await_args.args[0].startswith("🏋️ <b>Сегодня по программе</b>")
 
 
 # ---- recompute after a wellbeing record ----
@@ -527,7 +527,7 @@ async def test_plan_follows_saved_wellbeing_on_a_training_day(db, settings, monk
     )
     await log_text.save(cb, settings, db, llm.client)
     assert cb.message.edit_text.await_args.args[0].endswith("Самочувствие сохранено ✅")
-    assert cb.message.answer.await_args.args[0].startswith("Сегодня: лёгкая версия")
+    assert cb.message.answer.await_args.args[0].startswith("🪶 <b>Сегодня: лёгкая версия.</b>")
     assert cb.answer.await_count == 1
 
 

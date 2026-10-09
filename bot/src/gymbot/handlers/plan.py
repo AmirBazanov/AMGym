@@ -15,6 +15,7 @@ from gymbot.db.session import Sessionmaker
 from gymbot.handlers import deload as deload_chat
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services import plan
+from gymbot.services.tg_html import send_html
 from gymbot.services.users import active_program, get_or_create_user
 
 log = logging.getLogger(__name__)
@@ -60,7 +61,7 @@ async def show_plan(
     if built is None:
         await message.answer(NO_TRAINING)
         return
-    await message.answer(plan.plan_text(built), reply_markup=open_diary_kb(settings))
+    await send_html(message.answer, plan.plan_html(built), plan.plan_text(built), reply_markup=open_diary_kb(settings))
     await deload_chat.offer_after_plan(message, settings, sessionmaker)
 
 
@@ -75,6 +76,8 @@ async def send_after_wellbeing(
         # Not forced: the new record changes the inputs hash anyway, an unchanged state reuses the plan.
         built = await build_for(telegram_id, None, settings, sessionmaker, llm, start_program=False)
         if built is not None and built.out.adjusted:
-            await answer_to.answer(plan.plan_text(built), reply_markup=open_diary_kb(settings))
+            await send_html(
+                answer_to.answer, plan.plan_html(built), plan.plan_text(built), reply_markup=open_diary_kb(settings)
+            )
     except Exception:
         log.exception("plan after wellbeing failed")

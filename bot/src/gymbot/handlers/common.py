@@ -7,7 +7,7 @@ from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKey
 
 from gymbot.config import Settings
 from gymbot.db.session import Sessionmaker
-from gymbot.services import live
+from gymbot.services import live, tg_html
 from gymbot.services.programs import find_day, format_item, load_program, program_position
 from gymbot.services.users import active_program, get_or_create_user
 from gymbot.services.workouts import delete_last_chat_sets
@@ -79,10 +79,14 @@ async def today(message: Message, settings: Settings, sessionmaker: Sessionmaker
         days = ", ".join(WEEKDAYS[d.weekday] for d in week.days)
         await message.answer(f"Неделя {pos.week}, сегодня отдых. Тренировки на этой неделе: {days}.")
         return
-    lines = [f"Неделя {pos.week}, {WEEKDAYS[pos.weekday]}:"]
-    for item in sorted(day.items, key=lambda i: i.order):
-        lines.append(f"{item.order}. {item.exercise.name} — {format_item(item)}")
-    await message.answer("\n".join(lines))
+    items = sorted(day.items, key=lambda i: i.order)
+    text = "\n".join([f"Неделя {pos.week}, {WEEKDAYS[pos.weekday]}:"]
+                     + [f"{item.order}. {item.exercise.name} — {format_item(item)}" for item in items])
+    html = "\n\n".join(
+        [f"🏋️ <b>Неделя {pos.week}, {WEEKDAYS[pos.weekday]}</b>"]
+        + [tg_html.card_row(i, item.exercise.name, tg_html.escape(format_item(item))) for i, item in enumerate(items, 1)]
+    )
+    await tg_html.send_html(message.answer, html, text)
 
 
 @router.message(Command("undo"))

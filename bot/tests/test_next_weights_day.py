@@ -55,6 +55,21 @@ async def test_owner_friday_is_answered_in_code_the_same_every_time(db, settings
     assert texts == {OWNER_FRIDAY}
 
 
+async def test_owner_friday_goes_to_telegram_as_a_card(db, settings):
+    """The same answer as HTML: a header, a numbered row per exercise (name, sets × weight, the reason
+    without the arithmetic), the recovery footer; the plain text is unchanged."""
+    async with db() as s:
+        await _owner(s)
+    reply = await answer.respond(db, 42, "Amir", "какая завтра тренировка", [], settings, NoModel(), NOW)
+    assert reply.text == OWNER_FRIDAY
+    html = reply.html
+    assert html.startswith("🏋️ <b>Завтра, пт 09.10</b> · по программе, неделя 1\n\n1️⃣ <b>Сгибания на бицепс с ez грифом хватом снизу</b>\n3×8–12 · <b>27,5 кг</b>\n<i>по «сгибания с гантелями на бицепс с супинацией» 20×8 на руку → 1ПМ ≈ 43,1 кг, 64 % для 12 повторов</i>\n\n2️⃣ ")
+    assert "3️⃣ <b>Французский жим лёжа</b>\n6×8–12 · по ощущениям\n<i>вес из «французский жим в блоке из-за головы» (блок) сюда не переносится; начни легко" in html
+    assert "5️⃣ <b>Отведения на дельты</b>\n3× дропсет 12-6-6 · <b>7,5 кг</b>\n<i>как в прошлый раз 7,5 кг</i>" in html
+    assert html.endswith("\n\n⏳ <b>Бицепс, трицепс, плечи</b> восстановятся к <b>17:00</b> (48 ч после тренировки) — тренировка после 17:00 в самый раз.")
+    assert "1ПМ ≈ 25,3 ×" not in html and "<b>" not in reply.text
+
+
 async def test_owner_friday_weights_are_sane(db, settings):
     async with db() as s:
         user = await _owner(s)
@@ -93,7 +108,8 @@ async def test_rest_day_points_to_the_next_training_day(db, settings):
         user = await _owner(s)
         text = await answer_direct.plan_reply(s, user, settings, "какая тренировка в четверг", plan_question(
             "какая тренировка в четверг"), TZ, NOW)
-    assert text.startswith("Сегодня, чт 08.10 по программе отдых. Ближайшая тренировка:\nЗавтра, пт 09.10")
+    assert text.text.startswith("Сегодня, чт 08.10 по программе отдых. Ближайшая тренировка:\nЗавтра, пт 09.10")
+    assert text.html.startswith("🛌 Сегодня, чт 08.10 по программе отдых. Ближайшая тренировка:\n\n🏋️ <b>Завтра, пт 09.10</b>")
 
 
 async def test_deload_on_a_future_day_lightens_weights_and_sets(db, settings):
