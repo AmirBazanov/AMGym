@@ -237,6 +237,20 @@ class _EditDeload(BaseModel):
     start: str | None
 
 
+class _EditAdjustDay(BaseModel):
+    type: Literal["adjust_day"]
+    day: _EditDay
+    weight_factor: float | None
+    sets_delta: int | None
+    skip: list[str] | None
+    note: str | None
+
+
+class _EditClearDay(BaseModel):
+    type: Literal["clear_day"]
+    day: _EditDay
+
+
 class _EditClarify(BaseModel):
     type: Literal["clarify"]
     question: str
@@ -254,6 +268,8 @@ class EditAnswer(BaseModel):
         | _EditSwapDays
         | _EditMoveDay
         | _EditDeload
+        | _EditAdjustDay
+        | _EditClearDay
         | _EditClarify
     ]
     summary: str

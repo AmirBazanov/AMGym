@@ -1,6 +1,6 @@
 """Migration 0014 (program editor): the history the Mini App gets is the same before and after it.
 
-Golden test: owner-like history saved through the API, /api/state.history captured, then `downgrade -1`
+Golden test: owner-like history saved through the API, /api/state.history captured, then `downgrade 0013`
 (drops day focus and the copy columns, keeps the prescription snapshots), the day items changed, and
 `upgrade head` (the backfill only fills rows without a snapshot): the history is identical, and equal to
 what the pre-0014 code computed from the live items.
@@ -140,7 +140,7 @@ async def test_history_is_identical_before_and_after_the_migration(client, auth,
     assert any(ex["target"] == "" for h in before for ex in h["exercises"])  # and an exercise off the day
     assert sum(1 for h in before if h["programDayId"] is None) == 2  # "nope" and the chat workout
 
-    await migrate(settings, "-1", down=True)
+    await migrate(settings, "0013", down=True)
     async with db() as s:  # 0013: no focus, no copy columns; the snapshots are kept on purpose
         cols = {r[1] for r in (await s.execute(text("PRAGMA table_info(workouts)"))).all()}
         assert "targets_json" in cols
@@ -188,7 +188,7 @@ async def test_snapshot_keeps_history_when_the_program_changes(client, auth, db,
 async def test_reupgrade_fills_only_rows_without_a_snapshot(client, auth, db, settings):
     await seed_history(client, auth, db, settings)
     before = await history(client, auth)
-    await migrate(settings, "-1", down=True)
+    await migrate(settings, "0013", down=True)
     async with db() as s:  # a workout saved by the 0013 code: no snapshot
         first = await s.scalar(text("SELECT id FROM workouts WHERE program_day_id IS NOT NULL ORDER BY id LIMIT 1"))
         kept = await s.scalar(text("SELECT targets_json FROM workouts WHERE id = :i").bindparams(i=first))

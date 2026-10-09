@@ -20,7 +20,7 @@ reminder loop (asyncio) ──> services/reminders ──> Telegram (ежедн�
 | `bot/src/gymbot/handlers/` | хендлеры бота; `log_text.py` ловит любой текст, подключается последним; `chat_edit.py` — правки программы из чата (гейт до `saved_edits`) |
 | `bot/src/gymbot/llm/` | клиент OpenRouter, промпт, схема ответа; `prompts_edit.py` — промпт правок программы из чата |
 | `bot/src/gymbot/db/models.py` | все таблицы |
-| `bot/src/gymbot/services/` | логика: nutrition, reminders, advice, facts, wellbeing, plan, chat_edit (правки программы из чата), progression (miniapp/src/{progression,plan}.ts) |
+| `bot/src/gymbot/services/` | логика: nutrition, reminders, advice, facts, wellbeing, plan, chat_edit (правки программы из чата), day_adjustments (поправка дня из чата), progression (miniapp/src/{progression,plan}.ts) |
 | `bot/src/gymbot/stt.py` | распознавание речи (Groq Whisper) |
 | `bot/src/gymbot/importers/` | импорт программ из xlsx |
 | `miniapp/` | React 19 + Vite + TS |

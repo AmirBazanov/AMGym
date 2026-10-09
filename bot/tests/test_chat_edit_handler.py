@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from test_log_text import FakeLLM as _FakeLLM
 from test_log_text import callback, message
 
-from gymbot.db.models import DeloadState, Program
+from gymbot.db.models import DayAdjustment, DeloadState, Program
 from gymbot.handlers import chat_edit as hce
 from gymbot.handlers import log_text
 from gymbot.services import chat_edit as ce
@@ -426,3 +426,140 @@ async def test_swap_plus_deload_in_one_confirmation(settings, db, llm, published
     assert (await deload_row(db)).started_on == date(2026, 10, 12)
     assert (await active_snapshot(db)).day(1, 6).focus == "Руки и плечи"
     assert published[0][1:] == ("program", "plan", "state")
+
+
+def adjust_today(**kw):
+    return {"actions": [{
+        "type": "adjust_day", "day": {"weekday": None, "focus": None, "when": "today"},
+        "weight_factor": 0.8, "sets_delta": None, "skip": None, "note": None, **kw,
+    }], "summary": "Сегодня легче на 20 %"}
+
+
+def clear_today():
+    return {"actions": [{"type": "clear_day", "day": {"weekday": None, "focus": None, "when": "today"}}], "summary": ""}
+
+
+async def adjustment_rows(db) -> list[DayAdjustment]:
+    async with db() as s:
+        return list((await s.scalars(select(DayAdjustment))).all())
+
+
+async def test_adjust_day_preview_apply_publishes_the_plan(settings, db, llm, published, monkeypatch):
+    handled = AsyncMock(return_value=False)
+    monkeypatch.setattr(log_text.saved_edits, "handle", handled)
+    llm.answers.append(adjust_today())
+    msg = await run("сегодня облегчённо, −20 %", settings, db, llm)
+    assert llm.edit_calls() == 1 and llm.parser_calls() == 0
+    handled.assert_not_awaited()
+    assert "Что изменю" in shown(msg) and "веса −20 %" in shown(msg) and "Сегодня (пт 09.10)" in shown(msg)
+    assert "Создам" not in shown(msg)
+    token = token_of(msg)
+    assert buttons(msg) == [f"eapply:{token}", f"edrop:{token}"]
+    assert await adjustment_rows(db) == [] and published == []  # the preview wrote nothing
+
+    cb = callback(f"eapply:{token}")
+    await hce.apply_edit(cb, settings, db)
+    (row,) = await adjustment_rows(db)
+    assert (row.day, float(row.weight_factor), row.raw_text, row.source) == (TODAY, 0.8, "сегодня облегчённо, −20 %", "chat")
+    assert len(published) == 1 and published[0][1:] == ("plan",)
+    assert "Готово" in cb.message.edit_text.await_args.args[0]
+    assert await owned_programs(db) == 0
+
+    again = callback(f"eapply:{token}")
+    await hce.apply_edit(again, settings, db)
+    again.answer.assert_awaited_with(hce.STALE, show_alert=True)
+    assert len(await adjustment_rows(db)) == 1 and len(published) == 1
+
+
+async def test_adjust_day_cancel_writes_nothing(settings, db, llm, published):
+    llm.answers.append(adjust_today())
+    msg = await run("сегодня облегчённо, −20 %", settings, db, llm)
+    await hce.drop_edit(callback(f"edrop:{token_of(msg)}"))
+    late = callback(f"eapply:{token_of(msg)}")
+    await hce.apply_edit(late, settings, db)
+    late.answer.assert_awaited_with(hce.STALE, show_alert=True)
+    assert await adjustment_rows(db) == [] and published == []
+
+
+async def test_clear_day_removes_the_row(settings, db, llm, published):
+    llm.answers.append(adjust_today())
+    msg = await run("сегодня облегчённо, −20 %", settings, db, llm)
+    await hce.apply_edit(callback(f"eapply:{token_of(msg)}"), settings, db)
+    assert len(await adjustment_rows(db)) == 1
+
+    llm.answers.append(clear_today())
+    undo = await run("верни как было сегодня", settings, db, llm)
+    assert llm.edit_calls() == 2 and llm.parser_calls() == 0
+    assert "Что изменю" in shown(undo) and "убрать поправку (веса −20 %)" in shown(undo)
+    assert len(await adjustment_rows(db)) == 1  # still there until the button
+    cb = callback(f"eapply:{token_of(undo)}")
+    await hce.apply_edit(cb, settings, db)
+    assert await adjustment_rows(db) == []
+    assert [p[1:] for p in published] == [("plan",), ("plan",)]
+    assert "Готово" in cb.message.edit_text.await_args.args[0]
+
+
+async def test_clear_day_without_a_row_goes_to_the_parser(settings, db, llm):
+    """Nothing to clear is not an action: the text goes on as usual."""
+    llm.answers.append(clear_today())
+    msg = await run("верни как было сегодня", settings, db, llm)
+    assert llm.edit_calls() == 1 and llm.parser_calls() == 1
+    assert "Что изменю" not in shown(msg) and hce.EDITS == {}
+    assert await adjustment_rows(db) == []
+
+
+@pytest.mark.parametrize("text", ["сделай тренировку полегче", "давай полегче"])
+async def test_default_light_day_with_an_imperative_is_a_preview(settings, db, llm, text):
+    llm.answers.append(adjust_today(weight_factor=None))
+    msg = await run(text, settings, db, llm)
+    assert llm.parser_calls() == 0 and "Что изменю" in shown(msg) and "(по умолчанию" in shown(msg)
+
+
+async def test_defaults_only_without_a_day_or_imperative_go_to_the_parser(settings, db, llm, monkeypatch):
+    """The model read the text as a light day with nothing said (all null): without a day, a percent or an
+    imperative that is a guess, the text is not consumed."""
+    # the gate is tested apart (it rejects this text); here the guard after the model call
+    monkeypatch.setattr(hce.ce, "is_edit_command", lambda _t: True)
+    monkeypatch.setattr(log_text, "is_edit_command", lambda _t: True)
+    llm.answers.append(adjust_today(weight_factor=None, day={"weekday": None, "focus": None, "when": None}))
+    msg = await run("легче стало после массажа", settings, db, llm)
+    assert llm.edit_calls() == 1 and llm.parser_calls() == 1
+    assert "Что изменю" not in shown(msg) and hce.EDITS == {} and await adjustment_rows(db) == []
+
+
+async def test_invalid_adjust_day_is_a_note_not_a_preview(settings, db, llm):
+    llm.answers.append(adjust_today(weight_factor=1.3))
+    msg = await run("сегодня облегчённо, −20 %", settings, db, llm)
+    assert await adjustment_rows(db) == [] and hce.EDITS == {}
+    assert "Что изменю" not in shown(msg)
+
+
+async def test_adjust_day_with_a_swap_is_one_confirmation(settings, db, llm, published):
+    llm.answers.append({"actions": [
+        {"type": "move_day", "src": {"when": "today"}, "dst": {"when": "tomorrow"}},
+        {"type": "adjust_day", "day": {"weekday": 1, "focus": None, "when": None}, "weight_factor": None,
+         "sets_delta": -1, "skip": None, "note": None},
+    ], "summary": ""})
+    msg = await run("перенеси тренировку на завтра, а в понедельник на подход меньше", settings, db, llm)
+    assert "пт 09.10 → сб 10.10" in shown(msg) and "В понедельник (пн 12.10): на подход меньше" in shown(msg)
+    await hce.apply_edit(callback(f"eapply:{token_of(msg)}"), settings, db)
+    (row,) = await adjustment_rows(db)
+    assert (row.day, row.sets_delta) == (date(2026, 10, 12), -1)
+    assert published[0][1:] == ("program", "plan", "state")
+
+
+async def test_adjustment_stored_meanwhile_answers_changed(settings, db, llm, published, monkeypatch):
+    """A unique (user, day) clash on the insert (another command stored the day first) is CHANGED, not a crash."""
+    from sqlalchemy.exc import IntegrityError
+
+    llm.answers.append(adjust_today())
+    msg = await run("сегодня облегчённо, −20 %", settings, db, llm)
+
+    async def clash(*args, **kwargs):
+        raise IntegrityError("insert", {}, Exception("UNIQUE constraint failed"))
+
+    monkeypatch.setattr(hce.ce.dayadj, "upsert", clash)
+    cb = callback(f"eapply:{token_of(msg)}")
+    await hce.apply_edit(cb, settings, db)
+    assert cb.message.edit_text.await_args.args[0] == hce.CHANGED
+    assert published == [] and await adjustment_rows(db) == []

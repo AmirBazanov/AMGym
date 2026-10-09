@@ -1,7 +1,7 @@
 """Program edits from the chat: "убери французский жим из дня рук", "поставь на сгибания 30 кг", "поменяй
-местами руки и спину", "перенеси тренировку на завтра", "следующая неделя — делоад".
+местами руки и спину", "перенеси тренировку на завтра", "следующая неделя — делоад", "сегодня облегчённо, −20 %", "в пятницу без ног".
 
-Plan: docs/plans/2026-10-09-chat-program-control.md (stages 1 and 2). Flow (handlers/chat_edit.py):
+Plan: docs/plans/2026-10-09-chat-program-control.md (stages 1–3). Flow (handlers/chat_edit.py):
 1. `is_edit_command` — a conservative regex, checked in process_text before saved_edits (a question, a past
    tense verb, saved-record words and settings vocabulary never route here).
 2. One `complete_json(purpose="edit")` call with EDIT_SYSTEM_PROMPT (gymbot.llm.prompts_edit) and
@@ -10,11 +10,13 @@ Plan: docs/plans/2026-10-09-chat-program-control.md (stages 1 and 2). Flow (hand
 3. `compile_ops` resolves days (weekday, today/tomorrow, focus or the exercises of the day), exercises (only
    within that day) and scopes (weeks) into the program editor's PATCH ops (gymbot.services.program_editor)
    and weights for a day (WeightOverride). A swap or a move of days is one `move_day` op (the editor swaps
-   when the target weekday is taken); a deload is a start date for gymbot.services.deload. Ambiguity is a
+   when the target weekday is taken); a deload is a start date for gymbot.services.deload; a lighter day
+   ("−20 %", "на подход меньше", "без ног") is a one-day adjustment for gymbot.services.day_adjustments, an
+   input of the day plan (merged into the day's existing one; "верни как было" clears it). Ambiguity is a
    `Clarify` with buttons, never a guess.
 4. `preview` dry-runs `edit_program` (rolled back) for the skipped weeks; "✅ Применить" -> `apply` runs the
-   same `edit_program` with the version seen in the preview, then the overrides and the deload, in one
-   transaction.
+   same `edit_program` with the version seen in the preview, then the overrides, the day adjustments and the
+   deload, in one transaction.
 
 A message the model turned into at least one valid action is consumed by this path; with no valid action the
 text goes on as usual (saved edits, settings, the parser). Weights in kg, days are local dates (TIMEZONE).
@@ -44,9 +46,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gymbot.db.models import Exercise, User, UserProgram, WeightOverride, Workout
 from gymbot.services import baselines, deload, overrides
 from gymbot.services import chat_settings as cs
+from gymbot.services import day_adjustments as dayadj
 from gymbot.services import program_editor as pe
 from gymbot.services.advice import NEXT_DAY_SEARCH
-from gymbot.services.plan import muscle_group
+from gymbot.services.plan import LIGHT_FACTOR, adjust_item, muscle_group
 from gymbot.services.programs import Position, exercise_catalog, load_program, normalize, program_position
 from gymbot.services.users import active_program
 
@@ -82,7 +85,8 @@ SMALL_NUMBER = 30  # reps and sets; a bigger number in a "на …" message is a
 # Never a program edit: something done or eaten, saved records ("удали запись за понедельник", "удали
 # вчерашнюю тренировку" belong to saved_edits).
 _PAST = re.compile(
-    r"(?<!\w)(?:сделал\w*|выполнил\w*|(?:по|вы|от)?жал(?!уйст)\w*|получил\w*|был[аио]?|съел\w*|выпил\w*)(?!\w)"
+    r"(?<!\w)(?:сделал\w*|выполнил\w*|(?:по|вы|от)?жал(?!уйст)\w*|получил\w*|был[аио]?|съел\w*|выпил\w*|"
+    r"тренировал\w*|потрен\w*|занимал\w*|позанимал\w*)(?!\w)"
 )
 # Food: a meal, grams or kcal, or a common food ("замени рис на гречку в понедельник" is about the diary).
 _FOOD = re.compile(
@@ -102,12 +106,50 @@ _DELOAD_WHEN = re.compile(r"(?<!\w)(?:недел\w*|с\s+понедельник\
 _WELLBEING = re.compile(
     r"(?<!\w)(?:бол(?:ит|ят|ел\w*|ело|ь|и|ью)|болезн\w*|спал\w*|сплю|выспал\w*|недосып\w*|сон|сна|сном|"
     r"устал\w*|усталост\w*|энерги\w*|сил|сил[аыу]|разбит\w*|самочувств\w*|простыл\w*|заболел\w*|"
-    r"ноет|ныть|тянет|потянул\w*|травм\w*|простуд\w*|температур\w*|чувству\w*|плохо)(?!\w)"
+    r"ноет|ныть|тянет|потянул\w*|травм\w*|простуд\w*|температур\w*|чувству\w*|плохо|стал\w*|дыш\w*|пульс\w*)(?!\w)"
 )
 # A diet's unloading days ("на этой неделе разгрузочные дни по еде") are food, not a deload week.
 _DELOAD_FOOD = re.compile(
     r"(?<!\w)(?:ед[аеуы]|едой|питани\w*|кефир\w*|яблок\w*|углевод\w*|калори\w*|диет\w*|голод\w*)(?!\w)"
 )
+# A lighter day ("сегодня облегчённо, −20 %", "сегодня полегче", "на завтра на подход меньше", "в пятницу без
+# ног"): one day of the plan (gymbot.services.day_adjustments), without a day it is today.
+_LIGHTER = re.compile(r"(?<!\w)(?:облегч\w*|полегч\w*|легче|лайтов\w*)(?!\w)")
+_PERCENT = re.compile(r"\d+(?:[.,]\d+)?\s*(?:%|процент\w*)")
+_MINUS = re.compile(r"(?:[−–-]|(?<!\w)минус\s+)\s*\d")
+_FEWER_SETS = re.compile(
+    r"(?<!\w)(?:на\s+(?:\d+|один|одн\w+|два|две|три)\s+)?подход\w*\s+меньше|"
+    r"(?<!\w)меньше\s+(?:на\s+(?:\d+|один|одн\w+|два|две|три)\s+)?подход\w*|(?<!\w)минус\s+(?:\d+\s+)?подход\w*"
+)
+_GROUP_WORD = r"(?:ног|рук|спин|груд|плеч|бицепс|трицепс|пресс|дельт)\w*"
+_WITHOUT_GROUP = re.compile(rf"(?<!\w)без\s+{_GROUP_WORD}(?!\w)")
+# "без жима", "без приседа", "без становой тяги": an exercise word, never "без зала", "без тренировки"
+_WITHOUT_EXERCISE = re.compile(
+    r"(?<!\w)без\s+(?:\w+\s+)?(?:жим|присед|тяг|сгибан|разгибан|подтягиван|отжиман|мах|выпад|планк|становой|"
+    r"румынск|французск|отведени|разведени|гиперэкстенз|скручивани|кроссовер|пулловер)\w*"
+)
+# A bare "полегче" needs a day, a percent or an imperative: "дышится легче" is how the user feels
+_LIGHT_IMPERATIVE = re.compile(
+    r"(?<!\w)(?:сделай(?:те)?|давай(?:те)?|пусть|постав(?:ь|ьте)|план\w*|тренировк\w*|вес|веса|весов|нагрузк\w*|"
+    r"подход\w*)(?!\w)"
+)
+_WEIGHT_WORD = re.compile(r"(?<!\w)(?:вес|веса|весов|весам|рабоч\w*)(?!\w)")
+_WHEN = re.compile(rf"(?<!\w)(?:сегодня|завтра|послезавтра|{_WEEKDAY})(?!\w)")
+# "как облегчить завтрашнюю тренировку" is a question for the advice, "жим шёл легче" a log
+_ASKS = re.compile(
+    r"^(?:а\s+)?(?:как|что|почему|зачем|можно|сколько|какой|какая|какие|каким|когда|стоит|нужно|надо|если)(?!\w)|"
+    r"(?<!\w)(?:можно|стоит|надо|нужно)(?!\w)"
+)
+_PAST_MORE = re.compile(r"(?<!\w)(?:шел|шла|шло|шли|пошл\w*|далс\w*|дала\w*|казал\w*|показал\w*)(?!\w)")
+_LOG_NUMBERS = re.compile(r"\d\s*(?:кг\s*)?[xх×*]\s*\d|\d\s*(?:кг\s*)?(?:на|по)\s+\d")
+MAX_SETS_NUMBER = 10  # a bigger number outside a percent is a weight or reps: a log
+# "верни как было сегодня", "отмени поправку на пятницу": the day's adjustment goes (before _PAST: "было")
+_UNDO_ADJUST = re.compile(
+    r"(?<!\w)(?:отмени(?:те)?|убери(?:те)?|сними(?:те)?)\s+(?:\w+\s+)?(?:поправк\w*|облегчени\w*)(?!\w)"
+)
+# A bare "верни как было" needs a day and nothing about settings or saved records ("верни как было вчера")
+_AS_IT_WAS = re.compile(r"(?<!\w)верни(?:те)?\s+(?:все\s+|всё\s+)?как\s+было(?!\w)")
+_ADJUST_WORD = re.compile(r"(?<!\w)(?:поправк\w*|облегч\w*)")
 # Program start or switch ("перенеси старт программы", "начни программу заново") stays with settings.
 _PROGRAM_START = re.compile(
     r"(?<!\w)(?:старт\w*|начал\w*|заново|сначала|с\s+понедельника|с\s+\d|переключ\w*|выбер\w*|запуст\w*|"
@@ -122,12 +164,52 @@ def _branch_set(norm: str) -> bool:
     return all(int(n) <= SMALL_NUMBER for n in re.findall(r"\d+", norm))
 
 
+def _branch_lighter(norm: str) -> bool:
+    """(e) a lighter day: "сегодня облегчённо, −20 %", "на 10 % легче", "на завтра на подход меньше", "в
+    пятницу без ног", "без ног" (not a question, a log or food)."""
+    if _ASKS.search(norm) or _PAST_MORE.search(norm) or _KG.search(norm) or _LOG_NUMBERS.search(norm):
+        return False
+    if _DELOAD_FOOD.search(norm):
+        return False
+    if any(int(n) > MAX_SETS_NUMBER for n in re.findall(r"\d+", _PERCENT.sub(" ", norm))):
+        return False
+    lighter = _LIGHTER.search(norm)
+    percent = _PERCENT.search(norm)
+    if percent and not (lighter or _MINUS.search(norm) or _WEIGHT_WORD.search(norm)):
+        return False  # "сегодня 20 % жира" is a measurement
+    if _FEWER_SETS.search(norm) or _WITHOUT_GROUP.search(norm) or _WITHOUT_EXERCISE.search(norm):
+        return True
+    if percent:
+        return True
+    return bool(lighter and explicit_day_or_imperative(norm))
+
+
+def explicit_day_or_imperative(norm: str) -> bool:
+    """A day ("сегодня", "в пятницу"), a percent or an imperative ("сделай", "давай", "тренировка"): a bare
+    "легче" without one is how the user feels, never a command."""
+    return bool(_WHEN.search(norm) or _PERCENT.search(norm) or _LIGHT_IMPERATIVE.search(norm))
+
+
+def _undo_adjust(text: str, norm: str) -> bool:
+    if _FOOD.search(norm):
+        return False
+    if _UNDO_ADJUST.search(norm):
+        return True
+    if not _AS_IT_WAS.search(norm) or _RECORDS.search(norm):
+        return False
+    if _ADJUST_WORD.search(norm):
+        return True
+    return bool(_WHEN.search(norm)) and not cs.REMINDER.search(norm) and not cs.is_settings_request(text)
+
+
 def is_edit_command(text: str) -> bool:
     """Whether the text looks like a command to change the program or a day's weight (conservative). The
     message is only taken from the other paths when the model finds a valid action (handlers/chat_edit.py)."""
     if "?" in text:
         return False
     norm = normalize(text)
+    if _undo_adjust(text, norm):
+        return True
     if _PAST.search(norm) or _RECORDS.search(norm) or _FOOD.search(norm):
         return False
     structure = _STRUCTURE.search(_PER_DAY.sub(" ", norm)) or _DAY_NAME.search(norm)
@@ -152,11 +234,14 @@ def is_edit_command(text: str) -> bool:
     if _SET_WEIGHT.search(norm) and _KG.search(norm) and not cs.REPS.search(norm) and not cs.is_settings_request(text):
         return True
     # (c) a deload week without a verb: "следующая неделя — делоад", "давай на этой неделе делоад" (how the
-    # user feels and a diet are excluded above; "облегчённо" for a day waits for stage 3)
+    # user feels and a diet are excluded above)
     if deload_word and _DELOAD_WHEN.search(norm):
         return True
     # (d) a prescription without a verb: "на разгибания 4 подхода по 10–12"
-    return _branch_set(norm)
+    if _branch_set(norm):
+        return True
+    # (e) a lighter day (how the user feels is excluded above: it is wellbeing, the plan follows it itself)
+    return _branch_lighter(norm)
 
 
 # ---- actions from the model ----
@@ -305,6 +390,54 @@ class DeloadA(_Action):
         return v if v in ("this_week", "next_week") else None
 
 
+class AdjustDayA(_Action):
+    """One day lighter ("сегодня облегчённо, −20 %", "на завтра на подход меньше", "в пятницу без ног"); all
+    of weight_factor, sets_delta and skip empty ("сегодня полегче") is the plan's light day."""
+
+    type: Literal["adjust_day"]
+    day: DayRef = Field(default_factory=DayRef)
+    weight_factor: float | None = None  # 0.8 for "−20 %": only from a percent said
+    sets_delta: int | None = None  # -1 for "на подход меньше"
+    skip: list[Annotated[str, Field(min_length=1, max_length=pe.NAME_MAX)]] | None = Field(default=None, max_length=10)
+    note: str | None = Field(default=None, max_length=dayadj.NOTE_MAX)
+
+    @field_validator("weight_factor")
+    @classmethod
+    def _factor(cls, v: float | None) -> float | None:
+        if v is None or v == 1:
+            return None
+        lo, hi = dayadj.FACTOR_RANGE
+        if not lo <= v <= hi:
+            raise ValueError("only lighter")
+        return round(v, 2)
+
+    @field_validator("sets_delta")
+    @classmethod
+    def _sets(cls, v: int | None) -> int | None:
+        if v is None or v == 0:
+            return None
+        lo, hi = dayadj.SETS_DELTA_RANGE
+        if not lo <= v <= hi:
+            raise ValueError("only fewer sets")
+        return v
+
+    @field_validator("skip", mode="before")
+    @classmethod
+    def _skip(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            v = [v]
+        if not isinstance(v, list):
+            return None
+        return [x.strip() for x in v if isinstance(x, str) and x.strip()] or None
+
+
+class ClearDayA(_Action):
+    """The day's adjustment goes ("верни как было сегодня", "отмени поправку на пятницу")."""
+
+    type: Literal["clear_day"]
+    day: DayRef = Field(default_factory=DayRef)
+
+
 class ClarifyA(_Action):
     type: Literal["clarify"]
     question: str = Field(min_length=1, max_length=300)
@@ -319,7 +452,8 @@ class ClarifyA(_Action):
 
 
 Action = Annotated[
-    ReplaceA | RemoveA | AddA | PrescribeA | ReorderA | WeightA | SwapDaysA | MoveDayA | DeloadA | ClarifyA,
+    ReplaceA | RemoveA | AddA | PrescribeA | ReorderA | WeightA | SwapDaysA | MoveDayA | DeloadA | AdjustDayA
+    | ClearDayA | ClarifyA,
     Field(discriminator="type"),
 ]
 _ACTION: TypeAdapter[Any] = TypeAdapter(Action)
@@ -330,6 +464,7 @@ INVALID = {
     "add": f"добавление: подходов от 1 до {pe.MAX_SETS}, повторов от 1 до {pe.MAX_REPS}",
     "prescribe": f"подходы и повторы: подходов от 1 до {pe.MAX_SETS}, повторов от 1 до {pe.MAX_REPS}",
     "weight": "вес: от 1 до 500 кг",
+    "adjust_day": "поправка дня: только легче — вес от −1 до −70 %, подходов меньше на 1–5",
 }
 
 
@@ -421,6 +556,7 @@ class Snapshot:
     deload: tuple[date, date] | None = None  # a running or scheduled deload: first and last day
     # Dates of the current program week with a workout logged in the chat (no program day: its ✓ is by date)
     done_dates: set[date] = field(default_factory=set)
+    adjustments: dict[date, dayadj.DayAdjust] = field(default_factory=dict)  # today..+NEXT_DAY_SEARCH
 
     def position(self, d: date) -> Position:
         return program_position(self.started_on, len(self.weeks), d)
@@ -504,10 +640,11 @@ async def load_snapshot(session: AsyncSession, user: User, today: date) -> Snaps
     if deload.pending(st, today):
         assert st is not None and st.started_on is not None and st.until is not None
         running = (st.started_on, st.until)
+    adjustments = await dayadj.between(session, user.id, today, today + timedelta(days=NEXT_DAY_SEARCH))
     return Snapshot(
         user.id, today, program.slug, program.name, program.version, program.owner_user_id is None,
         up.started_on, weeks, catalog, await exercise_catalog(session), ids, weights,
-        {d for d in done if d is not None}, running, done_dates,
+        {d for d in done if d is not None}, running, done_dates, adjustments,
     )
 
 
@@ -566,6 +703,9 @@ def prompt_context(snap: Snapshot) -> str:
         first, last = snap.deload
         state = "идёт" if first <= today else "запланирована"
         lines.append(f"Разгрузочная неделя {state}: {deload.span(first, last)}.")
+    if snap.adjustments:
+        adjs = [f"{_when_words(snap, d)} ({_date(d)}): {dayadj.describe(a)}" for d, a in sorted(snap.adjustments.items())]
+        lines.append("Поправки дня: " + "; ".join(adjs) + ".")
     lines.append("Каталог упражнений: " + (", ".join(snap.catalog) or "пусто"))
     return "\n".join(lines)
 
@@ -731,6 +871,17 @@ class DeloadChange:
     replaces: tuple[date, date] | None = None  # the running or scheduled deload the preview saw
 
 
+@dataclass
+class AdjustChange:
+    """A day's adjustment to store (`adj`) or to clear (`adj` None); `before` is what the preview saw."""
+
+    day: date
+    adj: dayadj.DayAdjust | None
+    before: dayadj.DayAdjust | None
+    line: str
+    default: bool = False  # nothing was said but "полегче": the plan's light day
+
+
 DELOAD_LINE = "Разгрузочная неделя "  # preview lines that stay when the program part cannot be applied
 WEIGHT_LINE = "Вес "
 
@@ -749,6 +900,7 @@ class EditPlan:
     op_labels: list[str] = field(default_factory=list)  # per op, for the skipped weeks
     weights: list[WeightChange] = field(default_factory=list)
     deload: DeloadChange | None = None
+    adjusts: list[AdjustChange] = field(default_factory=list)
     lines: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     move_notes: list[str] = field(default_factory=list)  # warnings about moved days, shown after `notes`
@@ -767,7 +919,7 @@ class EditPlan:
         return self
 
     def ready(self) -> bool:
-        return self.clarify is None and bool(self.ops or self.move_op or self.weights or self.deload)
+        return self.clarify is None and bool(self.ops or self.move_op or self.weights or self.deload or self.adjusts)
 
     def live_topics(self) -> list[Any]:
         topics: list[Any] = []
@@ -775,13 +927,14 @@ class EditPlan:
             topics += ["program", "plan", "state"]
         if self.weights and "state" not in topics:
             topics.append("state")
-        if self.deload is not None and "plan" not in topics:
+        if (self.deload is not None or self.adjusts) and "plan" not in topics:
             topics.append("plan")
         return topics
 
     def drop_ops(self, note: str) -> None:
         """The program part cannot be applied (the dry run failed): keep only the weights and the deload."""
-        self.lines = [ln for ln in self.lines if ln.startswith((WEIGHT_LINE, DELOAD_LINE))]
+        keep = {c.line for c in self.adjusts}
+        self.lines = [ln for ln in self.lines if ln.startswith((WEIGHT_LINE, DELOAD_LINE)) or ln in keep]
         self.ops, self.op_labels, self.move_notes = [], [], []
         self.move_op = None
         self.notes.insert(0, note)
@@ -946,6 +1099,124 @@ def _deload(snap: Snapshot, a: DeloadA, plan: EditPlan) -> None:
     )
 
 
+def _when_words(snap: Snapshot, d: date) -> str:
+    """«сегодня», «завтра», «в пятницу»."""
+    if d == snap.today:
+        return "сегодня"
+    if d == snap.today + timedelta(days=1):
+        return "завтра"
+    return _IN_WEEKDAY[d.weekday()]
+
+
+ADJUST_DAYS = 7  # a lighter day is set for a day of the coming week
+
+
+def _adjust_date(snap: Snapshot, ref: DayRef) -> date:
+    """The calendar day of a one-day adjustment: today/tomorrow, the next such weekday (today included), the
+    first training day of the coming week with that label, or today when no day is said."""
+    today = snap.today
+    if ref.when is not None:
+        return today + timedelta(days=1 if ref.when == "tomorrow" else 0)
+    if ref.weekday is not None:
+        return today + timedelta(days=(ref.weekday - today.isoweekday()) % 7)
+    if ref.focus:
+        days = [(d, pd) for k in range(ADJUST_DAYS) if (pd := snap.day_on(d := today + timedelta(days=k))) and pd.items]
+        views = [pd for _, pd in days]
+        hits = [pd for pd in views if _focus_match(ref.focus, pd.focus)] or _by_composition(ref.focus, views)
+        found = next((d for d, pd in days if any(pd is h for h in hits)), None)
+        if found is None:
+            raise _Need(note=f"Не нашёл на ближайшей неделе день «{ref.focus}».")
+        return found
+    return today
+
+
+def _said_groups(said: str) -> set[str]:
+    """Muscle groups when `said` is only group words ("ноги", "руки", "грудь и плечи"), else empty."""
+    words = [w for w in _words(said) if w not in ("без", "все", "всё")]
+    groups: set[str] = set()
+    for w in words:
+        hit = next((gs for stem, gs in _FOCUS_GROUPS if w.startswith(stem)), None)
+        if hit is None:
+            return set()
+        groups |= hit
+    return groups
+
+
+def _skips(day: DayView, said: list[str], plan: EditPlan, when: str) -> tuple[set[str], set[str]]:
+    """Exercise names and muscle groups of `day` that `said` names; notes for what is not there."""
+    exercises: set[str] = set()
+    groups: set[str] = set()
+    for s in said:
+        hits, sure = resolve_item(day, s)
+        if hits and sure:
+            exercises |= {h.name for h in hits}
+            continue
+        if gs := _said_groups(s):
+            if not any(muscle_group(i.name) in gs for i in day.items):
+                plan.notes.append(f"{when.capitalize()} нет упражнений на {s}.")
+                continue
+            groups |= gs
+            continue
+        if hits:  # "без сгибаний": every curl of the day
+            exercises |= {h.name for h in hits}
+            continue
+        plan.notes.append(f"В дне {day.label} нет «{s}». Там: {', '.join(i.name for i in day.items)}.")
+    return exercises, groups
+
+
+def _adjust(snap: Snapshot, a: AdjustDayA, plan: EditPlan) -> None:
+    d = _adjust_date(snap, a.day)
+    when = _when_words(snap, d)
+    day = snap.day_on(d)
+    if day is None or not day.items:
+        raise _Need(note=f"{when.capitalize()} ({_date(d)}) по программе тренировки нет — облегчать нечего.")
+    pending = next((c for c in plan.adjusts if c.day == d), None)
+    before = snap.adjustments.get(d)
+    base = pending.adj if pending is not None and pending.adj is not None else before
+    exercises, groups = _skips(day, a.skip or [], plan, when)
+    new = dayadj.DayAdjust(a.weight_factor, a.sets_delta, sorted(exercises), sorted(groups), a.note)
+    default = ""
+    if new.empty():
+        if a.skip:  # nothing named was found: the notes say so
+            return
+        if base is not None and (base.weight_factor is not None or base.sets_delta is not None):
+            plan.notes.append(f"На {_date(d)} уже: {dayadj.describe(base)}.")
+            return
+        new = dayadj.DayAdjust(LIGHT_FACTOR, -1, note=a.note)  # "сегодня полегче": the plan's light day
+        default = " (по умолчанию, как лёгкий день)"
+    result = base.merged(new) if base is not None else new
+    if result == before:
+        plan.notes.append(f"На {_date(d)} уже: {dayadj.describe(result)}.")
+        return
+    skipped = [i for i in day.items if adjust_item(result, i.name, i.sets, i.sets, 1.0)[2]]
+    if skipped and len(skipped) == len(day.items):
+        plan.notes.append(f"{when.capitalize()} не останется ни одного упражнения — по сути день отдыха.")
+    was = f" (было: {dayadj.describe(before)})" if before is not None else ""
+    line = f"{when.capitalize()} ({_date(d)}): {dayadj.describe(result)}{default}{was}"
+    if pending is not None:
+        plan.adjusts.remove(pending)
+        plan.lines = [ln for ln in plan.lines if ln != pending.line]
+    plan.adjusts.append(AdjustChange(d, result, before, line, bool(default)))
+    plan.lines.append(line)
+
+
+def _clear_day(snap: Snapshot, a: ClearDayA, plan: EditPlan) -> None:
+    d = _adjust_date(snap, a.day)
+    when = _when_words(snap, d)
+    before = snap.adjustments.get(d)
+    pending = next((c for c in plan.adjusts if c.day == d), None)
+    if pending is not None:
+        plan.adjusts.remove(pending)
+        plan.lines = [ln for ln in plan.lines if ln != pending.line]
+    if before is None:
+        if pending is None:
+            plan.notes.append(f"На {when} ({_date(d)}) поправок нет, план и так по программе.")
+        return
+    line = f"{when.capitalize()} ({_date(d)}): убрать поправку ({dayadj.describe(before)}), план как по программе"
+    plan.adjusts.append(AdjustChange(d, None, before, line))
+    plan.lines.append(line)
+
+
 def _slot(
     snap: Snapshot,
     n: int,
@@ -1057,6 +1328,12 @@ def compile_ops(snap: Snapshot, actions: list[Any], picks: dict[tuple[int, str],
             _deload(snap, a, plan)
             continue
         try:
+            if isinstance(a, AdjustDayA):
+                _adjust(snap, a, plan)
+                continue
+            if isinstance(a, ClearDayA):
+                _clear_day(snap, a, plan)
+                continue
             if isinstance(a, SwapDaysA | MoveDayA):
                 _move(snap, n, a, plan, picks)
                 continue
@@ -1168,6 +1445,19 @@ def compile_ops(snap: Snapshot, actions: list[Any], picks: dict[tuple[int, str],
     return plan.finish()
 
 
+def only_guesses(plan: EditPlan, actions: list[Any], text: str) -> bool:
+    """Whether the plan holds nothing the user clearly asked for: a lighter day made of defaults only ("легче"
+    with no day, percent or imperative is how the user feels) or a clear of a day with no adjustment. Then the
+    text goes on as usual (the parser, the wellbeing log)."""
+    if plan.clarify is not None:
+        return False
+    if not plan.ready():
+        return bool(actions) and all(isinstance(a, ClearDayA) for a in actions)
+    if plan.ops or plan.move_op or plan.weights or plan.deload:
+        return False
+    return all(c.default for c in plan.adjusts) and not explicit_day_or_imperative(normalize(text))
+
+
 def skip_lines(plan: EditPlan, results: list[pe.OpResult]) -> list[str]:
     """«французский жим лёжа → жим гантелей: недели 3–5 пропущу — там другое упражнение»."""
     out = []
@@ -1273,6 +1563,19 @@ async def apply(
         log.info("weights from chat: user %s, %s, text %r", user.id, [(w.name, w.day, w.kg) for w in plan.weights], raw_text)
     if outcome is not None:
         await _move_overrides(session, user.id, started_on, plan.ops, outcome)
+    for c in list(plan.adjusts):
+        now_there = await dayadj.get(session, user.id, c.day)
+        if c.day < today or now_there != c.before:
+            why = "тот день уже прошёл" if c.day < today else "поправка изменилась после предпросмотра"
+            notes.append(f"Поправку на {_date(c.day)} не трогаю: {why}, повтори команду.")
+            plan.lines = [ln for ln in plan.lines if ln != c.line]
+            plan.adjusts.remove(c)
+            continue
+        if c.adj is None:
+            await dayadj.clear(session, user.id, c.day)
+        else:
+            await dayadj.upsert(session, user.id, c.day, c.adj, raw_text, now=now)
+        log.info("day adjustment from chat: user %s, %s, %s, text %r", user.id, c.day, c.adj, raw_text)
     if plan.deload is not None:
         st = await deload.get_state(session, user.id)
         now_there = (st.started_on, st.until) if st is not None and deload.pending(st, today) else None

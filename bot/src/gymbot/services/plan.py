@@ -9,6 +9,10 @@ A deload week (gymbot.services.deload) lightens every exercise: weight × deload
 fewer sets; readiness stays "normal" and the summary names it. Rest still wins; on a light day the
 lighter of both applies. The model may not undo it (the factor is capped at the draft's).
 
+A manual adjustment of the day said in the chat (gymbot.services.day_adjustments: "сегодня −20 %", "на
+подход меньше", "без ног") is an input too and applies the same way: the lighter value wins, its skips
+stay skipped, rest still wins, the summary names it and the model may not make it heavier.
+
 The stored plan is reused while `inputs_hash` matches: the hash covers the inputs, the rule draft (it
 depends on the time: a session older than 48 h stops counting) and PLAN_VERSION. A fallback to the
 draft (model down, invalid answer) is cached too; "regenerate" (force) is the explicit retry.
@@ -41,6 +45,7 @@ from gymbot.config import Settings
 from gymbot.db.models import DayPlan, Exercise, User, UserProgram, Workout, WorkoutSet
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.prompts import build_plan_messages, format_facts
+from gymbot.services import day_adjustments as dayadj
 from gymbot.services import deload, live
 from gymbot.services.facts import active_facts
 from gymbot.services.nutrition import _aware, day_summary
@@ -49,7 +54,8 @@ from gymbot.services.wellbeing import parse_pains, recent_entries
 
 log = logging.getLogger(__name__)
 
-PLAN_VERSION = 3  # bump when the rules change: stored plans are rebuilt (2: the model can only lighten; 3: deload)
+PLAN_VERSION = 4  # bump when the rules change: stored plans are rebuilt (2: the model can only lighten; 3: deload;
+# 4: manual day adjustments)
 SHORT_SLEEP_REST, SHORT_SLEEP_LIGHT = 4, 6  # hours
 LOW_KCAL = 0.7  # yesterday's kcal below this share of the norm: light day
 LIGHT_FACTOR, PAIN_FACTOR, MILD_PAIN_FACTOR, SORE_FACTOR = 0.9, 0.7, 0.85, 0.85
@@ -135,6 +141,7 @@ class PlanInputs:
     recent: list[RecentSets] = field(default_factory=list)  # earlier days only: today's sets must not move the plan
     facts: list[tuple[str, str]] = field(default_factory=list)  # (text, category), newest first
     deload_until: date | None = None  # last day of the deload week running today (gymbot.services.deload)
+    adjustment: dayadj.DayAdjust | None = None  # today's manual adjustment from the chat
 
 
 async def _program_day(
@@ -201,6 +208,7 @@ async def collect_inputs(
         recent=[RecentSets(_aware(at), name, n, day) for at, day, name, n in rows],
         facts=[(f.text, f.category) for f in await active_facts(session, user.id)],
         deload_until=await deload.active_until(session, user.id, today),
+        adjustment=await dayadj.get(session, user.id, today),
     )
 
 
@@ -275,6 +283,21 @@ def muscle_group(name: str) -> str | None:
 def _equipment(name: str) -> str | None:
     key = _key(name)
     return next((e for e, pattern in _EQUIPMENT if pattern.search(key)), None)
+
+
+def adjust_item(adj: dayadj.DayAdjust, name: str, program_sets: int, sets: int, factor: float) -> tuple[int, float, bool]:
+    """(sets, factor, skip) of one exercise with a manual day adjustment on top of what the day already has:
+    the lighter factor, the fewer sets (the program's minus the delta, never below 1), skipped when named
+    or in a skipped muscle group."""
+    if adj.weight_factor is not None:
+        factor = min(factor, adj.weight_factor)
+    if adj.sets_delta is not None:
+        sets = min(sets, max(1, program_sets + adj.sets_delta))
+    key = normalize(name)
+    skip = any(normalize(n) == key for n in adj.skip_exercises) or (
+        bool(adj.skip_groups) and muscle_group(name) in adj.skip_groups
+    )
+    return sets, factor, skip
 
 
 def valid_replacement(original: str, replacement: str) -> bool:
@@ -357,6 +380,7 @@ class Draft:
     protected: frozenset[int] = frozenset()  # positions lightened for pain: the model may not make them heavier
     adjusted: bool = False
     deload: bool = False  # a deload week: the model may not make any exercise heavier
+    manual: bool = False  # a manual adjustment of the day: the model may not make any exercise heavier
 
 
 def _changed(e: PlanExercise, it: DayItem) -> bool:
@@ -371,6 +395,7 @@ def _is_adjusted(readiness: str, exercises: list[PlanExercise], items: list[DayI
 def rule_draft(inputs: PlanInputs, now_utc: datetime) -> Draft:
     readiness, reasons = rule_readiness(inputs)
     in_deload = inputs.deload_until is not None and readiness != "rest"
+    adj = inputs.adjustment if readiness != "rest" and inputs.adjustment and not inputs.adjustment.empty() else None
     sore = _sore_groups(inputs, now_utc)
     exercises: list[PlanExercise] = []
     protected: set[int] = set()
@@ -392,6 +417,10 @@ def rule_draft(inputs: PlanInputs, now_utc: datetime) -> Draft:
         if group in sore:
             factor = min(factor, SORE_FACTOR)
             reason = reason or f"мышцы не восстановились после {sore[group]:%d.%m}"
+        if adj is not None:
+            sets, factor, skipped = adjust_item(adj, it.name, it.sets, sets, factor)
+            if skipped:
+                skip, reason = True, dayadj.SKIP_REASON
         exercises.append(
             PlanExercise(
                 name=it.name, sets=sets,
@@ -402,6 +431,7 @@ def rule_draft(inputs: PlanInputs, now_utc: datetime) -> Draft:
     adjusted = _is_adjusted(readiness, exercises, inputs.items)
     summary = None
     deload_note = deload.summary(inputs.deload_until) if in_deload and inputs.deload_until else None
+    adj_note = dayadj.summary(adj) if adj is not None else None
     if readiness == "rest":
         summary = _cap(", ".join(reasons)) + ". Сон и восстановление сегодня важнее зала."
     elif readiness == "light":
@@ -409,11 +439,13 @@ def rule_draft(inputs: PlanInputs, now_utc: datetime) -> Draft:
             summary = _cap(", ".join(reasons)) + f". {deload_note}"
         else:
             summary = _cap(", ".join(reasons)) + f". Вес −{round((1 - LIGHT_FACTOR) * 100)} %, на подход меньше."
+        if adj_note:
+            summary += f" {adj_note}"
     elif adjusted:
-        notes = list(dict.fromkeys(e.reason for e in exercises if e.reason))
+        notes = list(dict.fromkeys(e.reason for e in exercises if e.reason and e.reason != dayadj.SKIP_REASON))
         pains = _cap("; ".join(notes)) + " — эти упражнения легче." if notes else None
-        summary = " ".join(x for x in (deload_note, pains) if x) or None
-    return Draft(readiness, summary, exercises, frozenset(protected), adjusted, in_deload)
+        summary = " ".join(x for x in (deload_note, adj_note, pains) if x) or None
+    return Draft(readiness, summary, exercises, frozenset(protected), adjusted, in_deload, adj is not None)
 
 
 def needs_model(inputs: PlanInputs, draft: Draft) -> bool:
@@ -475,6 +507,8 @@ def apply_refinement(draft: Draft, data: Any, inputs: PlanInputs) -> Draft:
     summary = draft.summary
     if (text := _text(data.get("summary"), 300)) and (text := _PREFIX.sub("", text).strip()):
         summary = _cap(text)
+        if draft.manual and inputs.adjustment and dayadj.SUMMARY_MARK.casefold() not in text.casefold():
+            summary = f"{dayadj.summary(inputs.adjustment)} {summary}"
         if draft.deload and inputs.deload_until and "разгруз" not in text.casefold():
             summary = f"{deload.summary(inputs.deload_until)} {summary}"
     if draft.readiness == "rest":
@@ -494,7 +528,7 @@ def apply_refinement(draft: Draft, data: Any, inputs: PlanInputs) -> Draft:
                 reps_max = _not_above(reps_max, d.repsMax)
             if reps_min is not None and reps_max is not None and reps_max < reps_min:
                 reps_max = reps_min
-        cap = d.weightFactor if protected or draft.deload or draft.readiness != "normal" else 1.0
+        cap = d.weightFactor if protected or draft.deload or draft.manual or draft.readiness != "normal" else 1.0
         factor = min(_factor(item.get("weightFactor"), d.weightFactor), cap)
         replacement = _text(item.get("replaceWith"), 80)
         if replacement and (
@@ -515,7 +549,7 @@ def apply_refinement(draft: Draft, data: Any, inputs: PlanInputs) -> Draft:
             )
         )
     adjusted = _is_adjusted(draft.readiness, out, inputs.items)
-    return Draft(draft.readiness, summary, out, draft.protected, adjusted, draft.deload)
+    return Draft(draft.readiness, summary, out, draft.protected, adjusted, draft.deload, draft.manual)
 
 
 def _fmt_reps(it: DayItem) -> str:

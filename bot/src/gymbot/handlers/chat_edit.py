@@ -6,8 +6,8 @@ question with buttons, or notes); anything else (not a command, no valid action,
 the text goes on as usual.
 
 Nothing is written until "✅ Применить": it runs program_editor.edit_program with the version the preview was
-built against (a change in between, from the Mini App or another command, answers CHANGED), then the weights
-and the deload, and publishes "program", "plan", "state" (only what changed) so the open Mini App reloads. Clarify buttons fix the day or the
+built against (a change in between, from the Mini App or another command, answers CHANGED), then the weights,
+the day adjustments ("сегодня −20 %", gymbot.services.day_adjustments) and the deload, and publishes "program", "plan", "state" (only what changed) so the open Mini App reloads. Clarify buttons fix the day or the
 exercise and rebuild the preview without the model; the model's own question is answered by asking it again
 with the chosen option. Previews live in memory (EDITS, by token) for TTL; a restart, an older preview or a
 second tap answers STALE.
@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from sqlalchemy.exc import IntegrityError
 
 from gymbot.config import Settings
 from gymbot.db.session import Sessionmaker
@@ -159,6 +160,8 @@ async def stage_edit(
         log.warning("program edit command failed (%s), the usual path", type(e).__name__)
         return None
     plan = pending.plan
+    if ce.only_guesses(plan, actions, text):
+        return None  # "дышится легче" read as a default light day, "верни как было" with nothing to clear
     if plan.clarify is None and not plan.ready() and se.detect(text, today) is not None:
         # Nothing to apply ("удали ужин в понедельник": no «ужин» in Monday's program) and the text reads as a
         # saved-record edit: that path gets it, the notes would only hide it.
@@ -230,7 +233,7 @@ async def apply_edit(cb: CallbackQuery, settings: Settings, sessionmaker: Sessio
             up = await active_program(session, user, today)
             notes = await ce.apply(session, user, up, plan, today, pending.raw, now)
             await session.commit()
-    except pe.Conflict:
+    except (pe.Conflict, IntegrityError):  # IntegrityError: the day's adjustment was stored meanwhile
         await _edit(cb, CHANGED)
         await cb.answer()
         return

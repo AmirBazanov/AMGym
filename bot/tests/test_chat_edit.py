@@ -1,6 +1,6 @@
 """Program edits from the chat, no LLM: the routing gate, action validation, resolution, ops, preview, apply."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -8,11 +8,14 @@ from sqlalchemy import func, select
 from gymbot.db.models import DeloadState, Exercise, Program, WeightOverride, Workout
 from gymbot.services import chat_edit as ce
 from gymbot.services import chat_settings as cs
+from gymbot.services import day_adjustments as dayadj
 from gymbot.services import deload, saved_edits
 from gymbot.services import program_editor as pe
 from gymbot.services.chat_edit import (
     AddA,
+    AdjustDayA,
     ClarifyA,
+    ClearDayA,
     DayRef,
     DeloadA,
     MoveDayA,
@@ -23,6 +26,7 @@ from gymbot.services.chat_edit import (
     SwapDaysA,
     WeightA,
 )
+from gymbot.services.day_adjustments import DayAdjust
 from gymbot.services.programs import load_program
 from gymbot.services.users import active_program, get_or_create_user
 
@@ -47,6 +51,16 @@ EDIT_YES = [
     "давай на этой неделе делоад",
     "со следующей недели разгрузка",
     "сделай разгрузочную неделю с понедельника",
+    # stage 3: a lighter day
+    "сегодня облегчённо, −20 %",
+    "сегодня полегче",
+    "на завтра на подход меньше",
+    "в пятницу без ног",
+    "на 10 % легче",
+    "без ног",
+    "верни как было сегодня",
+    "отмени поправку на пятницу",
+    "сегодня на 2 подхода меньше",
 ]
 
 EDIT_NO = [
@@ -73,8 +87,7 @@ EDIT_NO = [
     "на жим 4 подхода по 8 с 80",
     "поставь таймер отдыха 2 минуты",
     "удали самсу за пятницу",
-    # a lighter day waits for stage 3; how the user feels is wellbeing even next to "делоад"
-    "сегодня облегчённо, −20 %",
+    # how the user feels is wellbeing even next to "делоад" or "облегчённо"
     "болит плечо, сегодня облегчённо потренируюсь",
     "на этой неделе делоад, спал плохо",
     "сделай на этой неделе делоад, устал",
@@ -98,6 +111,18 @@ EDIT_NO = [
     # food
     "замени рис на гречку в понедельник",
     "удали ужин в понедельник",
+    # a lighter day: a question, how the user feels, a log of what was done, food
+    "как облегчить завтрашнюю тренировку",
+    "сегодня полегче, спина болит",
+    "сегодня полегче, устал",
+    "сегодня было легче",
+    "жим 80 на 8 без ног",
+    "кофе без сахара",
+    "полегче с углеводами",
+    "сегодня полегче?",
+    "жим шёл легче",
+    "жим 80 легче",
+    "сделал на подход меньше",
 ]
 
 
@@ -910,7 +935,7 @@ def test_edit_schema_lists_every_action_type_the_parser_accepts():
         valid, _ = ce.parse_actions({"actions": [{"type": t}]})
         assert len(valid) == 1
     assert in_schema == {"replace", "remove", "add", "prescribe", "reorder", "weight", "swap_days", "move_day",
-                         "deload", "clarify"}
+                         "deload", "adjust_day", "clear_day", "clarify"}
 
 
 # ---- review fixes: moves run last, one per command, chat checks, day weights, a changed deload ----
@@ -1024,3 +1049,516 @@ async def test_deload_changed_after_the_preview_is_not_overwritten(db):
     assert len(notes) == 1 and "изменилась" in notes[0]
     assert (st.started_on, st.until) == (TODAY, date(2026, 10, 15))
     assert plan.deload is None and not any(ln.startswith(ce.DELOAD_LINE) for ln in plan.lines)
+
+
+# ---- stage 3: a lighter day (gymbot.services.day_adjustments) ----
+
+MON, SAT = 1, 6
+MON_DATE = date(2026, 10, 12)  # week 2, an arms day without legs
+WED_DATE = date(2026, 10, 14)  # the base day: squat and romanian deadlift
+AT = datetime(2026, 10, 9, 9, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["верни всё как было сегодня", "верни как было, без поправки", "отмени облегчение на завтра", "убери поправку",
+     "сними поправку на пятницу"],
+)
+def test_gate_undo_of_an_adjustment(text):
+    assert ce.is_edit_command(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["верни как было", "верни как было в настройках", "верни как было напоминание", "верни как было вчера"],
+)
+def test_gate_bare_undo_needs_a_day_and_is_not_settings_or_records(text):
+    assert not ce.is_edit_command(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # how the user feels: a bare "легче" is never a command
+        "легче стало после массажа", "дышится легче", "пульс сегодня легче", "легче", "полегче",
+        # workouts already done
+        "сегодня облегчённо потренил", "в пятницу без ног потренировался", "сегодня тренировался без бицепса",
+        # a measurement, not a weight percent; "без" a non-exercise
+        "сегодня 20% жира", "сегодня без зала", "завтра без тренировки", "завтра без сахара", "в пятницу без кофе",
+        # a question without "?"
+        "сегодня можно полегче", "стоит ли сегодня полегче",
+    ],
+)
+def test_gate_lighter_day_negatives_from_review(text):
+    assert not ce.is_edit_command(text)
+
+
+@pytest.mark.parametrize("text", ["давай полегче", "без жима в смите", "сделай тренировку полегче", "веса на 10 % меньше"])
+def test_gate_lighter_day_with_an_imperative_or_an_exercise(text):
+    assert ce.is_edit_command(text)
+
+
+def test_gate_undo_next_to_food_or_a_question_is_not_a_command():
+    assert not ce.is_edit_command("верни как было сегодня?")
+    assert not ce.is_edit_command("верни как было, съел 2 самсы")
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["сегодня легче, чем вчера было, зря?", "что легче: жим или тяга"],
+)
+def test_gate_lighter_is_not_taken_from_food_questions_or_chatter(text):
+    assert not ce.is_edit_command(text)
+
+
+def test_parse_actions_adjust_day_and_clear_day():
+    valid, notes = ce.parse_actions({"actions": [
+        {"type": "adjust_day", "day": {"when": "today"}, "weight_factor": 0.8, "sets_delta": -1, "skip": ["ноги"],
+         "note": "спина"},
+        {"type": "adjust_day", "day": None, "weight_factor": None, "sets_delta": None, "skip": None, "note": None},
+        {"type": "clear_day", "day": {"weekday": 5}},
+        {"type": "clear_day"},
+    ]})
+    assert notes == [] and [type(a) for a in valid] == [AdjustDayA, AdjustDayA, ClearDayA, ClearDayA]
+    assert (valid[0].day.when, valid[0].weight_factor, valid[0].sets_delta, valid[0].skip, valid[0].note) == (
+        "today", 0.8, -1, ["ноги"], "спина")
+    assert valid[1].day == DayRef() and valid[1].weight_factor is None and valid[1].skip is None
+    assert valid[2].day.weekday == 5 and valid[3].day == DayRef()
+
+
+def test_parse_actions_adjust_day_neutral_values_become_none():
+    (a,), notes = ce.parse_actions({"actions": [
+        {"type": "adjust_day", "weight_factor": 1.0, "sets_delta": 0, "skip": "  ", "note": None}]})
+    assert notes == [] and a.weight_factor is None and a.sets_delta is None and a.skip is None
+
+
+def test_parse_actions_adjust_day_skip_as_a_string_and_a_rounded_factor():
+    (a,), _ = ce.parse_actions({"actions": [{"type": "adjust_day", "weight_factor": 0.8049, "skip": " без ног "}]})
+    assert a.weight_factor == 0.8 and a.skip == ["без ног"]
+
+
+@pytest.mark.parametrize("factor", [0.3, 0.99])
+def test_parse_actions_adjust_day_factor_bounds_are_valid(factor):
+    valid, notes = ce.parse_actions({"actions": [{"type": "adjust_day", "weight_factor": factor}]})
+    assert notes == [] and valid[0].weight_factor == factor
+
+
+@pytest.mark.parametrize("factor", [1.2, 0.29, 0.0, -0.5])
+def test_parse_actions_adjust_day_only_lighter_weights(factor):
+    valid, notes = ce.parse_actions({"actions": [{"type": "adjust_day", "weight_factor": factor}]})
+    assert valid == [] and len(notes) == 1 and notes[0].startswith("Не применю — поправка дня")
+
+
+@pytest.mark.parametrize("delta", [1, 2, -6, -10])
+def test_parse_actions_adjust_day_only_fewer_sets(delta):
+    valid, notes = ce.parse_actions({"actions": [{"type": "adjust_day", "sets_delta": delta}]})
+    assert valid == [] and len(notes) == 1 and notes[0].startswith("Не применю — поправка дня")
+
+
+@pytest.mark.parametrize("delta", [-1, -5])
+def test_parse_actions_adjust_day_sets_bounds_are_valid(delta):
+    valid, notes = ce.parse_actions({"actions": [{"type": "adjust_day", "sets_delta": delta}]})
+    assert notes == [] and valid[0].sets_delta == delta
+
+
+def test_parse_actions_invalid_adjust_keeps_the_valid_ones():
+    valid, notes = ce.parse_actions({"actions": [
+        {"type": "adjust_day", "weight_factor": 2.0},
+        {"type": "adjust_day", "sets_delta": 3},
+        {"type": "clear_day", "day": {"weekday": 5}},
+    ]})
+    assert [type(a) for a in valid] == [ClearDayA] and len(notes) == 1  # one note for the kind
+
+
+def adjust(**kw):
+    return AdjustDayA(type="adjust_day", **kw)
+
+
+def clear_day(**kw):
+    return ClearDayA(type="clear_day", **kw)
+
+
+def with_adjustments(snap, mapping):
+    from dataclasses import replace
+
+    return replace(snap, adjustments=mapping)
+
+
+def test_compile_adjust_today_by_percent(snap):
+    plan = ce.compile_ops(snap, [adjust(day=DayRef(when="today"), weight_factor=0.8)])
+    (change,) = plan.adjusts
+    assert (change.day, change.adj, change.before) == (TODAY, DayAdjust(0.8), None)
+    assert plan.lines == ["Сегодня (пт 09.10): веса −20 %"] == [change.line]
+    assert plan.ready() and plan.ops == [] and plan.weights == [] and plan.live_topics() == ["plan"]
+    assert plan.notes == [] and plan.clarify is None
+
+
+def test_compile_adjust_without_a_day_is_today(snap):
+    (change,) = ce.compile_ops(snap, [adjust(weight_factor=0.9, sets_delta=-1)]).adjusts
+    assert change.day == TODAY and change.adj == DayAdjust(0.9, -1)
+
+
+def test_compile_adjust_sets_only(snap):
+    plan = ce.compile_ops(snap, [adjust(day=DayRef(when="today"), sets_delta=-2)])
+    assert plan.adjusts[0].adj == DayAdjust(None, -2) and plan.lines == ["Сегодня (пт 09.10): на 2 подхода меньше"]
+
+
+def test_compile_adjust_weekday_is_the_next_such_day(snap):
+    (monday,) = ce.compile_ops(snap, [adjust(day=DayRef(weekday=MON), weight_factor=0.8)]).adjusts
+    assert monday.day == MON_DATE and monday.line.startswith("В понедельник (пн 12.10)")
+    (friday,) = ce.compile_ops(snap, [adjust(day=day(), weight_factor=0.8)]).adjusts
+    assert friday.day == TODAY and friday.line.startswith("Сегодня (пт 09.10)")  # today counts
+    (wednesday,) = ce.compile_ops(snap, [adjust(day=DayRef(weekday=WED), weight_factor=0.8)]).adjusts
+    assert wednesday.day == WED_DATE
+
+
+def test_compile_adjust_by_focus_takes_the_first_such_day_of_the_coming_week(snap):
+    (base,) = ce.compile_ops(snap, [adjust(day=DayRef(focus="база"), weight_factor=0.8)]).adjusts
+    assert base.day == WED_DATE
+    (arms,) = ce.compile_ops(snap, [adjust(day=DayRef(focus="руки"), weight_factor=0.8)]).adjusts
+    assert arms.day == TODAY  # Friday is an arms day, today included
+
+
+def test_compile_adjust_unknown_focus_is_a_note(snap):
+    plan = ce.compile_ops(snap, [adjust(day=DayRef(focus="кардио"), weight_factor=0.8)])
+    assert plan.adjusts == [] and not plan.ready() and plan.notes == ["Не нашёл на ближайшей неделе день «кардио»."]
+
+
+def test_compile_adjust_tomorrow_rest_day_is_a_note(snap):
+    plan = ce.compile_ops(snap, [adjust(day=DayRef(when="tomorrow"), weight_factor=0.8)])  # Saturday
+    assert plan.adjusts == [] and not plan.ready() and plan.lines == []
+    assert plan.notes == ["Завтра (сб 10.10) по программе тренировки нет — облегчать нечего."]
+
+
+def test_compile_adjust_rest_weekday_is_a_note(snap):
+    plan = ce.compile_ops(snap, [adjust(day=DayRef(weekday=2), sets_delta=-1)])  # Tuesday
+    assert plan.adjusts == [] and "по программе тренировки нет" in plan.notes[0] and "вт 13.10" in plan.notes[0]
+
+
+def test_compile_adjust_empty_action_is_the_plans_light_day(snap):
+    plan = ce.compile_ops(snap, [adjust(day=DayRef(when="today"))])
+    (change,) = plan.adjusts
+    assert change.adj == DayAdjust(plan_light_factor(), -1)
+    assert "(по умолчанию" in change.line and "веса −10 %" in change.line and "на подход меньше" in change.line
+
+
+def plan_light_factor() -> float:
+    from gymbot.services.plan import LIGHT_FACTOR
+
+    assert LIGHT_FACTOR == 0.9
+    return LIGHT_FACTOR
+
+
+def test_compile_adjust_with_explicit_values_has_no_default_mark(snap):
+    (change,) = ce.compile_ops(snap, [adjust(weight_factor=0.8)]).adjusts
+    assert "(по умолчанию" not in change.line
+
+
+def test_compile_adjust_keeps_the_note(snap):
+    (change,) = ce.compile_ops(snap, [adjust(weight_factor=0.8, note="спина")]).adjusts
+    assert change.adj.note == "спина"
+
+
+def test_compile_adjust_skip_by_exercise_name(snap):
+    plan = ce.compile_ops(snap, [adjust(day=day(), skip=["французский жим"])])
+    (change,) = plan.adjusts
+    assert change.adj == DayAdjust(skip_exercises=[FRENCH]) and "пропуск: " + FRENCH in change.line
+    assert "(по умолчанию" not in change.line and plan.notes == []
+
+
+def test_compile_adjust_skip_by_muscle_group(snap):
+    plan = ce.compile_ops(snap, [adjust(day=DayRef(weekday=WED), skip=["ноги"])])
+    (change,) = plan.adjusts
+    assert change.day == WED_DATE and change.adj == DayAdjust(skip_groups=["legs"])
+    assert change.line == "В среду (ср 14.10): без ног"
+
+
+def test_compile_adjust_skip_group_and_exercise_together(snap):
+    (change,) = ce.compile_ops(snap, [adjust(day=day(), skip=["бицепс", "французский жим"], weight_factor=0.9)]).adjusts
+    assert change.adj == DayAdjust(0.9, None, [FRENCH], ["biceps"])
+    assert change.line.endswith("веса −10 %, без бицепса, пропуск: " + FRENCH)
+
+
+def test_compile_adjust_skip_group_the_day_does_not_have_is_a_note(snap):
+    plan = ce.compile_ops(snap, [adjust(day=DayRef(weekday=MON), skip=["ноги"])])
+    assert plan.adjusts == [] and not plan.ready()
+    assert plan.notes == ["В понедельник нет упражнений на ноги."]
+
+
+def test_compile_adjust_skip_unknown_exercise_is_a_note_with_the_days_list(snap):
+    plan = ce.compile_ops(snap, [adjust(day=day(), skip=["становая тяга"])])
+    assert plan.adjusts == [] and len(plan.notes) == 1
+    assert "нет «становая тяга»" in plan.notes[0] and FRENCH in plan.notes[0]
+
+
+def test_compile_adjust_one_unknown_skip_keeps_the_rest(snap):
+    plan = ce.compile_ops(snap, [adjust(day=day(), weight_factor=0.8, skip=["становая тяга"])])
+    assert plan.adjusts[0].adj == DayAdjust(0.8) and len(plan.notes) == 1
+
+
+def test_compile_adjust_skipping_everything_warns(snap):
+    names = [i.name for i in snap.day(1, 5).items]
+    plan = ce.compile_ops(snap, [adjust(day=day(), skip=names)])
+    assert plan.adjusts and any("не останется ни одного упражнения" in n for n in plan.notes)
+
+
+def test_compile_adjust_merges_with_the_stored_one(snap):
+    stored = DayAdjust(0.9, -1, ["сгибания на бицепс с ez грифом хватом снизу"], [], "старая")
+    s = with_adjustments(snap, {TODAY: stored})
+    plan = ce.compile_ops(s, [adjust(weight_factor=0.8, skip=["французский жим"])])
+    (change,) = plan.adjusts
+    assert change.before == stored
+    assert change.adj == DayAdjust(0.8, -1, sorted([FRENCH, "сгибания на бицепс с ez грифом хватом снизу"]), [], "старая")
+    assert "(было: веса −10 %, на подход меньше, пропуск: сгибания на бицепс с ez грифом хватом снизу)" in change.line
+    assert change.line.startswith("Сегодня (пт 09.10): веса −20 %, на подход меньше, пропуск: ")
+
+
+def test_compile_adjust_same_as_stored_is_a_note(snap):
+    s = with_adjustments(snap, {TODAY: DayAdjust(0.8)})
+    plan = ce.compile_ops(s, [adjust(weight_factor=0.8)])
+    assert plan.adjusts == [] and not plan.ready() and plan.notes == ["На пт 09.10 уже: веса −20 %."]
+
+
+def test_compile_adjust_empty_action_over_a_stored_one_is_a_note(snap):
+    s = with_adjustments(snap, {TODAY: DayAdjust(0.7, -2)})
+    plan = ce.compile_ops(s, [adjust()])
+    assert plan.adjusts == [] and plan.notes == ["На пт 09.10 уже: веса −30 %, на 2 подхода меньше."]
+
+
+def test_compile_adjust_empty_action_over_a_skip_only_row_sets_the_default(snap):
+    s = with_adjustments(snap, {TODAY: DayAdjust(skip_groups=["biceps"])})
+    (change,) = ce.compile_ops(s, [adjust()]).adjusts
+    assert change.adj == DayAdjust(0.9, -1, [], ["biceps"]) and "(по умолчанию" in change.line
+
+
+def test_compile_adjust_other_days_row_is_not_merged(snap):
+    s = with_adjustments(snap, {MON_DATE: DayAdjust(0.5)})
+    (change,) = ce.compile_ops(s, [adjust(weight_factor=0.8)]).adjusts
+    assert change.before is None and change.adj == DayAdjust(0.8) and "было" not in change.line
+
+
+def test_compile_adjust_twice_for_one_day_in_one_command_is_one_change(snap):
+    plan = ce.compile_ops(snap, [adjust(weight_factor=0.8), adjust(sets_delta=-1, skip=["французский жим"])])
+    (change,) = plan.adjusts
+    assert change.adj == DayAdjust(0.8, -1, [FRENCH]) and plan.lines == [change.line] and change.before is None
+
+
+def test_compile_adjust_two_days_in_one_command(snap):
+    plan = ce.compile_ops(snap, [adjust(weight_factor=0.8), adjust(day=DayRef(weekday=MON), sets_delta=-1)])
+    assert [c.day for c in plan.adjusts] == [TODAY, MON_DATE] and len(plan.lines) == 2 and plan.live_topics() == ["plan"]
+
+
+def test_compile_clear_day_removes_the_stored_adjustment(snap):
+    stored = DayAdjust(0.8, -1)
+    plan = ce.compile_ops(with_adjustments(snap, {TODAY: stored}), [clear_day(day=DayRef(when="today"))])
+    (change,) = plan.adjusts
+    assert (change.day, change.adj, change.before) == (TODAY, None, stored)
+    assert plan.lines == ["Сегодня (пт 09.10): убрать поправку (веса −20 %, на подход меньше), план как по программе"]
+    assert plan.ready() and plan.live_topics() == ["plan"]
+
+
+def test_compile_clear_day_by_weekday(snap):
+    s = with_adjustments(snap, {MON_DATE: DayAdjust(0.8)})
+    (change,) = ce.compile_ops(s, [clear_day(day=DayRef(weekday=MON))]).adjusts
+    assert change.day == MON_DATE and change.adj is None
+
+
+def test_compile_clear_day_without_a_row_is_a_note(snap):
+    plan = ce.compile_ops(snap, [clear_day()])
+    assert plan.adjusts == [] and not plan.ready() and plan.notes == ["На сегодня (пт 09.10) поправок нет, план и так по программе."]
+
+
+def test_compile_clear_after_adjust_in_one_command_cancels_it(snap):
+    plan = ce.compile_ops(snap, [adjust(weight_factor=0.8), clear_day()])
+    assert plan.adjusts == [] and plan.lines == [] and plan.notes == [] and not plan.ready()
+
+
+def test_compile_adjust_after_clear_in_one_command_replaces_the_row(snap):
+    s = with_adjustments(snap, {TODAY: DayAdjust(0.7)})
+    plan = ce.compile_ops(s, [clear_day(), adjust(sets_delta=-1)])
+    (change,) = plan.adjusts
+    assert change.before == DayAdjust(0.7) and change.adj is not None
+
+
+def test_adjust_next_to_program_ops_keeps_every_topic(snap):
+    plan = ce.compile_ops(snap, [RemoveA(type="remove", day=day(), exercise="французский жим"), adjust(weight_factor=0.8)])
+    assert plan.ops and plan.adjusts and plan.live_topics() == ["program", "plan", "state"]
+    assert len(plan.lines) == 2
+
+
+def test_adjust_next_to_a_weight_adds_plan_to_state(snap):
+    a = WeightA(type="weight", said="сгибания с гантелями на бицепс с супинацией", weight_kg=30)
+    plan = ce.compile_ops(snap, [a, adjust(weight_factor=0.8)])
+    assert plan.live_topics() == ["state", "plan"]
+
+
+def test_drop_ops_keeps_the_adjust_lines(snap):
+    plan = ce.compile_ops(snap, [swap(DayRef(weekday=FRI), DayRef(weekday=WED)), adjust(weight_factor=0.8)])
+    assert len(plan.lines) == 3
+    plan.drop_ops("Не получилось")
+    assert plan.ops == [] and plan.notes[0] == "Не получилось"
+    assert plan.lines == [plan.adjusts[0].line] and plan.ready()
+
+
+def test_prompt_context_lists_the_adjustments(snap):
+    s = with_adjustments(snap, {TODAY: DayAdjust(0.8, -1), WED_DATE: DayAdjust(skip_groups=["legs"])})
+    lines = ce.prompt_context(s).split("\n")
+    (line,) = [ln for ln in lines if ln.startswith("Поправки дня: ")]
+    assert line == "Поправки дня: сегодня (пт 09.10): веса −20 %, на подход меньше; в среду (ср 14.10): без ног."
+    assert lines.index(line) < len(lines) - 1 and lines[-1].startswith("Каталог упражнений")
+
+
+def test_prompt_context_without_adjustments_has_no_such_line(snap):
+    assert "Поправки дня" not in ce.prompt_context(snap)
+
+
+async def test_snapshot_loads_the_adjustments_of_the_coming_days(db):
+    from gymbot.services.advice import NEXT_DAY_SEARCH
+
+    async with db() as s:
+        user = await get_or_create_user(s, 42)
+        for d in (TODAY - timedelta(days=1), TODAY, TODAY + timedelta(days=NEXT_DAY_SEARCH),
+                  TODAY + timedelta(days=NEXT_DAY_SEARCH + 1)):
+            await dayadj.upsert(s, user.id, d, DayAdjust(0.8), "x", now=AT)
+        await s.commit()
+        snapshot = await ce.load_snapshot(s, user, TODAY)
+    assert set(snapshot.adjustments) == {TODAY, TODAY + timedelta(days=NEXT_DAY_SEARCH)}
+    assert snapshot.adjustments[TODAY] == DayAdjust(0.8)
+
+
+async def test_a_stored_adjustment_is_merged_by_the_next_command(db):
+    async with db() as s:
+        user = await get_or_create_user(s, 42)
+        await dayadj.upsert(s, user.id, TODAY, DayAdjust(0.9, -1), "x", now=AT)
+        await s.commit()
+    s, _session, _user, _up, plan = await staged(db, [adjust(weight_factor=0.8)])
+    await s.__aexit__(None, None, None)
+    assert plan.adjusts[0].before == DayAdjust(0.9, -1) and plan.adjusts[0].adj == DayAdjust(0.8, -1)
+    assert "(было: веса −10 %, на подход меньше)" in plan.lines[0]
+
+
+async def _adjustment_rows(db) -> list:
+    from gymbot.db.models import DayAdjustment
+
+    async with db() as session:
+        return list((await session.scalars(select(DayAdjustment).order_by(DayAdjustment.day))).all())
+
+
+async def test_apply_stores_the_adjustment(db):
+    s, session, user, up, plan = await staged(db, [adjust(weight_factor=0.8, sets_delta=-1, skip=["французский жим"])])
+    try:
+        assert await ce.apply(session, user, up, plan, TODAY, "сегодня облегчённо, −20 %", AT) == []
+        await session.commit()
+    finally:
+        await s.__aexit__(None, None, None)
+    (row,) = await _adjustment_rows(db)
+    assert (row.day, float(row.weight_factor), row.sets_delta) == (TODAY, 0.8, -1)
+    assert row.skip_json == {"exercises": [FRENCH], "groups": []}
+    assert (row.raw_text, row.source, row.created_at.replace(tzinfo=UTC)) == ("сегодня облегчённо, −20 %", "chat", AT)
+    assert (await count_programs(db))[0] == 0  # an adjustment alone never forks the program
+    assert plan.lines and plan.adjusts
+
+
+async def test_apply_replaces_the_stored_row_with_the_merge(db):
+    async with db() as s:
+        user = await get_or_create_user(s, 42)
+        await dayadj.upsert(s, user.id, TODAY, DayAdjust(0.9, -1, [FRENCH]), "старое", now=AT)
+        await s.commit()
+    s, session, user, up, plan = await staged(db, [adjust(weight_factor=0.8)])
+    try:
+        assert await ce.apply(session, user, up, plan, TODAY, "ещё легче", AT) == []
+        await session.commit()
+    finally:
+        await s.__aexit__(None, None, None)
+    (row,) = await _adjustment_rows(db)
+    assert (float(row.weight_factor), row.sets_delta, row.raw_text) == (0.8, -1, "ещё легче")
+    assert row.skip_json["exercises"] == [FRENCH]
+
+
+async def test_apply_clears_the_adjustment(db):
+    async with db() as s:
+        user = await get_or_create_user(s, 42)
+        await dayadj.upsert(s, user.id, TODAY, DayAdjust(0.8), "x", now=AT)
+        await dayadj.upsert(s, user.id, MON_DATE, DayAdjust(0.8), "x", now=AT)
+        await s.commit()
+    s, session, user, up, plan = await staged(db, [clear_day(day=DayRef(when="today"))])
+    try:
+        assert await ce.apply(session, user, up, plan, TODAY, "верни как было сегодня", AT) == []
+        await session.commit()
+    finally:
+        await s.__aexit__(None, None, None)
+    assert [r.day for r in await _adjustment_rows(db)] == [MON_DATE]
+
+
+async def test_apply_adjustment_changed_after_the_preview_is_not_overwritten(db):
+    s, _session, _user, _up, plan = await staged(db, [adjust(weight_factor=0.8)])
+    await s.__aexit__(None, None, None)
+    async with db() as other:  # another command set one in between
+        user = await get_or_create_user(other, 42)
+        await dayadj.upsert(other, user.id, TODAY, DayAdjust(0.6), "другое", now=AT)
+        await other.commit()
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        up = await active_program(session, user, TODAY)
+        notes = await ce.apply(session, user, up, plan, TODAY, "x", AT)
+        await session.commit()
+    assert len(notes) == 1 and "изменилась после предпросмотра" in notes[0] and "пт 09.10" in notes[0]
+    assert plan.adjusts == [] and plan.lines == []
+    (row,) = await _adjustment_rows(db)
+    assert float(row.weight_factor) == 0.6 and row.raw_text == "другое"
+
+
+async def test_apply_clear_of_a_row_that_changed_is_skipped(db):
+    async with db() as s:
+        user = await get_or_create_user(s, 42)
+        await dayadj.upsert(s, user.id, TODAY, DayAdjust(0.8), "x", now=AT)
+        await s.commit()
+    s, _session, _user, _up, plan = await staged(db, [clear_day()])
+    await s.__aexit__(None, None, None)
+    async with db() as other:
+        user = await get_or_create_user(other, 42)
+        await dayadj.upsert(other, user.id, TODAY, DayAdjust(0.7), "x", now=AT)
+        await other.commit()
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        up = await active_program(session, user, TODAY)
+        notes = await ce.apply(session, user, up, plan, TODAY, "x", AT)
+        await session.commit()
+    assert len(notes) == 1 and "изменилась" in notes[0]
+    assert float((await _adjustment_rows(db))[0].weight_factor) == 0.7
+
+
+async def test_apply_after_the_day_has_passed_skips_with_a_note(db):
+    s, session, user, up, plan = await staged(db, [adjust(weight_factor=0.8)])
+    try:
+        notes = await ce.apply(session, user, up, plan, date(2026, 10, 10), "x", AT)
+        await session.commit()
+    finally:
+        await s.__aexit__(None, None, None)
+    assert len(notes) == 1 and "тот день уже прошёл" in notes[0] and "пт 09.10" in notes[0]
+    assert plan.adjusts == [] and plan.lines == []
+    assert await _adjustment_rows(db) == []
+
+
+async def test_apply_keeps_a_future_day_when_today_moved_on(db):
+    s, session, user, up, plan = await staged(db, [adjust(day=DayRef(weekday=MON), weight_factor=0.8)])
+    try:
+        assert await ce.apply(session, user, up, plan, date(2026, 10, 10), "x", AT) == []
+        await session.commit()
+    finally:
+        await s.__aexit__(None, None, None)
+    assert [r.day for r in await _adjustment_rows(db)] == [MON_DATE]
+
+
+async def test_apply_adjustment_with_a_swap_in_one_plan(db):
+    s, session, user, up, plan = await staged(db, [
+        swap(DayRef(weekday=FRI), DayRef(weekday=WED)), adjust(day=DayRef(weekday=MON), weight_factor=0.8),
+    ])
+    assert plan.ops and plan.adjusts and plan.live_topics() == ["program", "plan", "state"]
+    try:
+        await ce.apply(session, user, up, plan, TODAY, "x", AT)
+        await session.commit()
+    finally:
+        await s.__aexit__(None, None, None)
+    assert (await count_programs(db))[0] == 1
+    assert [r.day for r in await _adjustment_rows(db)] == [MON_DATE]

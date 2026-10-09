@@ -308,6 +308,28 @@ class DayPlan(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class DayAdjustment(Base):
+    """A one-day manual change of the plan said in the chat ("сегодня облегчённо, −20 %", "в пятницу без
+    ног"): an input of the adaptive day plan (gymbot.services.plan, gymbot.services.day_adjustments), never
+    overwritten by its rebuild. One row per user and local day; a new command for the day merges into it.
+
+    `weight_factor` < 1 scales the day's weights, `sets_delta` <= -1 takes sets off (never below 1),
+    `skip_json` is {"exercises": [program names], "groups": [plan.muscle_group keys]}."""
+
+    __tablename__ = "day_adjustments"
+    __table_args__ = (UniqueConstraint("user_id", "day"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    day: Mapped[date] = mapped_column(Date)  # local date in TIMEZONE
+    weight_factor: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))
+    sets_delta: Mapped[int | None] = mapped_column(Integer)
+    skip_json: Mapped[dict | None] = mapped_column(JSON)
+    note: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(16), default="chat")  # chat | miniapp
+    raw_text: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 # --- Auto deload (gymbot.services.deload): the deload week and when to offer one again ---
 
 class DeloadState(Base):

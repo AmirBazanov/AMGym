@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gymbot.config import Settings
 from gymbot.db.models import DayPlan, Exercise, Program, User, UserProgram, Workout, WorkoutSet
 from gymbot.services import baselines, deload, overrides, plan
+from gymbot.services import day_adjustments as dayadj
 from gymbot.services.advice import NEXT_DAY_SEARCH
 from gymbot.services.nutrition import _aware
 from gymbot.services.programs import find_day, load_program, normalize, program_position
@@ -795,7 +796,8 @@ async def day_weights(
 
     Today: the day plan's corrections (sets, reps, weightFactor, skip, replacement) as the Mini App applies
     them; a plan that skips everything (rest) leaves the program as written with `rest` set. Another day:
-    only a deload week running on that day (weights × deload.WEIGHT_FACTOR, a third fewer sets)."""
+    a deload week running on that day (weights × deload.WEIGHT_FACTOR, a third fewer sets) and the manual
+    adjustment of that day (gymbot.services.day_adjustments), the lighter of both, as the plan will do."""
     ref = ref or await program_ref(session, user, settings)
     if ref is None:
         return None
@@ -813,6 +815,7 @@ async def day_weights(
     summary: str | None = None
     rest = False
     deload_factor = 1.0
+    adj: dayadj.DayAdjust | None = None
     if day == today:
         got = await _today_plan(session, user, settings, tz, now_utc)
         if got is not None:
@@ -821,8 +824,13 @@ async def day_weights(
                 rest = True
             else:
                 adjust = {normalize(e.name): e for e in exercises}
-    elif (until := await deload.active_until(session, user.id, day)) is not None:
-        deload_factor, summary = deload.WEIGHT_FACTOR, deload.summary(until)
+    else:
+        if (until := await deload.active_until(session, user.id, day)) is not None:
+            deload_factor, summary = deload.WEIGHT_FACTOR, deload.summary(until)
+        if (adj := await dayadj.get(session, user.id, day)) is not None and not adj.empty():
+            summary = " ".join(x for x in (summary, dayadj.summary(adj)) if x)
+        else:
+            adj = None
     rows: list[DayRow] = []
     for it in items:
         a = adjust.get(normalize(it.name))
@@ -841,8 +849,15 @@ async def day_weights(
                 if reps_min is not None and reps_max is not None and reps_max < reps_min:
                     reps_max = reps_min
             factor = a.weightFactor
-        elif deload_factor != 1:
-            sets = deload.deload_sets(it.sets)
+        else:
+            if deload_factor != 1:
+                sets = deload.deload_sets(it.sets)
+            if adj is not None:
+                sets, factor, skipped = plan.adjust_item(adj, it.name, it.sets, sets, factor)
+                if skipped:
+                    rows.append(DayRow(it.name, it.name, it.sets, reps_min, reps_max, it.drop_reps, None,
+                                       dayadj.SKIP_REASON))
+                    continue
         exercise = ProgramExercise(name, it.intensity, Prescription(sets, reps_min, reps_max, it.drop_reps))
         s = suggest(hist, exercise, base, over, iso, factor, today=day == today)
         rows.append(DayRow(name, it.name, sets, reps_min, reps_max, it.drop_reps, s, a.reason if a else None))
