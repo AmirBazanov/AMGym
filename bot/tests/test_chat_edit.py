@@ -61,6 +61,13 @@ EDIT_YES = [
     "верни как было сегодня",
     "отмени поправку на пятницу",
     "сегодня на 2 подхода меньше",
+    # the day replaced wholesale, "тренировку" as the structure word, the "давай …им" forms
+    "замени сегодняшнюю тренировку на присед 3×8, жим лёжа 3×8 на 65 кг, тягу блока 3×10 на 60 кг, румынскую тягу 2×10 на 75 кг",
+    "замени тренировку на сегодня на присед 3×8, жим лёжа 3×8 на 65 кг",
+    "поменяй сегодняшнюю тренировку на базу",
+    "давай добавим ноги в тренировку",
+    "добавь присед 3×8 в тренировку",
+    "давай заменим французский жим на разгибания в день рук",
 ]
 
 EDIT_NO = [
@@ -78,7 +85,16 @@ EDIT_NO = [
     "подтягивания 3×8",
     "жим лёжа 4х8 по 80",
     "удали вчерашнюю тренировку",
+    "удали сегодняшнюю тренировку",  # a saved record: a delete verb
+    "убери сегодняшнюю запись",
+    "запиши сегодняшнюю тренировку",
+    "сделал сегодняшнюю тренировку",
     "удали запись за понедельник",
+    # a request to the bot, not a command
+    "а ты мне зачем сам продумай и запиши",
+    "так сам запиши",
+    "кнопки нет, сам подтверди",
+    "сейчас первая неделя среда",
     "поставь сегодня жим 85",  # stays with settings
     "добавь напоминание на каждый день",
     "перенеси старт программы на понедельник",
@@ -1562,3 +1578,107 @@ async def test_apply_adjustment_with_a_swap_in_one_plan(db):
         await s.__aexit__(None, None, None)
     assert (await count_programs(db))[0] == 1
     assert [r.day for r in await _adjustment_rows(db)] == [MON_DATE]
+
+
+# ---- replace_day: the day's exercises become the list ----
+
+REPLACE_DAY_JSON = {
+    "type": "replace_day",
+    "day": {"weekday": None, "focus": None, "when": "today"},
+    "items": [
+        {"name": "присед со штангой", "sets": 3, "repsMin": 8, "repsMax": None, "dropReps": None, "weight_kg": None},
+        {"name": "жим лёжа", "sets": 3, "repsMin": 8, "repsMax": None, "dropReps": None, "weight_kg": 65},
+        {"name": "тяга вертикального блока", "sets": 3, "repsMin": 10, "repsMax": None, "dropReps": None, "weight_kg": 60},
+    ],
+    "scope": None,
+}
+
+
+def test_parse_actions_replace_day():
+    actions, notes = ce.parse_actions({"actions": [REPLACE_DAY_JSON]})
+    assert notes == [] and len(actions) == 1 and isinstance(actions[0], ce.ReplaceDayA)
+    assert [i.name for i in actions[0].items][1] == "жим лёжа" and actions[0].items[1].weight_kg == 65
+    bad = {**REPLACE_DAY_JSON, "items": [{**REPLACE_DAY_JSON["items"][0], "sets": 0}]}
+    actions, notes = ce.parse_actions({"actions": [bad]})
+    assert actions == [] and notes and notes[0].startswith("Не применю — замена дня")
+
+
+def test_replace_day_adds_first_then_removes_and_sets_the_weights(snap):
+    (a,), _ = ce.parse_actions({"actions": [REPLACE_DAY_JSON]})
+    old = [i.name for i in snap.day(1, 5).items]
+    plan = ce.compile_ops(snap, [a])
+    assert plan.ready() and plan.clarify is None and plan.notes == []
+    kinds = [op["op"] for op in plan.ops]
+    assert kinds == ["add"] * 3 + ["remove"] * len(old)  # the day is never empty while the ops run
+    adds = [op for op in plan.ops if op["op"] == "add"]
+    assert [op["name"] for op in adds] == ["присед со штангой", "жим лёжа", "тяга вертикального блока"]
+    assert [op["position"] for op in adds] == [len(old) + 1, len(old) + 2, len(old) + 3]
+    assert adds[0]["sets"] == 3 and adds[0]["repsMin"] == 8 and adds[0]["repsMax"] == 8
+    assert all(op["week"] == 1 and op["weekday"] == 5 and op["weeks"] == [1] for op in plan.ops)
+    removed = {op["itemId"] for op in plan.ops if op["op"] == "remove"}
+    assert removed == {i.id for i in snap.day(1, 5).items}
+    # the weights: a known exercise by id, today's date; the new one is looked up by name when applied
+    assert [(w.name, w.day, w.kg) for w in plan.weights] == [("жим лёжа", TODAY, 65.0), ("тяга вертикального блока", TODAY, 60.0)]
+    assert all(w.exercise_id is not None for w in plan.weights)
+    assert any(ln.startswith("пт «Руки и плечи»: добавить присед со штангой 3×8 в конец") for ln in plan.lines)
+    assert any(ln.startswith("пт «Руки и плечи»: убрать французский жим лёжа") for ln in plan.lines)
+    assert "Вес на пт 09.10: жим лёжа 65 кг" in plan.lines
+
+
+def test_replace_day_keeps_an_exercise_already_there_and_a_new_one_gets_its_weight(snap):
+    a = ce.ReplaceDayA(type="replace_day", day=DayRef(when="today"), items=[
+        ce.DayItemA(name="французский жим лёжа", sets=4, repsMin=10, repsMax=12),  # stays, re-prescribed
+        ce.DayItemA(name="жим сидя в смите"),  # stays as is
+        ce.DayItemA(name="прыжки на тумбу", sets=3, repsMin=8, weight_kg=60),  # new, with a weight
+    ])
+    assert "прыжки на тумбу" not in snap.known
+    plan = ce.compile_ops(snap, [a])
+    kinds = [op["op"] for op in plan.ops]
+    assert kinds.count("add") == 1 and kinds.count("prescribe") == 1
+    assert kinds.index("add") < kinds.index("remove")
+    kept = {"французский жим лёжа", "жим сидя в смите"}
+    removed = {op["itemId"] for op in plan.ops if op["op"] == "remove"}
+    assert removed == {i.id for i in snap.day(1, 5).items if i.name not in kept}
+    assert [(w.name, w.exercise_id) for w in plan.weights] == [("прыжки на тумбу", None)]  # by name when applied
+
+
+def test_replace_day_same_list_changes_nothing(snap):
+    items = [ce.DayItemA(name=i.name) for i in snap.day(1, 5).items]
+    plan = ce.compile_ops(snap, [ce.ReplaceDayA(type="replace_day", day=DayRef(when="today"), items=items)])
+    assert not plan.ready() and plan.notes == ["В дне пт «Руки и плечи» уже так."]
+
+
+def test_replace_day_no_workout_today(snap):
+    a = ce.ReplaceDayA(type="replace_day", day=DayRef(when="tomorrow"), items=[ce.DayItemA(name="присед")])
+    plan = ce.compile_ops(snap, [a])
+    assert not plan.ready() and plan.notes == ["Завтра по программе тренировки нет."]
+
+
+async def test_replace_day_applies_and_sets_the_new_exercise_weight(db):
+    from gymbot.services import overrides
+
+    (a,), _ = ce.parse_actions({"actions": [{**REPLACE_DAY_JSON, "items": [
+        {**REPLACE_DAY_JSON["items"][0], "name": "прыжки на тумбу", "weight_kg": 60},  # a new exercise
+        REPLACE_DAY_JSON["items"][1],
+    ]}]})
+    s, session, user, up, plan = await staged(db, [a])
+    assert [w.exercise_id for w in plan.weights] == [None, plan.weights[1].exercise_id]
+    try:
+        await ce.preview(session, user, up, plan)  # the dry run: adds before removes, the day is never empty
+        assert plan.ready()
+    finally:
+        await s.__aexit__(None, None, None)
+    async with db() as session:  # "✅ Применить": a fresh session, as in the handler
+        user = await get_or_create_user(session, 42)
+        up = await active_program(session, user, TODAY)
+        notes = await ce.apply(session, user, up, plan, TODAY, "замени сегодняшнюю тренировку на прыжки и жим")
+        await session.commit()
+    assert notes == []
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        copy = await ce.load_snapshot(session, user, TODAY)
+        assert not copy.template
+        assert [i.name for i in copy.day(1, 5).items] == ["прыжки на тумбу", "жим лёжа"]
+        assert FRENCH in [i.name for i in copy.day(2, 5).items]  # this week only
+        today = {w.exercise: w.weightKg for w in await overrides.for_day(session, user.id, TODAY)}
+        assert today == {"прыжки на тумбу": 60.0, "жим лёжа": 65.0}

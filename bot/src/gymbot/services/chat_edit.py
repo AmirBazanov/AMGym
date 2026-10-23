@@ -1,4 +1,5 @@
-"""Program edits from the chat: "убери французский жим из дня рук", "поставь на сгибания 30 кг", "поменяй
+"""Program edits from the chat: "убери французский жим из дня рук", "замени сегодняшнюю тренировку на присед 3×8,
+жим лёжа 3×8 на 65 кг", "поставь на сгибания 30 кг", "поменяй
 местами руки и спину", "перенеси тренировку на завтра", "следующая неделя — делоад", "сегодня облегчённо, −20 %", "в пятницу без ног".
 
 Plan: docs/plans/2026-10-09-chat-program-control.md (stages 1–3). Flow (handlers/chat_edit.py):
@@ -50,18 +51,33 @@ from gymbot.services import day_adjustments as dayadj
 from gymbot.services import program_editor as pe
 from gymbot.services.advice import NEXT_DAY_SEARCH
 from gymbot.services.plan import LIGHT_FACTOR, adjust_item, muscle_group
-from gymbot.services.programs import Position, exercise_catalog, load_program, normalize, program_position
+from gymbot.services.programs import (
+    Position,
+    exercise_catalog,
+    get_or_create_exercise,
+    load_program,
+    normalize,
+    program_position,
+)
 from gymbot.services.users import active_program
 
 log = logging.getLogger(__name__)
 
 # ---- routing ----
 
+# Imperatives and the "давай …им" forms ("давай добавим ноги в тренировку").
 _EDIT_VERB = re.compile(
-    r"(?<!\w)(?:убер(?:и|ите)|удали(?:те)?|добав(?:ь|ьте)|замени(?:те)?|поменяй(?:те)?|постав(?:ь|ьте)|"
-    r"перенес(?:и|ите)|сделай(?:те)?|верни(?:те)?)(?!\w)"
+    r"(?<!\w)(?:убер(?:и|ите|ем)|удали(?:те|м)?|добав(?:ь|ьте|им)|замени(?:те|м)?|поменя(?:й|йте|ем)|"
+    r"постав(?:ь|ьте|им)|перенес(?:и|ите|ем)|сдела(?:й|йте|ем)|верни(?:те|м)?)(?!\w)"
 )
-_MOVE_VERB = re.compile(r"(?<!\w)(?:перенес(?:и|ите)|поменяй(?:те)?|сделай(?:те)?)(?!\w)")
+_MOVE_VERB = re.compile(r"(?<!\w)(?:перенес(?:и|ите|ем)|поменя(?:й|йте|ем)|сдела(?:й|йте|ем))(?!\w)")
+# "замени сегодняшнюю тренировку на …", "поменяй сегодняшнюю тренировку": the program's day, not a saved
+# record ("удали сегодняшнюю тренировку" is one: a delete verb).
+_REWRITE_VERB = re.compile(
+    r"(?<!\w)(?:добав(?:ь|ьте|им)|замени(?:те|м)?|поменя(?:й|йте|ем)|постав(?:ь|ьте|им)|перенес(?:и|ите|ем)|"
+    r"сдела(?:й|йте|ем))(?!\w)"
+)
+_TODAY_ADJ = re.compile(r"(?<!\w)сегодняшн\w*(?!\w)")
 _INSTEAD = re.compile(r"(?<!\w)вместо(?!\w)")
 _WEEKDAY = r"понедельник\w*|вторник\w*|сред[уаеы]|четверг\w*|пятниц\w*|суббот\w*|воскресень\w*"
 _WEEKDAY_ADJ = r"понедельничн\w*|вторничн\w*|средов\w*|четвергов\w*|пятничн\w*|субботн\w*|воскресн\w*"
@@ -95,7 +111,7 @@ _FOOD = re.compile(
     r"мяс\w*|рыб\w*|кефир\w*|молок\w*|сыр|сыра|сыром|банан\w*|яблок\w*)(?!\w)|\d\s*(?:г|гр|грамм\w*)(?!\w)"
 )
 _RECORDS = re.compile(
-    r"(?<!\w)(?:запис\w*|вчера\w*|позавчера\w*|сегодняшн\w*|за\s+(?:понедельник|вторник|среду|четверг|пятницу|"
+    r"(?<!\w)(?:запис\w*|вчера\w*|позавчера\w*|за\s+(?:понедельник|вторник|среду|четверг|пятницу|"
     r"субботу|воскресенье))(?!\w)"
 )
 # A deload week: "следующая неделя — делоад", "давай на этой неделе разгрузку". Not "облегчённо" (stage 3).
@@ -212,6 +228,8 @@ def is_edit_command(text: str) -> bool:
         return True
     if _PAST.search(norm) or _RECORDS.search(norm) or _FOOD.search(norm):
         return False
+    if _TODAY_ADJ.search(norm) and not (_REWRITE_VERB.search(norm) and _WORKOUT.search(norm)):
+        return False  # "удали сегодняшнюю тренировку" is a saved record; "замени сегодняшнюю тренировку на …" the plan
     structure = _STRUCTURE.search(_PER_DAY.sub(" ", norm)) or _DAY_NAME.search(norm)
     if cs.REMINDER.search(norm) or cs.REST.search(norm) or cs.PROGRAM.search(norm) and _PROGRAM_START.search(norm):
         return False
@@ -224,8 +242,9 @@ def is_edit_command(text: str) -> bool:
         return False
     verb = _EDIT_VERB.search(norm)
     instead = _INSTEAD.search(norm)
-    # (a) an imperative and a word about the program's structure ("вместо" counts once: verb or structure)
-    if verb and (structure or instead or (_MOVE_VERB.search(norm) and _WORKOUT.search(norm))):
+    # (a) an imperative and a word about the program's structure or the workout itself ("замени тренировку
+    # на …", "добавь присед в тренировку"; "вместо" counts once: verb or structure)
+    if verb and (structure or instead or _WORKOUT.search(norm)):
         return True
     if instead and structure:
         return True
@@ -345,6 +364,23 @@ class PrescribeA(_Rx):
         return self
 
 
+class DayItemA(_Rx):
+    """One exercise of a day replaced wholesale: its name, prescription and the weight said for it."""
+
+    name: _NAME
+    weight_kg: float | None = Field(default=None, ge=overrides.WEIGHT_RANGE[0], le=overrides.WEIGHT_RANGE[1])
+
+
+class ReplaceDayA(_Action):
+    """«замени сегодняшнюю тренировку на присед 3×8, жим лёжа 3×8 на 65 кг»: the day's exercises become the
+    list; the ones missing from it go, the ones already there stay (re-prescribed when sets or reps are said)."""
+
+    type: Literal["replace_day"]
+    day: DayRef = Field(default_factory=DayRef)
+    items: list[DayItemA] = Field(min_length=1, max_length=pe.MAX_ITEMS)
+    scope: Scope | None = None
+
+
 class ReorderA(_Action):
     type: Literal["reorder"]
     day: DayRef = Field(default_factory=DayRef)
@@ -452,8 +488,8 @@ class ClarifyA(_Action):
 
 
 Action = Annotated[
-    ReplaceA | RemoveA | AddA | PrescribeA | ReorderA | WeightA | SwapDaysA | MoveDayA | DeloadA | AdjustDayA
-    | ClearDayA | ClarifyA,
+    ReplaceA | RemoveA | AddA | PrescribeA | ReplaceDayA | ReorderA | WeightA | SwapDaysA | MoveDayA | DeloadA
+    | AdjustDayA | ClearDayA | ClarifyA,
     Field(discriminator="type"),
 ]
 _ACTION: TypeAdapter[Any] = TypeAdapter(Action)
@@ -463,6 +499,8 @@ MAX_OPTIONS = 6  # clarify buttons, two per row
 INVALID = {
     "add": f"добавление: подходов от 1 до {pe.MAX_SETS}, повторов от 1 до {pe.MAX_REPS}",
     "prescribe": f"подходы и повторы: подходов от 1 до {pe.MAX_SETS}, повторов от 1 до {pe.MAX_REPS}",
+    "replace_day": f"замена дня: от 1 до {pe.MAX_ITEMS} упражнений, подходов от 1 до {pe.MAX_SETS}, "
+    f"повторов от 1 до {pe.MAX_REPS}, вес от 1 до 500 кг",
     "weight": "вес: от 1 до 500 кг",
     "adjust_day": "поправка дня: только легче — вес от −1 до −70 %, подходов меньше на 1–5",
 }
@@ -858,7 +896,7 @@ class Clarify:
 
 @dataclass
 class WeightChange:
-    exercise_id: int
+    exercise_id: int | None  # None: an exercise added by the same command, looked up by name when applied
     name: str
     day: date
     kg: float
@@ -1021,6 +1059,105 @@ def _pick_item(
 
 def _op(kind: str, day: DayView, weeks: list[int], **fields: Any) -> dict[str, Any]:
     return {"op": kind, "week": day.week, "weekday": day.weekday, "weeks": weeks, **fields}
+
+
+def _add_op(
+    plan: EditPlan, day: DayView, weeks: list[int], where: str, new: str, known: bool, rx: _Rx,
+    position: int, place: str, temp: int,
+) -> int:
+    """The add op for `new` with the prescription said in `rx` (defaults filled in); returns the temp counter."""
+    defaults = []
+    sets = rx.sets
+    if sets is None:
+        sets = DEFAULT_SETS
+        defaults.append("подходы")
+    drops = list(rx.dropReps) if rx.dropReps else None
+    reps_min, reps_max = rx.repsMin, rx.repsMax
+    if drops is None and reps_min is None:
+        reps_min, reps_max = DEFAULT_REPS
+        defaults.append("повторы")
+    text = rx_text(sets, reps_min, reps_max, drops)
+    if defaults:
+        text += " (по умолчанию)" if len(defaults) == 2 else f" ({defaults[0]} по умолчанию)"
+    temp += 1
+    fields: dict[str, Any] = {"tempId": f"c{temp}", "name": new, "position": position, "sets": sets}
+    if drops is not None:
+        fields["dropReps"] = drops
+    else:
+        fields |= {"repsMin": reps_min, "repsMax": reps_max if reps_max is not None else reps_min}
+    plan.ops.append(_op("add", day, weeks, **fields))
+    plan.op_labels.append(f"добавить {new}")
+    tail = "" if known else f"; {NEW_EXERCISE}"
+    plan.lines.append(f"{day.label}: добавить {new} {text} {place} ({where}{tail})")
+    return temp
+
+
+def _replace_day(snap: Snapshot, a: ReplaceDayA, day: DayView, plan: EditPlan, all_weeks: list[int], temp: int) -> int:
+    """The day's exercises become `a.items`: adds first (the day is never left empty), then the exercises not
+    in the list go; an exercise already there stays (re-prescribed when sets or reps are said). A weight said
+    for an exercise is the day's working weight (handlers apply it after the program, so a new exercise is
+    looked up by name then). Returns the temp counter."""
+    scope = a.scope or "this_week"
+    weeks = scope_weeks(scope, day.week, all_weeks)
+    where = scope_words(weeks, day.week, all_weeks)
+    wanted: list[tuple[str, bool, DayItemA]] = []
+    for it in a.items:
+        new, known = _canonical(snap, it.name)
+        if any(normalize(new) == normalize(w) for w, _, _ in wanted):
+            continue  # said twice
+        wanted.append((new, known, it))
+    keep = {normalize(w) for w, _, _ in wanted}
+    position = len(day.items) + 1
+    changed = False
+    for new, known, it in wanted:
+        existing = next((i for i in day.items if normalize(i.name) == normalize(new)), None)
+        if existing is None:
+            temp = _add_op(plan, day, weeks, where, new, known, it, position, "в конец", temp)
+            position += 1
+            changed = True
+        elif it.sets is not None or it.repsMin is not None or it.dropReps:
+            sets = it.sets or existing.sets
+            fields: dict[str, Any] = {"itemId": existing.id, "sets": sets}
+            if it.dropReps:
+                fields["dropReps"] = list(it.dropReps)
+                new_rx = rx_text(sets, None, None, it.dropReps)
+            elif it.repsMin is not None:
+                reps_max = it.repsMax if it.repsMax is not None else it.repsMin
+                fields |= {"repsMin": it.repsMin, "repsMax": reps_max}
+                new_rx = rx_text(sets, it.repsMin, reps_max, None)
+            elif existing.drop_reps:
+                fields["dropReps"] = list(existing.drop_reps)
+                new_rx = rx_text(sets, None, None, existing.drop_reps)
+            else:
+                fields |= {"repsMin": existing.reps_min, "repsMax": existing.reps_max}
+                new_rx = rx_text(sets, existing.reps_min, existing.reps_max, None)
+            if new_rx != _item_rx(existing):
+                plan.ops.append(_op("prescribe", day, weeks, **fields))
+                plan.op_labels.append(existing.name)
+                plan.lines.append(f"{day.label}: {existing.name} {_item_rx(existing)} → {new_rx} ({where})")
+                changed = True
+    for i in day.items:
+        if normalize(i.name) not in keep:
+            plan.ops.append(_op("remove", day, weeks, itemId=i.id))
+            plan.op_labels.append(f"убрать {i.name}")
+            plan.lines.append(f"{day.label}: убрать {i.name} ({where})")
+            changed = True
+    if not changed:
+        plan.notes.append(f"В дне {day.label} уже так.")
+    when = date_of(snap.started_on, day.week, day.weekday)
+    for new, _, it in wanted:
+        if it.weight_kg is None:
+            continue
+        if when is None or not snap.today <= when <= snap.today + timedelta(days=NEXT_DAY_SEARCH):
+            plan.notes.append(f"Вес для «{new}» не ставлю: день {day.label} уже прошёл или слишком далеко.")
+            continue
+        kg = round(it.weight_kg, 2)
+        if snap.weights.get((when, new)) == kg:
+            plan.notes.append(f"{new}: на {_date(when)} уже {overrides.kg(kg)} кг.")
+            continue
+        plan.weights.append(WeightChange(snap.exercise_ids.get(new), new, when, kg))
+        plan.lines.append(f"Вес на {_date(when)}: {new} {overrides.kg(kg)} кг")
+    return temp
 
 
 def _weight(snap: Snapshot, a: WeightA, plan: EditPlan) -> None:
@@ -1366,33 +1503,14 @@ def compile_ops(snap: Snapshot, actions: list[Any], picks: dict[tuple[int, str],
                 if any(normalize(i.name) == normalize(new) for i in day.items):
                     plan.notes.append(f"«{new}» уже есть в дне {day.label}.")
                     continue
-                defaults = []
-                sets = a.sets
-                if sets is None:
-                    sets = DEFAULT_SETS
-                    defaults.append("подходы")
-                drops = list(a.dropReps) if a.dropReps else None
-                reps_min, reps_max = a.repsMin, a.repsMax
-                if drops is None and reps_min is None:
-                    reps_min, reps_max = DEFAULT_REPS
-                    defaults.append("повторы")
-                rx = rx_text(sets, reps_min, reps_max, drops)
-                if defaults:
-                    rx += " (по умолчанию)" if len(defaults) == 2 else f" ({defaults[0]} по умолчанию)"
                 position, place = len(day.items) + 1, "в конец"
                 if a.after:
                     after = _pick_item(day, n, a.after, picks, "after")
                     position, place = after.order + 1, f"после «{after.name}»"
-                temp += 1
-                fields: dict[str, Any] = {"tempId": f"c{temp}", "name": new, "position": position, "sets": sets}
-                if drops is not None:
-                    fields["dropReps"] = drops
-                else:
-                    fields |= {"repsMin": reps_min, "repsMax": reps_max if reps_max is not None else reps_min}
-                plan.ops.append(_op("add", day, weeks, **fields))
-                plan.op_labels.append(f"добавить {new}")
-                tail = "" if known else f"; {NEW_EXERCISE}"
-                plan.lines.append(f"{day.label}: добавить {new} {rx} {place} ({where}{tail})")
+                temp = _add_op(plan, day, weeks, where, new, known, a, position, place, temp)
+            elif isinstance(a, ReplaceDayA):
+                day = _pick_day(snap, n, a.day, None, picks, None)
+                temp = _replace_day(snap, a, day, plan, all_weeks, temp)
             elif isinstance(a, PrescribeA):
                 item = _pick_item(day, n, a.exercise, picks)
                 sets = a.sets or item.sets
@@ -1558,7 +1676,10 @@ async def apply(
             notes.append(f"Вес на {w.day:%d.%m} не выставлен ({w.name}): тот день уже прошёл, повтори команду.")
             plan.lines = [ln for ln in plan.lines if not ln.startswith(f"Вес на {_date(w.day)}: {w.name} ")]
             continue
-        await overrides.upsert(session, user.id, w.exercise_id, w.day, w.kg)
+        ex_id = w.exercise_id
+        if ex_id is None:  # added by this command's ops: the row exists now
+            ex_id = (await get_or_create_exercise(session, w.name)).id
+        await overrides.upsert(session, user.id, ex_id, w.day, w.kg)
     if plan.weights and not plan.ops:
         log.info("weights from chat: user %s, %s, text %r", user.id, [(w.name, w.day, w.kg) for w in plan.weights], raw_text)
     if outcome is not None:

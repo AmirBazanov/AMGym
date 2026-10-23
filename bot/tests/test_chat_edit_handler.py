@@ -563,3 +563,48 @@ async def test_adjustment_stored_meanwhile_answers_changed(settings, db, llm, pu
     await hce.apply_edit(cb, settings, db)
     assert cb.message.edit_text.await_args.args[0] == hce.CHANGED
     assert published == [] and await adjustment_rows(db) == []
+
+
+AMIR = (
+    "замени сегодняшнюю тренировку на присед 3×8, жим лёжа 3×8 на 65 кг, тягу блока 3×10 на 60 кг, "
+    "румынскую тягу 2×10 на 75 кг"
+)
+
+
+def replace_today():
+    item = {"sets": 3, "repsMin": 8, "repsMax": None, "dropReps": None, "weight_kg": None}
+    return {"actions": [{
+        "type": "replace_day", "day": {"weekday": None, "focus": None, "when": "today"}, "scope": None,
+        "items": [
+            {**item, "name": "присед со штангой"},
+            {**item, "name": "жим лёжа", "weight_kg": 65},
+            {**item, "name": "тяга вертикального блока", "repsMin": 10, "weight_kg": 60},
+            {**item, "name": "румынская тяга", "sets": 2, "repsMin": 10, "weight_kg": 75},
+        ],
+    }], "summary": "Сегодня присед, жим лёжа, тяга блока, румынская тяга вместо программы"}
+
+
+async def test_replace_todays_workout_shows_the_preview_and_applies(settings, db, llm, published):
+    """The message from the chat log: it reaches the edit model, previews with "✅ Применить" and applies."""
+    before = names(await active_snapshot(db))
+    llm.answers.append(replace_today())
+    msg = await run(AMIR, settings, db, llm)
+    assert llm.edit_calls() == 1 and llm.parser_calls() == 0
+    assert "<b>Что изменю:</b>" in shown(msg) and "Создам твою копию" in shown(msg)
+    for name in before:
+        assert f"убрать {name}" in shown(msg)
+    assert "добавить присед со штангой 3×8" in shown(msg) and "добавить румынская тяга 2×10" in shown(msg)
+    assert "Вес на пт 09.10: жим лёжа 65 кг" in shown(msg) and "румынская тяга 75 кг" in shown(msg)
+    token = token_of(msg)
+    assert buttons(msg) == [f"eapply:{token}", f"edrop:{token}"]
+
+    cb = callback(f"eapply:{token}")
+    await hce.apply_edit(cb, settings, db)
+    assert "Готово" in cb.message.edit_text.await_args.args[0]
+    snap = await active_snapshot(db)
+    assert names(snap) == ["присед со штангой", "жим лёжа", "тяга вертикального блока", "румынская тяга"]
+    assert names(snap, week=2) == before  # this week only
+    assert snap.weights == {
+        (TODAY, "жим лёжа"): 65.0, (TODAY, "тяга вертикального блока"): 60.0, (TODAY, "румынская тяга"): 75.0,
+    }
+    assert published[0][1:] == ("program", "plan", "state")

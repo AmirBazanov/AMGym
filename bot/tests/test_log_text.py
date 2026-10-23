@@ -1794,3 +1794,33 @@ async def test_diary_answer_with_a_fact_offer_goes_as_html_with_the_button(llm, 
     assert msg.answer.await_args.args[0] == MARKED_PLAIN + "\n\nЗапомнить: «болит колено <справа>»"
     kw = msg.answer.await_args.kwargs
     assert kw["parse_mode"] is None and kw["reply_markup"] is not None
+
+
+# ---- a workout the parser made up from the dialog ----
+
+
+async def test_a_request_to_the_bot_is_not_a_workout(llm, settings, db):
+    # The dialog was about squats; the parser turned "сам продумай и запиши" into sets it remembered.
+    llm.answers = [{**workout("присед со штангой"), "exercises": [
+        {"exercise": "присед со штангой", "sets": [{"reps": 10, "weight_kg": 60}] * 3}]}]
+    msg = await send("А ты мне зачем сам продумай и запиши", llm, settings, db)
+    assert buttons(msg) == [] and not log_text.PENDING
+    assert msg.answer.await_args.args[0] == log_text.NO_SETS_ANSWER
+
+
+@pytest.mark.parametrize("text", ["так сам запиши", "кнопки нет, сам подтверди", "запиши"])
+async def test_invented_workout_pattern(text):
+    wk = ParseResult.model_validate(workout("присед со штангой"))
+    assert log_text.is_invented_workout(text, wk)
+
+
+@pytest.mark.parametrize("text", [
+    "сделал присед",  # a "done" verb and the exercise: the parser asks about the sets
+    "запиши присед 3 по 10 на 60",  # numbers
+    "запиши присед",  # names the exercise
+    "сам сделал три подхода",  # a number word
+    "как дела",  # nothing asked of the bot
+])
+async def test_invented_workout_guard_does_not_fire(text):
+    wk = ParseResult.model_validate(workout("присед со штангой"))
+    assert not log_text.is_invented_workout(text, wk)

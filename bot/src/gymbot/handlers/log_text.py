@@ -375,6 +375,24 @@ def is_setup_request(text: str, result: ParseResult) -> bool:
     return not _names_an_exercise(norm, result)
 
 
+# "а ты мне сам продумай и запиши", "так сам запиши": a request to the bot, with no sets or exercise in it.
+_ASKS_THE_BOT = re.compile(
+    r"(?<!\w)(?:сам[аи]?|запиши|занеси|внеси|продумай|составь|подбери|подтверди|примени|сохрани)(?:те)?(?!\w)"
+)
+
+
+def is_invented_workout(text: str, result: ParseResult) -> bool:
+    """A "workout" the user never stated: the text asks the bot to do something itself ("сам продумай и
+    запиши"), has no digit, no number or set word, no "done" verb and names none of the parsed exercises,
+    so the sets and weights came from the dialog history, not from the user (is_setup_request, wider)."""
+    if result.kind != "workout" or re.search(r"\d", text):
+        return False
+    norm = normalize(text)
+    if not _ASKS_THE_BOT.search(norm) or STATED_SETS.search(norm) or _RECORD_VERB.search(norm):
+        return False
+    return not _names_an_exercise(norm, result)
+
+
 def _names_an_exercise(norm: str, result: ParseResult) -> bool:
     """Whether the text has a word of a parsed exercise name ("жим", "приседания"), loosely by stem."""
     words = re.findall(r"\w+", norm)
@@ -411,6 +429,12 @@ def _claims_in(clause: str) -> bool:
         return True
     return bool(_CLAIM_PARTICIPLE.search(clause)) and len(clause.split()) <= 4 and not re.search(r"\d", clause)
 
+
+# A workout the parser made up from the dialog (is_invented_workout): nothing the user said to save.
+NO_SETS_ANSWER = (
+    "Сам я подходы не придумываю и не записываю: в дневник попадает только то, что ты сделал. "
+    "После зала напиши, например, «присед 60×10, 3 подхода», и я покажу запись с кнопкой «Сохранить»."
+)
 
 NO_ACTION = (
     "Я не записываю сам — чтобы записать, нажми «Сохранить» под превью. "
@@ -819,6 +843,9 @@ async def _reply_parsed(
     if is_setup_request(text, result) and not (prev and prev.token):
         log.info("a Mini App setup request parsed as a workout: answered instead")
         result = ParseResult(kind="question", clarification=MINIAPP_SETUP_ANSWER)
+    elif is_invented_workout(text, result) and not (prev and prev.token):
+        log.info("a workout with no sets stated parsed from a request to the bot: answered instead")
+        result = ParseResult(kind="question", clarification=NO_SETS_ANSWER)
     # A question about a pending preview ("а сколько в ней калорий?") is about data the diary does not have
     # yet: the parser, who saw the preview, answers it. A parser reply claiming a write goes there too.
     # An objection right after a diary answer («там должно быть 6 упражнений») is not a record to clarify:
