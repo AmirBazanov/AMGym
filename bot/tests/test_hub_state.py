@@ -46,9 +46,9 @@ async def owner(db) -> int:
 
 async def test_get_without_state(tmp_path, db):
     async with client(tmp_path, db) as c:
-        assert (await c.get(URL)).json() == {"version": 0, "updated_at": None, "state": {}}  # no owner yet
+        assert (await c.get(URL, headers=W)).json() == {"version": 0, "updated_at": None, "state": {}}  # no owner yet
         await owner(db)
-        r = await c.get(URL)
+        r = await c.get(URL, headers=W)
     assert r.status_code == 200
     assert r.json() == {"version": 0, "updated_at": None, "state": {}}
     assert r.headers["cache-control"] == "no-store"
@@ -65,7 +65,7 @@ async def test_put_then_get_and_conflict(tmp_path, db, monkeypatch):
         first = r.json()
         assert first["version"] == 1 and first["state"] == state
         assert UPDATED_AT.match(first["updated_at"])
-        assert (await c.get(URL)).json() == first
+        assert (await c.get(URL, headers=W)).json() == first
 
         r = await c.put(URL, json={"base_version": 1, "state": {"done": {}}}, headers=W)
         assert r.status_code == 200 and r.json()["version"] == 2
@@ -76,7 +76,7 @@ async def test_put_then_get_and_conflict(tmp_path, db, monkeypatch):
             r = await c.put(URL, json={"base_version": base, "state": {"stale": True}}, headers=W)
             assert r.status_code == 409
             assert r.json() == second
-        assert (await c.get(URL)).json() == second
+        assert (await c.get(URL, headers=W)).json() == second
     assert published == [(uid, "hub"), (uid, "hub")]
 
 
@@ -87,7 +87,7 @@ async def test_concurrent_saves_one_wins(tmp_path, db):
             c.put(URL, json={"base_version": 0, "state": {"n": n}}, headers=W) for n in range(4)
         ))
         assert sorted(r.status_code for r in rs) == [200, 409, 409, 409]
-        assert (await c.get(URL)).json()["version"] == 1
+        assert (await c.get(URL, headers=W)).json()["version"] == 1
 
 
 async def test_put_errors(tmp_path, db):
@@ -97,7 +97,10 @@ async def test_put_errors(tmp_path, db):
         assert (await c.put(URL, json=body)).status_code == 403  # no write token
         assert (await c.put(URL, json=body, headers={"X-Hub-Write-Token": "nope"})).status_code == 403
         assert (await c.put("/api/hub/state?token=nope", json=body, headers=W)).status_code == 403
-        assert (await c.get("/api/hub/state?token=nope")).status_code == 403
+        assert (await c.get("/api/hub/state?token=nope", headers=W)).status_code == 403
+        # HUB_TOKEN is public (data.js): reading the state needs the write token too.
+        assert (await c.get(URL)).status_code == 403
+        assert (await c.get(URL, headers={"X-Hub-Write-Token": "nope"})).status_code == 403
         big = {"base_version": 0, "state": {"x": "я" * hub.STATE_MAX_BYTES}}
         assert (await c.put(URL, json=big, headers=W)).status_code == 413
         for bad in ([1], {"base_version": 0, "state": [1]}, {"base_version": 0, "state": "x"},
@@ -106,12 +109,12 @@ async def test_put_errors(tmp_path, db):
             assert r.status_code == 422, bad
         r = await c.put(URL, content=b"{not json", headers=W | {"Content-Type": "application/json"})
         assert r.status_code == 422
-        assert (await c.get(URL)).json()["version"] == 0
+        assert (await c.get(URL, headers=W)).json()["version"] == 0
     async with client(tmp_path, db, hub_write_token="") as c:
         assert (await c.put(URL, json=body, headers=W)).status_code == 404
-        assert (await c.get(URL)).status_code == 200  # reading still works
+        assert (await c.get(URL, headers=W)).status_code == 404  # no write token configured: no state at all
     async with client(tmp_path, db, hub_token="") as c:
-        assert (await c.get(URL)).status_code == 404
+        assert (await c.get(URL, headers=W)).status_code == 404
 
 
 async def test_state_cors(tmp_path, db):
@@ -125,7 +128,7 @@ async def test_state_cors(tmp_path, db):
         assert "x-hub-write-token" in r.headers["access-control-allow-headers"].lower()
         r = await c.put(URL, json={"base_version": 0, "state": {}}, headers=W | {"Origin": "http://localhost:8765"})
         assert r.headers["access-control-allow-origin"] == "http://localhost:8765"
-        r = await c.get(URL, headers={"Origin": "https://evil.example"})
+        r = await c.get(URL, headers=W | {"Origin": "https://evil.example"})
         assert "access-control-allow-origin" not in r.headers
         r = await c.options(URL, headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "PUT"})
         assert "access-control-allow-origin" not in r.headers

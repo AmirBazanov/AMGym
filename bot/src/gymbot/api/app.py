@@ -729,7 +729,7 @@ def create_app(
 
         @app.options("/api/hub/state", include_in_schema=False)
         async def hub_state_preflight(request: Request) -> Response:
-            # PUT with a JSON body and X-Hub-Write-Token is not a "simple" request: the browser asks first.
+            # X-Hub-Write-Token (GET and PUT) and a JSON body make these non-"simple" requests: the browser asks first.
             headers = hub_headers(request) | {
                 "Access-Control-Allow-Methods": "GET, PUT, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, X-Hub-Write-Token",
@@ -738,10 +738,18 @@ def create_app(
             return Response(status_code=204, headers=headers)
 
         @app.get("/api/hub/state")
-        async def get_hub_state(request: Request, token: Annotated[str, Query(max_length=200)] = "") -> JSONResponse:
-            """The dashboard's saved state: {"version", "updated_at", "state"}; version 0 before the first save."""
+        async def get_hub_state(
+            request: Request,
+            token: Annotated[str, Query(max_length=200)] = "",
+            x_hub_write_token: Annotated[str, Header()] = "",
+        ) -> JSONResponse:
+            """The dashboard's saved state: {"version", "updated_at", "state"}; version 0 before the first save.
+            Needs X-Hub-Write-Token like PUT: HUB_TOKEN alone is public (data.js) and the state holds the
+            journal and tasks. 404 while HUB_WRITE_TOKEN is empty."""
             headers = hub_headers(request)
-            if not same(token, settings.hub_token):
+            if not settings.hub_write_token:
+                return hub_error(404, "Not Found", headers)
+            if not same(token, settings.hub_token) or not same(x_hub_write_token, settings.hub_write_token):
                 return hub_error(403, "forbidden", headers)
             async with sessionmaker() as session:
                 user = await owner_user(session, settings)
