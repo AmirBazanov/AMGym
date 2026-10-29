@@ -76,9 +76,13 @@ journalctl -u gymbot -n 30 --no-pager           # "webhook -> https://gym.algex.
 
 Caddy и туннель Cloudflare менять не нужно: ответы — обычный JSON на POST, без долгих SSE-потоков; оба пробрасывают `Host` как есть (у туннеля — пока в Public Hostname не задан свой HTTP Host Header), и приложение пускает на `/mcp` только `Host` из `PUBLIC_URL` и локальные адреса (иначе 421). После смены домена в `PUBLIC_URL` нужен рестарт сервиса.
 
-## Дашборд «Дела Амира» (`/api/hub`)
+## Дашборд «Дела Амира» (`/hub/`, `/api/hub`)
 
-`GET https://gym.algex.ru/api/hub?token=<HUB_TOKEN>` — только чтение, для статического дашборда на GitHub Pages (`AmirBazanov/my-hub`, поле `live` в `data.js`). Ответ:
+Статичный дашборд из репозитория `AmirBazanov/my-hub` (приватный) живёт на `https://gym.algex.ru/hub/` (и по-прежнему на GitHub Pages), его данные — в ручках ниже. Код: `bot/src/gymbot/services/hub.py`, ручки в `bot/src/gymbot/api/app.py`.
+
+### Тренировки: `GET /api/hub?token=<HUB_TOKEN>`
+
+Только чтение, поле `live` в `data.js`. Ответ:
 
 ```json
 {"workouts": {
@@ -93,7 +97,48 @@ Caddy и туннель Cloudflare менять не нужно: ответы �
 - Доступ: `HUB_TOKEN` в `.env` (пустой — 404, маршрута нет), неверный токен — 403. Токен лежит в публичном `data.js`, поэтому открывает только эту ручку. В логах uvicorn `token=` маскируется.
 - CORS только для `https://amirbazanov.github.io` и `http://localhost:8765`, `Cache-Control: no-store`. Лимита запросов нет: ручка дешёвая (один пользователь, дашборд ходит раз в 5 минут).
 
-Включить: в `~/amgym/.env` на сервере `HUB_TOKEN=<вывод openssl rand -hex 32>` и `sudo systemctl restart gymbot`.
+### Состояние: `GET/PUT /api/hub/state?token=<HUB_TOKEN>`
+
+То, что дашборд держит в localStorage (отметки задач, свои задачи, удалённые id, даты дел по дому, журнал, тренировки руками), — один JSON-объект на владельца с версией (таблица `hub_state`).
+
+- `GET` → `{"version": 12, "updated_at": "2026-10-29T10:20:00Z", "state": {...}}`; пока ничего не сохранено — `{"version": 0, "updated_at": null, "state": {}}`.
+- `PUT` с заголовком `X-Hub-Write-Token: <HUB_WRITE_TOKEN>` и телом `{"base_version": 12, "state": {...}}`: если `base_version` — текущая версия, сохраняет как `version + 1` и отвечает как `GET`; иначе `409` с текущим состоянием (дашборд сливает и повторяет), ничего не меняя. Без верного `X-Hub-Write-Token` — `403`, тело больше 256 КБ — `413`, `state` не объект или `base_version` не целое ≥ 0 — `422`, пустой `HUB_WRITE_TOKEN` — `404`. Сравнение версии и запись — один `UPDATE … WHERE version = base_version`, два устройства одновременно не перезапишут друг друга.
+- После сохранения — событие `hub` в live-канале (`services/live.py`), мини-апп его игнорирует.
+- CORS: те же origin, `GET, PUT, OPTIONS`, заголовки `Content-Type, X-Hub-Write-Token`; с `/hub/` на том же домене CORS не нужен.
+
+### Файлы: `/hub/` и `POST /api/hub/deploy`
+
+- Приложение раздаёт клон репозитория из `HUB_DIR` (по умолчанию `~/my-hub` рядом с `~/amgym`) на `/hub/`; `/hub` → `/hub/`. `.git`, `.claude`, `docs/` и любые файлы и папки с точкой в начале — `404`. HTML — `Cache-Control: no-cache`, скрипты и стили кэшируются обычно (ETag; в `index.html` они с `?v=`). Пока клона нет — `404`.
+- `HUB_DIR` — только абсолютный путь вне приложения (иначе сервис не стартует): относительный путь смотрел бы в `~/amgym` с базой. `HUB_DIR=` (пусто) выключает `/hub/` и деплой.
+- Поддомен `hub.algex.ru` не заводили: DNS `algex.ru` у Beget. Дашборд на одном origin с мини-аппом, их localStorage общий (ключи `hub:*` и `gymapp.v1` не пересекаются); код из `my-hub` выполняется на `gym.algex.ru`, так что пуш в `main` этого репозитория равен по доверию правке мини-аппа.
+- `POST /api/hub/deploy` с `X-Hub-Deploy-Token: <HUB_DEPLOY_TOKEN>` → `git -C HUB_DIR pull --ff-only` (а если клона нет — `git clone`), ответ `{"commit": "<hash>", "changed": true|false}`. Таймаут 60 с, не чаще раза в 10 с (`429` с `Retry-After`), ошибка git — `500` с её текстом, неверный токен — `403`, пустой `HUB_DEPLOY_TOKEN` — `404`. Вызывается из GitHub Actions репозитория `my-hub` после пуша в `main`.
+- `setup-ec2.sh` при каждом деплое тоже клонирует или подтягивает `HUB_DIR`; ошибка git там не останавливает деплой бота.
+
+### Включить на сервере
+
+Репозиторий приватный, поэтому клон по SSH с read-only deploy-ключом:
+
+```bash
+ssh-keygen -t ed25519 -N "" -C my-hub-deploy -f ~/.ssh/my_hub && cat ~/.ssh/my_hub.pub
+```
+
+Публичный ключ — в GitHub: `my-hub` → Settings → Deploy keys → Add (без «Allow write access»). Затем в `~/amgym/.env`:
+
+```bash
+HUB_TOKEN=<openssl rand -hex 32>
+HUB_WRITE_TOKEN=<openssl rand -hex 32>
+HUB_DEPLOY_TOKEN=<openssl rand -hex 32>
+HUB_REPO=git@github.com:AmirBazanov/my-hub.git
+HUB_SSH_KEY=/home/ec2-user/.ssh/my_hub
+```
+
+`sudo systemctl restart gymbot`, потом первый клон: `curl -X POST -H "X-Hub-Deploy-Token: $HUB_DEPLOY_TOKEN" https://gym.algex.ru/api/hub/deploy`.
+
+В `my-hub` — секрет `HUB_DEPLOY_TOKEN` и шаг workflow после пуша в `main`:
+
+```yaml
+- run: curl -fsS -X POST -H "X-Hub-Deploy-Token: ${{ secrets.HUB_DEPLOY_TOKEN }}" https://gym.algex.ru/api/hub/deploy
+```
 
 ## CI/CD (GitHub Actions)
 

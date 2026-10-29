@@ -1,23 +1,40 @@
-"""Workouts for the owner's personal dashboard «Дела Амира» (GET /api/hub, static site on GitHub Pages).
+"""The owner's personal dashboard «Дела Амира» (repository AmirBazanov/my-hub, a static site).
 
-Read only, never creates rows: the owner as in the MCP server (gymbot.services.access.owner_user), the
-program through next_weights.program_ref / day_weights, so the week shows the day plan, the deload and the
-manual day adjustments the way the Mini App does. No food, wellbeing or body weight here.
+- Workouts (GET /api/hub): read only, never creates rows: the owner as in the MCP server
+  (gymbot.services.access.owner_user), the program through next_weights.program_ref / day_weights, so the week
+  shows the day plan, the deload and the manual day adjustments the way the Mini App does. No food, wellbeing
+  or body weight here.
+- State (GET/PUT /api/hub/state): the dashboard's localStorage as one JSON object per owner, with a version
+  for optimistic locking (HubState).
+- Files: the site itself, a clone of the repository in HUB_DIR served on /hub/ (HubFiles), updated by
+  POST /api/hub/deploy (Deployer: git pull --ff-only, or the first clone).
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
+import os
+import signal
+import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path, PurePosixPath
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.exceptions import HTTPException
+from starlette.responses import Response
+from starlette.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from gymbot.config import Settings
-from gymbot.db.models import Exercise, ProgramDay, User, Workout, WorkoutSet
+from gymbot.db.models import Exercise, HubState, ProgramDay, User, Workout, WorkoutSet
 from gymbot.mcp_server import num, set_text
 from gymbot.services import day_adjustments as dayadj
 from gymbot.services import deload
@@ -158,3 +175,177 @@ async def build(session: AsyncSession, settings: Settings, tz: ZoneInfo, now_utc
             "log": await workout_log(session, user.id, now_utc.astimezone(tz).date()),
         }
     }
+
+
+# ---- state: the dashboard's localStorage, one blob per owner ----
+
+STATE_MAX_BYTES = 256 * 1024  # PUT body limit (413 above)
+
+
+class Conflict(Exception):
+    """PUT from a version that is not the stored one; `current` is the stored state as GET answers it."""
+
+    def __init__(self, current: dict[str, Any]) -> None:
+        super().__init__("version conflict")
+        self.current = current
+
+
+def state_out(row: HubState | None) -> dict[str, Any]:
+    if row is None:
+        return {"version": 0, "updated_at": None, "state": {}}
+    return {
+        "version": row.version,
+        "updated_at": _aware(row.updated_at).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "state": json.loads(row.state),
+    }
+
+
+async def _state_row(session: AsyncSession, user_id: int) -> HubState | None:
+    return await session.scalar(select(HubState).where(HubState.user_id == user_id))
+
+
+async def get_state(session: AsyncSession, user_id: int) -> dict[str, Any]:
+    return state_out(await _state_row(session, user_id))
+
+
+class BadBody(Exception):
+    pass
+
+
+def parse_put(raw: bytes) -> tuple[int, dict[str, Any]]:
+    """(base_version, state) of a PUT body {"base_version": 12, "state": {...}}; BadBody when malformed."""
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as e:
+        raise BadBody("body is not JSON") from e
+    if not isinstance(body, dict):
+        raise BadBody("body must be an object")
+    base, state = body.get("base_version"), body.get("state")
+    if not isinstance(base, int) or isinstance(base, bool) or base < 0:
+        raise BadBody("base_version must be a non-negative integer")
+    if not isinstance(state, dict):
+        raise BadBody("state must be an object")
+    return base, state
+
+
+async def save_state(
+    session: AsyncSession, user_id: int, base_version: int, state: dict[str, Any], now: datetime
+) -> dict[str, Any]:
+    """Store `state` as version base_version + 1 when base_version is the stored one (0: nothing stored yet),
+    else raise Conflict. Compare-and-set in one UPDATE, so two devices saving at once cannot both win."""
+    text = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+    result = await session.execute(
+        update(HubState)
+        .where(HubState.user_id == user_id, HubState.version == base_version)
+        .values(version=base_version + 1, state=text, updated_at=now)
+    )
+    if result.rowcount == 0:  # type: ignore[attr-defined]
+        if base_version != 0:
+            await session.rollback()
+            raise Conflict(await get_state(session, user_id))
+        session.add(HubState(user_id=user_id, version=1, state=text, updated_at=now))
+        try:
+            await session.flush()
+        except IntegrityError:  # a row exists already: the dashboard is behind
+            await session.rollback()
+            raise Conflict(await get_state(session, user_id)) from None
+    await session.commit()
+    return {"version": base_version + 1, "updated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "state": state}
+
+
+# ---- files: the site from HUB_DIR on /hub/, updated by git ----
+
+HIDDEN_DIRS = frozenset({"docs"})  # first path segment never served; dot names (.git, .claude, .env) neither
+
+
+class HubFiles(StaticFiles):
+    """StaticFiles over HUB_DIR without the repository's own files. A missing HUB_DIR answers 404 (the first
+    clone comes from setup-ec2.sh or POST /api/hub/deploy, after the app has started)."""
+
+    def __init__(self, directory: Path) -> None:
+        super().__init__(directory=directory, html=True, check_dir=False)
+
+    async def check_config(self) -> None:
+        if Path(str(self.directory)).is_dir():
+            await super().check_config()
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        parts = [p for p in PurePosixPath(path).parts if p != "."]
+        if (
+            not Path(str(self.directory)).is_dir()
+            or any(p.startswith(".") for p in parts)
+            or (parts and parts[0] in HIDDEN_DIRS)
+        ):
+            raise HTTPException(404)
+        return await super().get_response(path, scope)
+
+
+GIT_TIMEOUT = 60.0  # seconds for one git command
+DEPLOY_EVERY = 10.0  # seconds between two deploys
+
+
+class GitError(Exception):
+    pass
+
+
+class TooSoon(Exception):
+    def __init__(self, retry_after: int) -> None:
+        super().__init__("too soon")
+        self.retry_after = retry_after
+
+
+def git_env(ssh_key: Path | None) -> dict[str, str]:
+    """Never prompt; with a deploy key, ssh uses only it and trusts github.com on first use."""
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if ssh_key is not None:
+        env["GIT_SSH_COMMAND"] = (
+            f"ssh -i {ssh_key} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+        )
+    return env
+
+
+async def git(*args: str, env: dict[str, str] | None = None, timeout: float = GIT_TIMEOUT) -> str:
+    """stdout of `git *args`; GitError with git's message on a non-zero exit or the timeout."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env or git_env(None),
+        start_new_session=True,  # its own process group: a timeout kills ssh too, which holds the pipes
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        await proc.wait()
+        raise GitError(f"git timed out after {timeout:.0f} s") from None
+    if proc.returncode != 0:
+        raise GitError((err or out).decode(errors="replace").strip() or f"git exited with {proc.returncode}")
+    return out.decode(errors="replace").strip()
+
+
+async def pull(hub_dir: Path, repo: str, ssh_key: Path | None = None) -> dict[str, Any]:
+    """git pull --ff-only in `hub_dir`, or the first clone of `repo` there: {"commit", "changed"}."""
+    env = git_env(ssh_key)
+    if not (hub_dir / ".git").exists():
+        await git("clone", "-q", repo, str(hub_dir), env=env)
+        return {"commit": await git("-C", str(hub_dir), "rev-parse", "HEAD", env=env), "changed": True}
+    before = await git("-C", str(hub_dir), "rev-parse", "HEAD", env=env)
+    await git("-C", str(hub_dir), "pull", "-q", "--ff-only", env=env)
+    after = await git("-C", str(hub_dir), "rev-parse", "HEAD", env=env)
+    return {"commit": after, "changed": after != before}
+
+
+class Deployer:
+    """One deploy at a time and at most one per DEPLOY_EVERY seconds (TooSoon otherwise)."""
+
+    def __init__(self, hub_dir: Path, repo: str, ssh_key: Path | None = None, every: float = DEPLOY_EVERY) -> None:
+        self.hub_dir, self.repo, self.ssh_key, self.every = hub_dir, repo, ssh_key, every
+        self.last = float("-inf")
+        self.lock = asyncio.Lock()
+
+    async def run(self) -> dict[str, Any]:
+        wait = self.last + self.every - time.monotonic()
+        if self.lock.locked() or wait > 0:
+            raise TooSoon(max(1, round(wait)))
+        async with self.lock:
+            self.last = time.monotonic()
+            return await pull(self.hub_dir, self.repo, self.ssh_key)

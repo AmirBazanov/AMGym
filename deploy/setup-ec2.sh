@@ -141,6 +141,28 @@ fi
 
 chmod 600 "$APP_DIR/.env"
 
+# The dashboard «Дела Амира» (served by the app on /hub/, later updated by POST /api/hub/deploy). Never fatal:
+# a failed clone or pull must not stop the bot's deploy.
+if grep -qx 'HUB_DIR=' "$APP_DIR/.env"; then
+  echo "== dashboard: HUB_DIR is empty, skipped"
+else
+  HUB_DIR="$(env_value HUB_DIR)"; HUB_DIR="${HUB_DIR:-$HOME/my-hub}"
+  HUB_REPO="$(env_value HUB_REPO)"; HUB_REPO="${HUB_REPO:-https://github.com/AmirBazanov/my-hub.git}"
+  HUB_SSH_KEY="$(env_value HUB_SSH_KEY)"
+  echo "== dashboard: $HUB_REPO -> $HUB_DIR"
+  (
+    export GIT_TERMINAL_PROMPT=0
+    if [ -n "$HUB_SSH_KEY" ]; then
+      export GIT_SSH_COMMAND="ssh -i $HUB_SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+    fi
+    if [ -d "$HUB_DIR/.git" ]; then
+      git -C "$HUB_DIR" pull -q --ff-only
+    else
+      git clone -q "$HUB_REPO" "$HUB_DIR"
+    fi
+  ) || echo "!! dashboard: git failed (a private repo needs HUB_REPO=git@github.com:... and HUB_SSH_KEY, see deploy/README.md)"
+fi
+
 PUBLIC_URL="$(env_value PUBLIC_URL)"
 EDGE="$(env_value EDGE)"; EDGE="${EDGE:-tunnel}"
 if [ -n "$PUBLIC_URL" ]; then

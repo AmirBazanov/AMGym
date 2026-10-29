@@ -147,7 +147,7 @@ uv run --project bot python -m gymbot.dev
 - `DATABASE_URL` — по умолчанию SQLite `data/gym.db`.
 - `BACKUP_ENABLED`, `BACKUP_HOUR` — ежедневная копия базы в Telegram (по умолчанию включена только с `BOT_MODE=webhook`).
 - `MCP_TOKEN` — MCP-сервер на `/mcp` для Claude Code (см. `deploy/README.md`).
-- `HUB_TOKEN` — тренировки для дашборда «Дела Амира» на `/api/hub` (см. `deploy/README.md`, «Дашборд»).
+- `HUB_TOKEN`, `HUB_WRITE_TOKEN`, `HUB_DEPLOY_TOKEN`, `HUB_DIR`, `HUB_REPO`, `HUB_SSH_KEY` — дашборд «Дела Амира»: сам сайт на `/hub/`, тренировки `/api/hub`, его состояние `/api/hub/state`, обновление по пушу `/api/hub/deploy` (см. `deploy/README.md`, «Дашборд»).
 
 Данные лежат в `data/gym.db` (SQLite).
 
@@ -210,7 +210,7 @@ flowchart TD
 
 `bot/src/gymbot/main.py` в одном процессе применяет миграции, синхронизирует программы из `data/programs/`, затем запускает:
 - **бота** (aiogram 3): long polling или, при `BOT_MODE=webhook`, приём апдейтов на `/telegram/webhook`; с `RUN_BOT=false` бота нет;
-- **HTTP-сервер** (uvicorn + FastAPI, по умолчанию `127.0.0.1:8000`): API мини-аппа, собранный мини-апп из `miniapp/dist`, MCP на `/mcp` (только если задан `MCP_TOKEN`); `GET /api/hub?token=` — только чтение: неделя программы и тренировки за 90 дней для дашборда «Дела Амира» на GitHub Pages (только если задан `HUB_TOKEN`, CORS для `amirbazanov.github.io` и `localhost:8765`, подробнее в `deploy/README.md`);
+- **HTTP-сервер** (uvicorn + FastAPI, по умолчанию `127.0.0.1:8000`): API мини-аппа, собранный мини-апп из `miniapp/dist`, MCP на `/mcp` (только если задан `MCP_TOKEN`); дашборд «Дела Амира» на `/hub/` (клон `my-hub` из `HUB_DIR`) и его ручки с `?token=HUB_TOKEN`: `GET /api/hub` — неделя программы и тренировки за 90 дней, `GET/PUT /api/hub/state` — его состояние (запись с `X-Hub-Write-Token`, версия против одновременных правок), `POST /api/hub/deploy` — `git pull` дашборда по пушу (`X-Hub-Deploy-Token`); CORS для `amirbazanov.github.io` и `localhost:8765`, подробнее в `deploy/README.md`;
 - **фоновые циклы** (только вместе с ботом): напоминания и ежедневная копия базы (`BACKUP_ENABLED`, по умолчанию включена при `BOT_MODE=webhook`).
 
 HTTPS даёт внешний обратный прокси или туннель, сам процесс его не запускает (см. раздел 10).

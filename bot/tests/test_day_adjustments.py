@@ -90,7 +90,8 @@ async def test_migration_0015_round_trip(tmp_path):
 
         await migrate_to("0014")
         down = await run_sync(_schema)
-        assert up["tables"] - down["tables"] == {"day_adjustments"}  # only this table goes
+        later = {"hub_state"}  # tables of later revisions, gone with the downgrade too
+        assert up["tables"] - down["tables"] - later == {"day_adjustments"}  # only this table goes
         assert down["tables"] - up["tables"] == set()
         async with engine.connect() as conn:
             assert (await conn.execute(text("SELECT telegram_id FROM users"))).scalar_one() == 1

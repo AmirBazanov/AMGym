@@ -21,7 +21,7 @@ from fastapi import (
     Request,
     Response,
 )
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -49,7 +49,7 @@ from gymbot.services import programs as pg
 from gymbot.services import reminders as rem
 from gymbot.services import wellbeing as wb
 from gymbot.services import workouts as ws
-from gymbot.services.access import is_allowed
+from gymbot.services.access import is_allowed, owner_user
 from gymbot.services.programs import load_program
 from gymbot.services.users import active_program, get_or_create_user, set_program
 
@@ -57,7 +57,8 @@ log = logging.getLogger(__name__)
 
 HEALTH_TIMEOUT = 2.0  # seconds for the database ping in /api/health
 NUTRITION_MIN_DATE = date(2000, 1, 1)
-# Pages allowed to read GET /api/hub from the browser: the dashboard and its local preview.
+# Pages allowed to call /api/hub and /api/hub/state from the browser: the dashboard on GitHub Pages and its
+# local preview (served on /hub/ from this app it is same-origin and needs no CORS).
 HUB_ORIGINS = ("https://amirbazanov.github.io", "http://localhost:8765")
 
 
@@ -145,6 +146,18 @@ class FactPatch(BaseModel):
     text: str | None = Field(default=None, max_length=2000)
     category: fx.Category | None = None
     active: bool | None = None
+
+
+async def read_capped(request: Request, limit: int) -> bytes | None:
+    """The request body, or None when it is longer than `limit` bytes (stops reading there)."""
+    if (length := request.headers.get("content-length", "")).isdigit() and int(length) > limit:
+        return None
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > limit:
+            return None
+    return bytes(body)
 
 
 def fact_text(text: str) -> str:
@@ -688,28 +701,118 @@ def create_app(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    if settings.hub_token:  # else no route: /api/hub answers 404 like any unknown path
-        hub_key = settings.hub_token.encode()
+    def hub_headers(request: Request) -> dict[str, str]:
+        """no-store everywhere; CORS for HUB_ORIGINS only, on the /api/hub routes and not app-wide."""
+        headers = {"Cache-Control": "no-store", "Vary": "Origin"}
+        if (origin := request.headers.get("origin")) in HUB_ORIGINS:
+            headers["Access-Control-Allow-Origin"] = origin
+        return headers
+
+    def same(given: str, expected: str) -> bool:
+        return hmac.compare_digest(given.encode(), expected.encode())
+
+    def hub_error(status: int, detail: str, headers: dict[str, str]) -> JSONResponse:
+        return JSONResponse({"detail": detail}, status, headers=headers)
+
+    if settings.hub_token:  # else no route: /api/hub and /api/hub/state answer 404 like any unknown path
 
         @app.get("/api/hub")
         async def get_hub(request: Request, token: Annotated[str, Query(max_length=200)] = "") -> JSONResponse:
-            """Workouts for the owner's dashboard on GitHub Pages (gymbot.services.hub). The token sits in a
-            public data.js, so it opens this read-only route and nothing else; no session dependency, the
-            service only reads. CORS for HUB_ORIGINS only, here and not app-wide."""
-            headers = {"Cache-Control": "no-store", "Vary": "Origin"}
-            if (origin := request.headers.get("origin")) in HUB_ORIGINS:
-                headers["Access-Control-Allow-Origin"] = origin
-            if not hmac.compare_digest(token.encode(), hub_key):
-                return JSONResponse({"detail": "forbidden"}, 403, headers=headers)
+            """Workouts for the owner's dashboard «Дела Амира» (gymbot.services.hub). The token sits in a public
+            data.js, so it opens only the hub routes, and writing needs X-Hub-Write-Token on top."""
+            headers = hub_headers(request)
+            if not same(token, settings.hub_token):
+                return hub_error(403, "forbidden", headers)
             async with sessionmaker() as session:
                 body = await hub.build(session, settings, tz, day_plan.utcnow())
             return JSONResponse(body, headers=headers)
 
+        @app.options("/api/hub/state", include_in_schema=False)
+        async def hub_state_preflight(request: Request) -> Response:
+            # PUT with a JSON body and X-Hub-Write-Token is not a "simple" request: the browser asks first.
+            headers = hub_headers(request) | {
+                "Access-Control-Allow-Methods": "GET, PUT, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, X-Hub-Write-Token",
+                "Access-Control-Max-Age": "600",
+            }
+            return Response(status_code=204, headers=headers)
+
+        @app.get("/api/hub/state")
+        async def get_hub_state(request: Request, token: Annotated[str, Query(max_length=200)] = "") -> JSONResponse:
+            """The dashboard's saved state: {"version", "updated_at", "state"}; version 0 before the first save."""
+            headers = hub_headers(request)
+            if not same(token, settings.hub_token):
+                return hub_error(403, "forbidden", headers)
+            async with sessionmaker() as session:
+                user = await owner_user(session, settings)
+                body = await hub.get_state(session, user.id) if user is not None else hub.state_out(None)
+            return JSONResponse(body, headers=headers)
+
+        @app.put("/api/hub/state")
+        async def put_hub_state(
+            request: Request,
+            token: Annotated[str, Query(max_length=200)] = "",
+            x_hub_write_token: Annotated[str, Header()] = "",
+        ) -> JSONResponse:
+            """Body {"base_version", "state"}: saved as base_version + 1 when base_version is the stored one, else
+            409 with the stored state (the dashboard merges and retries). 403 without both tokens."""
+            headers = hub_headers(request)
+            if not settings.hub_write_token:
+                return hub_error(404, "Not Found", headers)
+            if not same(token, settings.hub_token) or not same(x_hub_write_token, settings.hub_write_token):
+                return hub_error(403, "forbidden", headers)
+            raw = await read_capped(request, hub.STATE_MAX_BYTES)
+            if raw is None:
+                return hub_error(413, f"body over {hub.STATE_MAX_BYTES // 1024} KB", headers)
+            try:
+                base, state = hub.parse_put(raw)
+            except hub.BadBody as e:
+                return hub_error(422, str(e), headers)
+            async with sessionmaker() as session:
+                user = await owner_user(session, settings)
+                if user is None:
+                    return hub_error(404, "the owner has not used the bot yet", headers)
+                try:
+                    body = await hub.save_state(session, user.id, base, state, datetime.now(UTC).replace(microsecond=0))
+                except hub.Conflict as c:
+                    return JSONResponse(c.current, 409, headers=headers)
+            live.publish(user.id, "hub")
+            return JSONResponse(body, headers=headers)
+
+    if settings.hub_deploy_token and settings.hub_dir is not None:  # else no route (404)
+        deployer = hub.Deployer(settings.hub_dir, settings.hub_repo, settings.hub_ssh_key)
+
+        @app.post("/api/hub/deploy")
+        async def hub_deploy(x_hub_deploy_token: Annotated[str, Header()] = "") -> JSONResponse:
+            """git pull --ff-only of the dashboard in HUB_DIR (the first clone when it is missing), called by the
+            my-hub repository's GitHub Actions after a push: {"commit", "changed"}."""
+            headers = {"Cache-Control": "no-store"}
+            if not same(x_hub_deploy_token, settings.hub_deploy_token):
+                return hub_error(403, "forbidden", headers)
+            try:
+                body = await deployer.run()
+            except hub.TooSoon as e:
+                return hub_error(429, "one deploy per 10 s", headers | {"Retry-After": str(e.retry_after)})
+            except hub.GitError as e:
+                log.warning("hub deploy failed: %s", e)
+                return hub_error(500, str(e), headers)
+            log.info("hub deploy: %s (changed: %s)", body["commit"], body["changed"])
+            return JSONResponse(body, headers=headers)
+
+    @app.get("/hub", include_in_schema=False)
+    async def hub_slash() -> RedirectResponse:
+        return RedirectResponse("/hub/")
+
     @app.middleware("http")
     async def no_cache_index(request: Request, call_next):  # type: ignore[no-untyped-def]
         # Telegram's webview caches aggressively; always revalidate the HTML so new builds show up.
+        # The dashboard on /hub/: only its HTML; its scripts and styles carry ?v= and cache as usual (ETag).
         response = await call_next(request)
-        if not request.url.path.startswith(("/api", "/assets")):
+        path = request.url.path
+        if path.startswith("/hub/"):
+            if response.headers.get("content-type", "").startswith("text/html"):
+                response.headers["Cache-Control"] = "no-cache"
+        elif not path.startswith(("/api", "/assets")):
             response.headers["Cache-Control"] = "no-cache"
         return response
 
@@ -719,6 +822,9 @@ def create_app(
     app.router.routes.extend(mcp_routes)  # before the Mini App mount at "/", which swallows every path
     if settings.mcp_token:
         app.add_middleware(BearerGuard, token=settings.mcp_token)
+
+    if settings.hub_dir is not None:  # 404 inside until HUB_DIR is cloned
+        app.mount("/hub", hub.HubFiles(settings.hub_dir), name="hub")
 
     if settings.miniapp_dist.is_dir():  # last: the mount at "/" catches every path
         app.mount("/", StaticFiles(directory=settings.miniapp_dist, html=True), name="miniapp")

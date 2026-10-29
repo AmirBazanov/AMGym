@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[3]  # repo root: bot/src/gymbot/config.py -> ../../..
@@ -86,6 +86,15 @@ class Settings(BaseSettings):
     mcp_token: str = ""
     # ?token= for GET /api/hub (read-only workouts for the owner's dashboard); empty = the route does not exist.
     hub_token: str = ""
+    # The dashboard «Дела Амира»: its site (a clone of hub_repo) served on /hub/, PUT /api/hub/state with
+    # X-Hub-Write-Token (empty = no PUT), POST /api/hub/deploy with X-Hub-Deploy-Token (empty = no route).
+    # hub_dir must be absolute (it is served as is); empty = no /hub/ and no deploy. hub_ssh_key: a read-only
+    # deploy key for a private hub_repo (git@github.com:...).
+    hub_dir: Path | None = ROOT.parent / "my-hub"
+    hub_repo: str = "https://github.com/AmirBazanov/my-hub.git"
+    hub_ssh_key: Path | None = None
+    hub_write_token: str = ""
+    hub_deploy_token: str = ""
     miniapp_dist: Path = ROOT / "miniapp" / "dist"
     programs_dir: Path = ROOT / "data" / "programs"
     # Local browser testing only: requests without Telegram initData act as this Telegram user.
@@ -99,6 +108,18 @@ class Settings(BaseSettings):
     backup_enabled: bool | None = None
     backup_hour: int = Field(default=4, ge=0, le=23)  # local hour in TIMEZONE
 
+    @field_validator("hub_dir", "hub_ssh_key", mode="before")
+    @classmethod
+    def _absolute_path(cls, value: object) -> object:
+        """'' = off. A relative path would resolve against the service's working directory, the app checkout
+        with data/gym.db in it, and hub_dir is served to anyone."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        path = Path(str(value)).expanduser()
+        if not path.is_absolute():
+            raise ValueError(f"{value!r} must be an absolute path")
+        return path
+
     @model_validator(mode="after")
     def _derive_urls(self) -> "Settings":
         self.public_url = self.public_url.strip().rstrip("/")
@@ -106,6 +127,8 @@ class Settings(BaseSettings):
             self.miniapp_url = self.public_url
         if self.backup_enabled is None:
             self.backup_enabled = self.bot_mode == "webhook"
+        if self.hub_dir is not None and ROOT.resolve().is_relative_to(self.hub_dir.resolve()):
+            raise ValueError(f"HUB_DIR={self.hub_dir} contains the app itself and would serve its data")
         return self
 
     @property

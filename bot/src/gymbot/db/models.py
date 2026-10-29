@@ -412,3 +412,17 @@ class Reminder(Base):
     enabled: Mapped[bool] = mapped_column(default=True)
     last_sent_on: Mapped[date | None] = mapped_column(Date)  # local date in TIMEZONE
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+# --- The owner's dashboard «Дела Амира» (gymbot.services.hub): its browser state, one blob per owner ---
+
+class HubState(Base):
+    """What the dashboard keeps in localStorage (task marks, own tasks, journal, ...), saved by PUT
+    /api/hub/state. `version` grows by one on every save; a save from an older version is refused (409)."""
+
+    __tablename__ = "hub_state"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True)
+    version: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(Text)  # JSON object as sent by the dashboard
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
