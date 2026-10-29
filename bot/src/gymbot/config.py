@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     api_port: int = 8000
     # Static Bearer token for the MCP endpoint /mcp (Claude Code etc.); empty = MCP is not mounted.
     mcp_token: str = ""
+    # ?token= for GET /api/hub (read-only workouts for the owner's dashboard); empty = the route does not exist.
+    hub_token: str = ""
     miniapp_dist: Path = ROOT / "miniapp" / "dist"
     programs_dir: Path = ROOT / "data" / "programs"
     # Local browser testing only: requests without Telegram initData act as this Telegram user.

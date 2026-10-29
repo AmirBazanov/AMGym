@@ -2,6 +2,7 @@
 
 
 import asyncio
+import hmac
 import logging
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, date, datetime, timedelta
@@ -38,7 +39,7 @@ from gymbot.services import active_workout as aw
 from gymbot.services import baselines as bl
 from gymbot.services import body_weight as bwt
 from gymbot.services import facts as fx
-from gymbot.services import live, workout_events
+from gymbot.services import hub, live, workout_events
 from gymbot.services import nutrition as nut
 from gymbot.services import overrides as ov
 from gymbot.services import plan as day_plan
@@ -56,6 +57,8 @@ log = logging.getLogger(__name__)
 
 HEALTH_TIMEOUT = 2.0  # seconds for the database ping in /api/health
 NUTRITION_MIN_DATE = date(2000, 1, 1)
+# Pages allowed to read GET /api/hub from the browser: the dashboard and its local preview.
+HUB_ORIGINS = ("https://amirbazanov.github.io", "http://localhost:8765")
 
 
 class StateOut(BaseModel):
@@ -684,6 +687,23 @@ def create_app(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    if settings.hub_token:  # else no route: /api/hub answers 404 like any unknown path
+        hub_key = settings.hub_token.encode()
+
+        @app.get("/api/hub")
+        async def get_hub(request: Request, token: Annotated[str, Query(max_length=200)] = "") -> JSONResponse:
+            """Workouts for the owner's dashboard on GitHub Pages (gymbot.services.hub). The token sits in a
+            public data.js, so it opens this read-only route and nothing else; no session dependency, the
+            service only reads. CORS for HUB_ORIGINS only, here and not app-wide."""
+            headers = {"Cache-Control": "no-store", "Vary": "Origin"}
+            if (origin := request.headers.get("origin")) in HUB_ORIGINS:
+                headers["Access-Control-Allow-Origin"] = origin
+            if not hmac.compare_digest(token.encode(), hub_key):
+                return JSONResponse({"detail": "forbidden"}, 403, headers=headers)
+            async with sessionmaker() as session:
+                body = await hub.build(session, settings, tz, day_plan.utcnow())
+            return JSONResponse(body, headers=headers)
 
     @app.middleware("http")
     async def no_cache_index(request: Request, call_next):  # type: ignore[no-untyped-def]
