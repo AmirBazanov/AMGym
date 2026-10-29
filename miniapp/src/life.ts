@@ -128,6 +128,8 @@ export interface LifeView {
   projects: LifeProject[]
   notes: LifeNoteHead[]
   agenda: AgendaItem[]
+  /** Optional `user: {name}` (not in the task 1.3 contract yet): whose data, shown for a /web login. */
+  userName: string | null
 }
 
 /** Path segment of each kind in /api/life/{kind}/{id}, and the item it answers with. */
@@ -335,6 +337,7 @@ export function parseView(raw: unknown): LifeView | null {
     projects: list(raw.projects, parseProject),
     notes: list(raw.notes, parseNoteHead),
     agenda: sortAgenda(list(raw.agenda, parseAgendaItem)),
+    userName: isObj(raw.user) ? str(raw.user.name) : null,
   }
 }
 
@@ -562,6 +565,33 @@ export function projectGroups(projects: readonly LifeProject[]): { kind: Project
 /** Notes, recently changed first. */
 export function sortNotes<T extends LifeNoteHead>(notes: readonly T[]): T[] {
   return [...notes].sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? '') || b.id - a.id)
+}
+
+/**
+ * The view right after marking an item done or not, before the server answers (the reload that follows
+ * brings the truth). A chore done today is due again in everyDays and leaves the agenda.
+ */
+export function markDone(view: LifeView, kind: DoneKind, id: number, done: boolean): LifeView {
+  const agendaKind: AgendaKind = kind === 'events' ? 'event' : kind === 'deadlines' ? 'deadline' : 'chore'
+  const agenda =
+    kind === 'chores' && done
+      ? view.agenda.filter((a) => !(a.kind === 'chore' && a.id === id))
+      : view.agenda.map((a) => (a.kind === agendaKind && a.id === id ? { ...a, done } : a))
+  switch (kind) {
+    case 'tasks':
+      return { ...view, tasks: view.tasks.map((t) => (t.id === id ? { ...t, done, doneAt: done ? new Date().toISOString() : null } : t)) }
+    case 'events':
+      return { ...view, agenda, events: view.events.map((e) => (e.id === id ? { ...e, done } : e)) }
+    case 'deadlines':
+      return { ...view, agenda, deadlines: view.deadlines.map((d) => (d.id === id ? { ...d, done } : d)) }
+    case 'chores':
+      if (!done) return view
+      return {
+        ...view,
+        agenda,
+        chores: view.chores.map((c) => (c.id === id ? { ...c, lastDone: view.today, left: c.everyDays } : c)),
+      }
+  }
 }
 
 // ---------- the week schedule ----------

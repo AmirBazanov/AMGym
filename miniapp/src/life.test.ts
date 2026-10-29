@@ -15,6 +15,7 @@ import {
   formBody,
   formValues,
   inAgenda,
+  markDone,
   longDate,
   LIFE_PARSERS,
   openDeadlines,
@@ -143,7 +144,13 @@ const sample = {
 
 describe('parseView', () => {
   it('round-trips a full valid sample', () => {
-    expect(parseView(sample)).toEqual(sample)
+    expect(parseView(sample)).toEqual({ ...sample, userName: null })
+  })
+
+  it('reads the optional user name (for the /web login bar)', () => {
+    expect(parseView({ ...sample, user: { name: 'Амир' } })?.userName).toBe('Амир')
+    expect(parseView({ ...sample, user: { name: '' } })?.userName).toBeNull()
+    expect(parseView({ ...sample, user: 'Амир' })?.userName).toBeNull()
   })
 
   it('returns null for a non-object answer', () => {
@@ -172,6 +179,7 @@ describe('parseView', () => {
       projects: [],
       notes: [],
       agenda: [],
+      userName: null,
     })
     const v = view({ slots: 'x', events: {}, deadlines: null, tasks: 5 })
     expect(v.slots).toEqual([])
@@ -1442,5 +1450,42 @@ describe('parseMarkdown', () => {
     expect(p!.lines).toEqual([[txt('x')]])
     const [list] = parseMarkdown('- [x](data:text/html,hi)') as { t: 'ul'; items: { inline: MdInline[] }[] }[]
     expect(list!.items[0]!.inline).toEqual([txt('x')])
+  })
+})
+
+describe('markDone', () => {
+  const base = () => parseView(sample)!
+
+  it('flips a task and stamps doneAt, back to null on undone', () => {
+    const v = view({ tasks: [{ id: 4, title: 'Резюме', tag: null, projectId: null, done: false, doneAt: null }] })
+    const id = 4
+    const done = markDone(v, 'tasks', id, true)
+    expect(done.tasks.find((t) => t.id === id)!.done).toBe(true)
+    expect(done.tasks.find((t) => t.id === id)!.doneAt).not.toBeNull()
+    const undone = markDone(done, 'tasks', id, false)
+    expect(undone.tasks.find((t) => t.id === id)).toMatchObject({ done: false, doneAt: null })
+    expect(v.tasks[0]!.done).toBe(false) // the input view is not mutated
+  })
+
+  it('marks a plan and its agenda point together', () => {
+    const v = view({
+      events: [{ id: 2, day: TODAY, start: '09:00', end: null, title: 'Созвон', area: 'work', projectId: null, remindBefore: null, done: false, note: null }],
+      agenda: [{ kind: 'event', id: 2, title: 'Созвон', start: '09:00', end: null, area: 'work', place: null, done: false, overdueDays: 0 }],
+    })
+    const ev = v.agenda.find((a) => a.kind === 'event')!
+    const next = markDone(v, 'events', ev.id, true)
+    expect(next.events.find((e) => e.id === ev.id)!.done).toBe(true)
+    expect(next.agenda.find((a) => a.kind === 'event' && a.id === ev.id)!.done).toBe(true)
+  })
+
+  it('a chore done today is due again in everyDays and leaves the agenda', () => {
+    const v = base()
+    const ch = v.agenda.find((a) => a.kind === 'chore')!
+    const next = markDone(v, 'chores', ch.id, true)
+    const chore = next.chores.find((c) => c.id === ch.id)!
+    expect(chore.lastDone).toBe(TODAY)
+    expect(chore.left).toBe(chore.everyDays)
+    expect(next.agenda.some((a) => a.kind === 'chore' && a.id === ch.id)).toBe(false)
+    expect(markDone(v, 'chores', ch.id, false)).toBe(v)
   })
 })
