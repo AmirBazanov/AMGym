@@ -152,12 +152,12 @@ def site(tmp_path):
 async def test_site_files_and_cache(tmp_path, db):
     site(tmp_path)
     async with client(tmp_path, db) as c:
-        r = await c.get("/hub")
-        assert r.status_code in (307, 308) and r.headers["location"] == "/hub/"
-        r = await c.get("/hub/")
+        for old in ("/hub", "/hub/"):  # the dashboard moved into the Mini App («Дела»)
+            r = await c.get(old)
+            assert r.status_code == 302 and r.headers["location"] == "/?section=life"
+        r = await c.get("/hub/index.html")  # its files still serve until the old site is archived
         assert r.status_code == 200 and "<title>hub</title>" in r.text
         assert r.headers["cache-control"] == "no-cache"
-        assert (await c.get("/hub/index.html")).headers["cache-control"] == "no-cache"
         r = await c.get("/hub/app.js?v=3")
         assert r.status_code == 200 and r.text == "console.log(1)"
         assert "cache-control" not in r.headers and r.headers["etag"]
@@ -168,7 +168,7 @@ async def test_site_files_and_cache(tmp_path, db):
 
 async def test_site_missing_or_off(tmp_path, db):
     async with client(tmp_path, db) as c:  # HUB_DIR not cloned yet
-        assert (await c.get("/hub/")).status_code == 404
+        assert (await c.get("/hub/index.html")).status_code == 404
         assert (await c.get("/hub/app.js")).status_code == 404
     async with client(tmp_path, db, hub_dir="") as c:
         r = await c.get("/hub/data/gym.db")

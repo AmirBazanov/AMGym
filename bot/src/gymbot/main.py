@@ -39,6 +39,7 @@ from gymbot.handlers import (
     plan,
     products,
     voice,
+    web_login,
 )
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services import baselines, life, live
@@ -94,6 +95,7 @@ async def setup_bot_ui(bot: Bot, settings: Settings) -> None:
             BotCommand(command="hub", description="Дела: задачи и дом"),
             BotCommand(command="products", description="Мои продукты (штрихкод, этикетка)"),
             BotCommand(command="help", description="Как записывать"),
+            BotCommand(command="web", description="Вход с компьютера: ссылка на дневник и дела"),
             BotCommand(command="backup", description="Копия базы в чат"),
             BotCommand(command="llm", description="Нейросети: состояние и расход (/llm test — проверка)"),
         ]
@@ -211,6 +213,7 @@ async def run() -> None:
             voice.router,
             photo.router,
             products.router,
+            web_login.router,
             log_text.router,
         )  # log_text last: it catches all text
         if settings.bot_mode == "webhook":

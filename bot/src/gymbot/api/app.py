@@ -40,7 +40,7 @@ from gymbot.services import active_workout as aw
 from gymbot.services import baselines as bl
 from gymbot.services import body_weight as bwt
 from gymbot.services import facts as fx
-from gymbot.services import hub, live, workout_events
+from gymbot.services import hub, live, web_login, workout_events
 from gymbot.services import nutrition as nut
 from gymbot.services import overrides as ov
 from gymbot.services import plan as day_plan
@@ -229,7 +229,22 @@ def create_app(
             yield session
             await session.commit()
 
-    async def tg_user(request: Request, x_telegram_init_data: Annotated[str, Header()] = "") -> TelegramUser:
+    web_key = web_login.signing_key(settings.bot_token)
+
+    async def tg_user(
+        request: Request,
+        x_telegram_init_data: Annotated[str, Header()] = "",
+        x_app_token: Annotated[str, Header(max_length=300)] = "",
+    ) -> TelegramUser:
+        if not x_telegram_init_data and x_app_token:
+            # A computer browser signed in by the /web link (gymbot.services.web_login).
+            telegram_id = web_login.verify(web_key, x_app_token)
+            if telegram_id is None:
+                raise HTTPException(401, "the sign-in link has expired: send /web to the bot again")
+            async with sessionmaker() as session:
+                if not await is_allowed(session, settings, telegram_id):
+                    raise HTTPException(403, "this is a personal app")
+            return TelegramUser(id=telegram_id, name=None)
         if not x_telegram_init_data:
             # Dev bypass only for direct local requests, never through the tunnel (cloudflared adds
             # cf-connecting-ip) or from another machine.
@@ -826,9 +841,11 @@ def create_app(
         log.info("hub deploy: %s (changed: %s)", body["commit"], body["changed"])
         return JSONResponse(body, headers=headers)
 
+    # The dashboard moved into the Mini App («Дела»); its old address lands there.
     @app.get("/hub", include_in_schema=False)
-    async def hub_slash() -> RedirectResponse:
-        return RedirectResponse("/hub/")
+    @app.get("/hub/", include_in_schema=False)
+    async def hub_moved() -> RedirectResponse:
+        return RedirectResponse("/?section=life", 302)
 
     @app.middleware("http")
     async def no_cache_index(request: Request, call_next):  # type: ignore[no-untyped-def]
