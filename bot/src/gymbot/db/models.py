@@ -21,8 +21,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    true,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column, relationship
 
 
 def utcnow() -> datetime:
@@ -60,6 +61,13 @@ class User(Base):
     birth_year: Mapped[int | None] = mapped_column(Integer)
     goal: Mapped[str | None] = mapped_column(String(16))  # mass | cut | strength | health
     about: Mapped[str | None] = mapped_column(Text)  # injuries, sleep, limits (free text, <= 500 chars)
+    # «Дела» (gymbot.services.life): minutes before a timed plan to remind, the morning summary (minute of the
+    # day in TIMEZONE, on/off, local date last sent) and when data.js / hub_state were imported (once).
+    life_remind_before: Mapped[int] = mapped_column(Integer, default=30, server_default="30")
+    life_summary_minute: Mapped[int] = mapped_column(Integer, default=480, server_default="480")
+    life_summary_enabled: Mapped[bool] = mapped_column(default=True, server_default=true())
+    life_summary_sent_on: Mapped[date | None] = mapped_column(Date)
+    life_imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Exercise(Base):
@@ -426,3 +434,104 @@ class HubState(Base):
     version: Mapped[int] = mapped_column(Integer)
     state: Mapped[str] = mapped_column(Text)  # JSON object as sent by the dashboard
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+# --- «Дела»: schedule, plans, deadlines, tasks, chores, projects, notes (gymbot.services.life is the only writer) ---
+
+
+class LifeRow:
+    """Columns of every «Дела» table. `deleted_at` set = soft-deleted (hidden everywhere). `source` is who made
+    the row (me | bot | learnharness | import); `external_id` is that source's own id, unique per user and source
+    (NULLs never collide), so an import or a future bridge can find its rows again."""
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    source: Mapped[str] = mapped_column(String(16), default="me")
+    external_id: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    @declared_attr.directive
+    def __table_args__(cls) -> tuple:
+        return (UniqueConstraint("user_id", "source", "external_id"),)
+
+
+class LifeSlot(LifeRow, Base):
+    """A weekly schedule entry: a lesson I teach (area work) or a class I attend (study). Times "ЧЧ:ММ" local."""
+
+    __tablename__ = "life_slots"
+    weekday: Mapped[int] = mapped_column(Integer)  # 1=Mon..7=Sun (isoweekday, as ProgramDay)
+    start: Mapped[str] = mapped_column(String(5))
+    end: Mapped[str | None] = mapped_column(String(5))
+    title: Mapped[str] = mapped_column(String(200))
+    area: Mapped[str] = mapped_column(String(16))  # work | study
+    tag: Mapped[str | None] = mapped_column(String(32))  # py, game, unity, web, vp, math, kg, study...
+    place: Mapped[str | None] = mapped_column(String(200))
+    vld: Mapped[str | None] = mapped_column(String(5))  # the journal must be filled by then (lessons)
+    note: Mapped[str | None] = mapped_column(Text)
+
+
+class LifeEvent(LifeRow, Base):
+    """A plan on a date, timed or for the whole day. `reminded_at` is claimed before the reminder goes out."""
+
+    __tablename__ = "life_events"
+    day: Mapped[date] = mapped_column(Date)  # local date in TIMEZONE
+    start: Mapped[str | None] = mapped_column(String(5))
+    end: Mapped[str | None] = mapped_column(String(5))
+    title: Mapped[str] = mapped_column(String(200))
+    area: Mapped[str] = mapped_column(String(16))  # study | work | other
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("life_projects.id", ondelete="SET NULL"))
+    remind_before: Mapped[int | None] = mapped_column(Integer)  # minutes; NULL = users.life_remind_before
+    reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    note: Mapped[str | None] = mapped_column(Text)
+
+
+class LifeDeadline(LifeRow, Base):
+    __tablename__ = "life_deadlines"
+    day: Mapped[date] = mapped_column(Date)
+    title: Mapped[str] = mapped_column(String(200))
+    course: Mapped[str | None] = mapped_column(String(200))
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("life_projects.id", ondelete="SET NULL"))
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reminded_on: Mapped[date | None] = mapped_column(Date)  # local date of the eve reminder
+
+
+class LifeTask(LifeRow, Base):
+    __tablename__ = "life_tasks"
+    title: Mapped[str] = mapped_column(String(200))
+    tag: Mapped[str | None] = mapped_column(String(32))
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("life_projects.id", ondelete="SET NULL"))
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    position: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class LifeChore(LifeRow, Base):
+    """A house chore every `every_days` days; due when `every_days` have passed since `last_done`."""
+
+    __tablename__ = "life_chores"
+    title: Mapped[str] = mapped_column(String(200))
+    every_days: Mapped[int] = mapped_column(Integer)
+    last_done: Mapped[date | None] = mapped_column(Date)
+
+
+class LifeProject(LifeRow, Base):
+    __tablename__ = "life_projects"
+    name: Mapped[str] = mapped_column(String(200))
+    kind: Mapped[str] = mapped_column(String(16))  # work | learning | own
+    status: Mapped[str] = mapped_column(String(16))  # active | paused | idea | done
+    description: Mapped[str | None] = mapped_column(Text)
+    link: Mapped[str | None] = mapped_column(String(500))
+    next_step: Mapped[str | None] = mapped_column(Text)
+
+
+class LifeNote(LifeRow, Base):
+    """A note or a memo in Markdown, written by me or by the bot (author)."""
+
+    __tablename__ = "life_notes"
+    title: Mapped[str] = mapped_column(String(200))
+    body: Mapped[str] = mapped_column(Text, default="")
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    author: Mapped[str] = mapped_column(String(8), default="me")  # me | bot
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("life_projects.id", ondelete="SET NULL"))

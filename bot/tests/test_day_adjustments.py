@@ -90,7 +90,10 @@ async def test_migration_0015_round_trip(tmp_path):
 
         await migrate_to("0014")
         down = await run_sync(_schema)
-        later = {"hub_state"}  # tables of later revisions, gone with the downgrade too
+        # tables of later revisions, gone with the downgrade too
+        later = {"hub_state"} | {
+            f"life_{t}" for t in ("slots", "events", "deadlines", "tasks", "chores", "projects", "notes")
+        }
         assert up["tables"] - down["tables"] - later == {"day_adjustments"}  # only this table goes
         assert down["tables"] - up["tables"] == set()
         async with engine.connect() as conn:
