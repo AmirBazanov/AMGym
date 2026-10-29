@@ -5,6 +5,10 @@ the model turned into at least one valid action is answered here and nowhere els
 question with buttons, or notes); anything else (not a command, no valid action, any error) returns None and
 the text goes on as usual.
 
+A command suggested by the diary answer («ПРАВКА: сделай сегодня день рук», gymbot.services.answer) is staged by
+`send_suggested` right under that answer, without the routing regex: the user asked for it in words that never
+look like a command ("запиши на сегодня тренировку рук", "так добавь"), and copying it back is the bot's job.
+
 Nothing is written until "✅ Применить": it runs program_editor.edit_program with the version the preview was
 built against (a change in between, from the Mini App or another command, answers CHANGED), then the weights,
 the day adjustments ("сегодня −20 %", gymbot.services.day_adjustments) and the deload, and publishes "program", "plan", "state" (only what changed) so the open Mini App reloads. Clarify buttons fix the day or the
@@ -149,17 +153,12 @@ async def stage_edit(
     tg = message.from_user
     assert tg is not None
     today = _local_day(message.date, settings)
-    try:
-        data = await _ask_model(text, today, tg.id, sessionmaker, llm)
-        actions, invalid = ce.parse_actions(data)
-        if not actions:
-            return None
-        pending = EditPending(tg.id, text, raw, actions, message.date, notes=invalid)
-        pending.plan = await _build(pending, today, sessionmaker)
-    except Exception as e:  # noqa: BLE001 - a failing edit path must never cost the user a record
-        log.warning("program edit command failed (%s), the usual path", type(e).__name__)
+    pending, _ = await _stage(tg.id, message.date, text, raw, today, sessionmaker, llm)
+    if pending is None:
         return None
     plan = pending.plan
+    assert plan is not None
+    actions = pending.actions
     if ce.only_guesses(plan, actions, text):
         return None  # "дышится легче" read as a default light day, "верни как было" with nothing to clear
     if plan.clarify is None and not plan.ready() and se.detect(text, today) is not None:
@@ -167,6 +166,44 @@ async def stage_edit(
         # saved-record edit: that path gets it, the notes would only hide it.
         return None
     return pending
+
+
+async def _stage(
+    tg_id: int, at: datetime, text: str, raw: str, today: date, sessionmaker: Sessionmaker, llm: OpenRouterClient
+) -> tuple[EditPending | None, bool]:
+    """The edit model's actions for `text` compiled into a previewed plan, and whether it failed; (None, False)
+    when the model found no valid action, (None, True) on any error."""
+    try:
+        data = await _ask_model(text, today, tg_id, sessionmaker, llm)
+        actions, invalid = ce.parse_actions(data)
+        if not actions:
+            return None, False
+        pending = EditPending(tg_id, text, raw, actions, at, notes=invalid)
+        pending.plan = await _build(pending, today, sessionmaker)
+    except Exception as e:  # noqa: BLE001 - a failing edit path must never cost the user a record
+        log.warning("program edit command failed (%s), the usual path", type(e).__name__)
+        return None, True
+    return pending, False
+
+
+NOT_SUPPORTED = "Эту правку («{command}») я пока сделать не могу — тренируйся по своему плану и запиши сделанное после зала."
+SUGGESTED_FAILED = "Не получилось подготовить правку «{command}», попробуй ещё раз чуть позже."
+
+
+async def send_suggested(
+    message: Message, command: str, raw: str, settings: Settings, sessionmaker: Sessionmaker, llm: OpenRouterClient
+) -> None:
+    """The preview of a command the diary answer suggested («ПРАВКА: …»), sent under that answer. `message` is
+    the user's message the answer replied to; `raw` its stored text (logged with the applied ops)."""
+    tg = message.from_user
+    assert tg is not None
+    today = _local_day(message.date, settings)
+    pending, failed = await _stage(tg.id, message.date, command, raw, today, sessionmaker, llm)
+    if pending is None:
+        await message.answer((SUGGESTED_FAILED if failed else NOT_SUPPORTED).format(command=command))
+        return
+    log.info("program edit suggested by the diary answer: %r", command)
+    await send_edit(message, pending)
 
 
 def _store(pending: EditPending) -> str:

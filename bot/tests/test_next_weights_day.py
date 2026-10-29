@@ -201,3 +201,50 @@ async def test_next_training_is_today_until_trained(db, settings):
         await _owner(s)
     reply = await answer.respond(db, 42, "Amir", "какая следующая тренировка", [], settings, NoModel(), friday_morning)
     assert reply.text.startswith("Сегодня, пт 09.10 — тренировка по программе")
+
+
+# ---- after an edit from the chat, «что сегодня по плану» shows it (incidents of 27–29.10) ----
+
+
+async def _edit_from_chat(s, user, action) -> None:
+    from gymbot.services import chat_edit as ce
+    from gymbot.services.users import active_program
+
+    snap = await ce.load_snapshot(s, user, TODAY)
+    plan = ce.compile_ops(snap, [action])
+    assert plan.ready(), plan.notes
+    up = await active_program(s, user, TODAY)
+    await ce.apply(s, user, up, plan, TODAY, "x")
+    await s.commit()
+
+
+async def _today(s, user, settings):
+    q = "что сегодня по плану"
+    return await answer_direct.plan_reply(s, user, settings, q, plan_question(q), TZ, NOW)
+
+
+async def test_new_schedule_puts_a_workout_on_today(db, settings):
+    from gymbot.services import chat_edit as ce
+
+    async with db() as s:
+        user = await _owner(s)
+        assert (await _today(s, user, settings)).text.startswith("Сегодня, чт 08.10 по программе отдых")
+        await _edit_from_chat(s, user, ce.SetWeekdaysA(type="set_weekdays", weekdays=[2, 4, 6]))
+        text = (await _today(s, user, settings)).text
+    assert text.startswith("Сегодня, чт 08.10 — тренировка по программе (неделя 1)"), text
+
+
+async def test_workout_on_a_rest_day_shows_its_exercises_today(db, settings):
+    from gymbot.services import chat_edit as ce
+    from gymbot.services.chat_edit import DayRef
+
+    async with db() as s:
+        user = await _owner(s)
+        await _edit_from_chat(s, user, ce.ReplaceDayA(type="replace_day", day=DayRef(when="today"), items=[
+            ce.DayItemA(name="сгибания с гантелями на бицепс с супинацией", sets=4, repsMin=8),
+            ce.DayItemA(name="жим гантелей сидя", sets=3, repsMin=12),
+        ]))
+        lines = (await _today(s, user, settings)).text.split("\n")
+    assert lines[0].startswith("Сегодня, чт 08.10 — тренировка по программе")
+    assert lines[1].startswith("• Сгибания с гантелями на бицепс с супинацией 4×8 — ")
+    assert lines[2].startswith("• Жим гантелей сидя 3×12 — ")

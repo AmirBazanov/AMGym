@@ -72,7 +72,7 @@ from gymbot.db.models import FoodEntry, User, Workout, WorkoutSet
 from gymbot.db.session import Sessionmaker
 from gymbot.handlers import body_weight, saved_edits
 from gymbot.handlers import products as product_cards
-from gymbot.handlers.chat_edit import send_edit, stage_edit
+from gymbot.handlers.chat_edit import send_edit, send_suggested, stage_edit
 from gymbot.handlers.chat_settings import send_staged, stage_settings
 from gymbot.handlers.plan import send_after_wellbeing
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
@@ -494,13 +494,25 @@ def with_typing(message: Message, reparse: plausibility.Reparse) -> plausibility
     return run
 
 
+async def _suggested(
+    message: Message, command: str | None, raw: str, settings: Settings, sessionmaker: Sessionmaker,
+    llm: OpenRouterClient,
+) -> None:
+    """The program edit the diary answer suggested, as a preview with «Применить» right under the answer."""
+    if not command:
+        return
+    async with keep_typing(message):  # the edit model and a dry run
+        await send_suggested(message, command, raw, settings, sessionmaker, llm)
+
+
 async def _diary_answer(
     message: Message, text: str, result: ParseResult, settings: Settings, sessionmaker: Sessionmaker,
     llm: OpenRouterClient,
-) -> tuple[ParseResult, str | None]:
+) -> tuple[ParseResult, str | None, str | None]:
     """The question answered from the user's diary (gymbot.services.answer: from the database for a factual
     question, else the model's checked answer) instead of the parser's one-liner without data; that one
-    stays on any failure. Also returns the answer's Telegram HTML (None: send the plain clarification)."""
+    stays on any failure. Also returns the answer's Telegram HTML (None: send the plain clarification) and
+    the program edit it suggests («ПРАВКА: …», staged under the answer)."""
     tg_user = message.from_user
     assert tg_user is not None
     try:  # the plan and the answer may take a few model calls
@@ -514,19 +526,20 @@ async def _diary_answer(
             )
     except TimeoutError:
         log.warning("answer from the diary: over %s s, the parser's reply stays", ANSWER_TIME_LIMIT)
-        return result, None
+        return result, None, None
     except LLMError as e:
         log.warning("answer from the diary: no model answered (%s)", e)
-        return result, None
+        return result, None, None
     except Exception:
         log.exception("answer from the diary failed")
-        return result, None
-    reply, rich = answered.text, answered.html
+        return result, None, None
+    reply, rich, command = answered.text, answered.html, answered.command
     if claims_action(reply):
         log.info("the diary answer claimed an action it did not do: replaced")
         reply, rich = NO_ACTION, None
-    _remember_answer(tg_user.id, text, reply, message.date)
-    return result.model_copy(update={"clarification": reply}), rich
+    remembered = reply + (f"\nПРАВКА: {command}" if command else "")  # the model sees what it suggested
+    _remember_answer(tg_user.id, text, remembered, message.date)
+    return result.model_copy(update={"clarification": reply}), rich, command
 
 
 # A record in the same message ("съел курт, сколько белка осталось", "сделал жим 3 подхода по 8"): the
@@ -859,13 +872,14 @@ async def _reply_parsed(
     )
     factual = _factual_question(text, result, prev)
     answer_html: str | None = None
+    command: str | None = None
     if follow_up or factual or (
         result.kind == "question"
         and not (prev and prev.token)
         and (wants_diary(text) or claims_action(result.clarification))
     ):
         asked = result.model_copy(update={"kind": "question"}) if follow_up or factual else result
-        answered, answer_html = await _diary_answer(message, text, asked, settings, sessionmaker, llm)
+        answered, answer_html, command = await _diary_answer(message, text, asked, settings, sessionmaker, llm)
         result = result if answered is asked else answered  # failed: an unclear message stays unclear
     result = honest(result)
     # The model tends to repeat facts it was given: offer only new ones.
@@ -904,12 +918,14 @@ async def _reply_parsed(
         else:
             await message.answer(shown, reply_markup=markup)
         if result.kind == "question":
+            await _suggested(message, command, raw, settings, sessionmaker, llm)
             return
     elif result.kind == "question":
         if rich is not None:
             await send_html(message.answer, rich, preview)
         else:
             await message.answer(preview)
+        await _suggested(message, command, raw, settings, sessionmaker, llm)
         return
     # Updates are handled concurrently: while the model was thinking, the previous preview may have
     # been saved, cancelled or replaced by another message. Then this is not its continuation.

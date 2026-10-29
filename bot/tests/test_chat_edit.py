@@ -951,7 +951,7 @@ def test_edit_schema_lists_every_action_type_the_parser_accepts():
         valid, _ = ce.parse_actions({"actions": [{"type": t}]})
         assert len(valid) == 1
     assert in_schema == {"replace", "remove", "add", "prescribe", "reorder", "weight", "swap_days", "move_day",
-                         "deload", "adjust_day", "clear_day", "clarify"}
+                         "deload", "adjust_day", "clear_day", "set_weekdays", "clarify"}
 
 
 # ---- review fixes: moves run last, one per command, chat checks, day weights, a changed deload ----
@@ -1648,10 +1648,19 @@ def test_replace_day_same_list_changes_nothing(snap):
     assert not plan.ready() and plan.notes == ["В дне пт «Руки и плечи» уже так."]
 
 
-def test_replace_day_no_workout_today(snap):
-    a = ce.ReplaceDayA(type="replace_day", day=DayRef(when="tomorrow"), items=[ce.DayItemA(name="присед")])
+def test_replace_day_on_a_rest_day_makes_the_day(snap):
+    """Incident 27.10: «замени сегодняшнюю тренировку на …» on a rest day answered «тренировки нет»."""
+    a = ce.ReplaceDayA(type="replace_day", day=DayRef(when="tomorrow"), items=[
+        ce.DayItemA(name="сгибания с гантелями на бицепс с супинацией", sets=4, repsMin=8),
+        ce.DayItemA(name="жим гантелей сидя", sets=3, repsMin=12),
+    ])
     plan = ce.compile_ops(snap, [a])
-    assert not plan.ready() and plan.notes == ["Завтра по программе тренировки нет."]
+    assert plan.ready() and plan.notes == []
+    assert [op["op"] for op in plan.ops] == ["add_day", "add", "add"]
+    assert {(op["week"], op["weekday"]) for op in plan.ops} == {(1, 6)}  # tomorrow: Saturday of week 1
+    assert plan.ops[0]["weeks"] == [1]
+    assert plan.lines[0] == "Сб 10.10: тренировка вместо отдыха (только неделя 1)"
+    assert plan.lines[1].startswith("сб: добавить сгибания с гантелями на бицепс с супинацией 4×8 (")
 
 
 async def test_replace_day_applies_and_sets_the_new_exercise_weight(db):
@@ -1682,3 +1691,136 @@ async def test_replace_day_applies_and_sets_the_new_exercise_weight(db):
         assert FRENCH in [i.name for i in copy.day(2, 5).items]  # this week only
         today = {w.exercise: w.weightKg for w in await overrides.for_day(session, user.id, TODAY)}
         assert today == {"прыжки на тумбу": 60.0, "жим лёжа": 65.0}
+
+
+# ---- a workout on a rest day, a new schedule (incidents of 27–29.10) ----
+
+
+@pytest.mark.parametrize("text", [
+    "Я теперь хору вторник четверг суббота",
+    "теперь хожу вт, чт, сб",
+    "тренируюсь по понедельникам, средам и пятницам",
+    "перенеси тренировки на вторник, четверг и субботу",
+])
+def test_a_new_schedule_routes_to_the_edit_model(text):
+    assert ce.is_edit_command(text)
+
+
+@pytest.mark.parametrize("text", [
+    "какая тренировка во вторник и четверг",
+    "во вторник и четверг болели ноги",
+    "в понедельник и среду ел курицу",
+    "удали записи за понедельник и вторник",
+])
+def test_weekdays_that_are_no_schedule_stay_away(text):
+    assert not ce.is_edit_command(text)
+
+
+def test_parse_actions_set_weekdays_sorted_and_checked():
+    (a,), _ = ce.parse_actions({"actions": [{"type": "set_weekdays", "weekdays": [6, 2, 4], "scope": None}]})
+    assert a.weekdays == [2, 4, 6]
+    assert ce.parse_actions({"actions": [{"type": "set_weekdays", "weekdays": [2, 2, 9]}]}) == ([], [])
+
+
+def test_set_weekdays_compiles_to_one_op_from_this_week(snap):
+    plan = ce.compile_ops(snap, [ce.SetWeekdaysA(type="set_weekdays", weekdays=[2, 4, 6])])
+    assert plan.ready()
+    (op,) = plan.ops
+    assert op == {"op": "set_weekdays", "week": 1, "weekday": 1, "weeks": list(range(1, 9)),
+                  "fromWeekdays": [1, 3, 5], "toWeekdays": [2, 4, 6]}
+    assert plan.lines[0] == "Расписание: пн/ср/пт → вт/чт/сб (все недели)"
+    assert plan.lines[-1] == "сб 10.10: «Руки и плечи»"
+
+
+def test_set_weekdays_with_a_wrong_number_of_days_explains(snap):
+    plan = ce.compile_ops(snap, [ce.SetWeekdaysA(type="set_weekdays", weekdays=[2, 4])])
+    assert not plan.ready()
+    assert plan.notes[0].startswith("В программе 3 трен. в неделю (пн/ср/пт), а дней названо 2.")
+
+
+async def test_set_weekdays_applies_and_the_day_weights_follow(db):
+    from gymbot.services import overrides
+
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        snap = await ce.load_snapshot(session, user, TODAY)
+        curl = item(snap, 5, "сгибания на бицепс с ez грифом хватом снизу")
+        await overrides.upsert(session, user.id, curl.exercise_id, TODAY, 30)  # today's (Friday's) weight
+        await session.commit()
+    s, session, user, up, plan = await staged(db, [ce.SetWeekdaysA(type="set_weekdays", weekdays=[2, 4, 6])])
+    try:
+        await ce.preview(session, user, up, plan)
+    finally:
+        await s.__aexit__(None, None, None)
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        up = await active_program(session, user, TODAY)
+        await ce.apply(session, user, up, plan, TODAY, "я теперь хожу вт, чт, сб")
+        await session.commit()
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        after = await ce.load_snapshot(session, user, TODAY)
+        for w in range(1, 9):
+            assert sorted(after.weeks[w]) == [2, 4, 6]
+        assert after.day(1, 6).focus == "Руки и плечи" and after.day(1, 4).focus == "База"
+        moved = {w.exercise: w.weightKg for w in await overrides.for_day(session, user.id, TODAY + timedelta(days=1))}
+        assert moved == {"сгибания на бицепс с ez грифом хватом снизу": 30.0}
+
+
+async def test_replace_day_on_a_rest_day_applies(db):
+    a = ce.ReplaceDayA(type="replace_day", day=DayRef(when="tomorrow"), items=[
+        ce.DayItemA(name="сгибания с гантелями на бицепс с супинацией", sets=4, repsMin=8),
+        ce.DayItemA(name="французский жим в блоке из-за головы", sets=4, repsMin=10),
+    ])
+    s, session, user, up, plan = await staged(db, [a])
+    try:
+        await ce.preview(session, user, up, plan)
+        assert plan.ready() and plan.notes == []
+    finally:
+        await s.__aexit__(None, None, None)
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        up = await active_program(session, user, TODAY)
+        await ce.apply(session, user, up, plan, TODAY, "замени завтрашнюю тренировку на сгибания и французский")
+        await session.commit()
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        after = await ce.load_snapshot(session, user, TODAY)
+        assert [i.name for i in after.day(1, 6).items] == [
+            "сгибания с гантелями на бицепс с супинацией", "французский жим в блоке из-за головы",
+        ]
+        assert after.day(2, 6) is None  # this week only
+
+
+def test_two_adds_on_one_rest_day_make_it_once(snap):
+    plan = ce.compile_ops(snap, [
+        AddA(type="add", day=DayRef(weekday=6), name="жим гантелей сидя"),
+        AddA(type="add", day=DayRef(weekday=6), name="отведения на дельты"),
+    ])
+    assert [op["op"] for op in plan.ops] == ["add_day", "add", "add"]
+
+
+def test_prompt_context_shows_rest_days(snap):
+    text = ce.prompt_context(snap)
+    assert " сб: отдых" in text and " вт: отдых" in text
+
+
+async def test_set_weekdays_after_an_earlier_move_keeps_every_week_on_the_new_days(db):
+    """Week 1 had Friday moved to Saturday: its own days go to вт/чт/сб, never a half-moved вт/ср/сб."""
+    await _apply(db, [MoveDayA(type="move_day", src=DayRef(weekday=5), dst=DayRef(weekday=6))])
+    s, session, user, up, plan = await staged(db, [ce.SetWeekdaysA(type="set_weekdays", weekdays=[2, 4, 6])])
+    try:
+        assert [op["fromWeekdays"] for op in plan.ops] == [[1, 3, 6], [1, 3, 5]]
+        assert plan.lines[:2] == [
+            "Расписание: пн/ср/сб → вт/чт/сб (только неделя 1)", "Расписание: пн/ср/пт → вт/чт/сб (недели 2–8)",
+        ]
+        await ce.apply(session, user, up, plan, TODAY, "я теперь хожу вт, чт, сб")
+        await session.commit()
+    finally:
+        await s.__aexit__(None, None, None)
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        after = await ce.load_snapshot(session, user, TODAY)
+    for w in range(1, 9):
+        assert sorted(after.weeks[w]) == [2, 4, 6]
+        assert after.day(w, 6).focus == "Руки и плечи"

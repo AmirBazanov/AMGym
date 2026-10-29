@@ -108,7 +108,7 @@ def no_diary_answer(request, monkeypatch):
         return
 
     async def parser_answer(message, text, result, *args):
-        return result, None
+        return result, None, None
 
     monkeypatch.setattr(log_text, "_diary_answer", parser_answer)
 
@@ -1824,3 +1824,37 @@ async def test_invented_workout_pattern(text):
 async def test_invented_workout_guard_does_not_fire(text):
     wk = ParseResult.model_validate(workout("присед со штангой"))
     assert not log_text.is_invented_workout(text, wk)
+
+
+# ---- a program edit suggested by the diary answer («ПРАВКА: …»): staged under the answer ----
+
+
+def test_split_command_cuts_the_line_and_its_markup():
+    text, cmd = qa.split_command("Руки сегодня — ок.\n**ПРАВКА:** «сделай сегодня день рук»")
+    assert (text, cmd) == ("Руки сегодня — ок.", "сделай сегодня день рук")
+    assert qa.split_command("Просто ответ.") == ("Просто ответ.", None)
+    assert qa.split_command("правка: тренируюсь вт, чт, сб")[1] == "тренируюсь вт, чт, сб"
+
+
+async def test_diary_answer_command_is_staged_under_the_answer_not_copied(llm, settings, db, diary, monkeypatch):
+    """Incident 27.10: «Запиши тогда на сегодня тренировку рук» got «скопируй и отправь эту команду»."""
+    staged = AsyncMock()
+    monkeypatch.setattr(log_text, "send_suggested", staged)
+    llm.answers = [
+        {"kind": "question", "clarification": "Не знаю."},
+        "Руки сегодня — хорошая идея, ноги и грудь не нагружаются.\nПРАВКА: сделай сегодня день рук",
+    ]
+    msg = await send("Запиши тогда на сегодня тренировку рук", llm, settings, db)
+    shown = msg.answer.await_args.args[0]
+    assert "ПРАВКА" not in shown and "Руки сегодня" in shown
+    staged.assert_awaited_once()
+    assert staged.await_args.args[1] == "сделай сегодня день рук"
+    assert log_text.QA[USER][-1][1].endswith("\nПРАВКА: сделай сегодня день рук")  # «так добавь» sees it
+
+
+async def test_diary_answer_without_a_command_stages_nothing(llm, settings, db, diary, monkeypatch):
+    staged = AsyncMock()
+    monkeypatch.setattr(log_text, "send_suggested", staged)
+    llm.answers = [{"kind": "question", "clarification": "Не знаю."}, MARKED]
+    await send(ADVICE_Q, llm, settings, db)
+    staged.assert_not_awaited()

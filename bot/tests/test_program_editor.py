@@ -1317,3 +1317,82 @@ async def test_move_day_dry_run_changes_nothing(client, auth, published):
     assert await state(client, auth) == before_state
     assert await program_count(client, auth) == 1
     assert published == []
+
+
+# ---- add_day (a workout on a rest day) and set_weekdays (a new schedule) ----
+
+
+def add_day(weekday, week=1, **extra) -> dict:
+    return {"op": "add_day", "week": week, "weekday": weekday, **extra}
+
+
+def add_to(weekday, name, temp, week=1, **extra) -> dict:
+    return {"op": "add", "week": week, "weekday": weekday, "tempId": temp, "name": name, "position": 99,
+            **rx(4, 8), **extra}
+
+
+async def test_add_day_makes_a_workout_on_a_rest_day_of_one_week(client, auth, copy):
+    body = await ok(client, auth, copy["id"], copy["version"], [
+        add_day(2), add_to(2, DB_PRESS, "a"), add_to(2, BENCH, "b"),
+    ])
+    program = body["program"]
+    assert weekdays(program, 1) == [1, 2, 3, 5]
+    assert names(program, 1, 2) == [DB_PRESS, BENCH]
+    assert day_of(program, 1, 2)["exercises"][0]["prescription"]["raw"] == "4х8"
+    for w in range(2, 9):
+        assert weekdays(program, w) == [1, 3, 5]
+
+
+async def test_add_day_over_weeks_skips_the_weeks_where_the_day_is_taken(client, auth, copy):
+    body = await ok(client, auth, copy["id"], copy["version"], [
+        add_day(6, weeks=ALL_WEEKS), add_to(6, DB_PRESS, "a", weeks=ALL_WEEKS),
+    ])
+    assert body["results"][0]["weeks"] == ALL_WEEKS
+    assert all(weekdays(body["program"], w) == [1, 3, 5, 6] for w in ALL_WEEKS)
+
+
+async def test_add_day_on_a_training_day_is_422(client, auth, copy):
+    r = await patch(client, auth, copy["id"], copy["version"], [add_day(1), add_to(1, DB_PRESS, "a")])
+    assert r.status_code == 422, r.text
+
+
+async def test_add_day_left_empty_is_422(client, auth, copy):
+    before = await get_program(client, auth)
+    r = await patch(client, auth, copy["id"], copy["version"], [add_day(2)])
+    assert r.status_code == 422, r.text
+    assert await get_program(client, auth) == before
+
+
+def sw(src, dst, week=1, **extra) -> dict:
+    return {"op": "set_weekdays", "week": week, "weekday": src[0], "fromWeekdays": src, "toWeekdays": dst, **extra}
+
+
+async def test_set_weekdays_moves_every_day_at_once(client, auth, copy):
+    template = copy
+    body = await ok(client, auth, copy["id"], copy["version"], [sw([1, 3, 5], [2, 4, 6], weeks=ALL_WEEKS)])
+    program = body["program"]
+    assert body["results"] == [{"op": 0, "weeks": ALL_WEEKS, "skipped": []}]
+    for w in ALL_WEEKS:
+        assert weekdays(program, w) == [2, 4, 6]
+        for old, new in ((1, 2), (3, 4), (5, 6)):
+            assert day_of(program, w, new)["id"] == day_of(template, w, old)["id"]
+
+
+async def test_set_weekdays_never_swaps_by_accident(client, auth, copy):
+    """Mon/Wed/Fri -> Wed/Fri/Sun: chained move_day would swap Mon and Wed; one op keeps the order."""
+    template = copy
+    program = (await ok(client, auth, copy["id"], copy["version"], [sw([1, 3, 5], [3, 5, 7])]))["program"]
+    assert weekdays(program, 1) == [3, 5, 7]
+    assert day_of(program, 1, 3)["id"] == day_of(template, 1, 1)["id"]
+    assert day_of(program, 1, 7)["id"] == day_of(template, 1, 5)["id"]
+
+
+async def test_set_weekdays_skips_a_week_where_a_staying_day_holds_the_target(client, auth, copy):
+    body = await ok(client, auth, copy["id"], copy["version"], [sw([1], [3], weeks=[1, 2])])
+    (res,) = body["results"]
+    assert res["weeks"] == [] and {s["reason"] for s in res["skipped"]} == {"другое расписание"}
+
+
+async def test_set_weekdays_with_repeated_days_is_422(client, auth, copy):
+    r = await patch(client, auth, copy["id"], copy["version"], [sw([1, 3, 5], [2, 2, 6])])
+    assert r.status_code == 422, r.text

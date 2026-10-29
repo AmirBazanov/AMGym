@@ -23,6 +23,10 @@ asks again here (`respond`), in three layers against made-up numbers:
 with parse_mode=HTML (gymbot.services.tg_html): the model's bold and lists, built from its own text after the
 check passed, or the database text with its heading line bold. None = send `text` as is.
 
+A program change the user asks for or agrees to comes as the model's last line «ПРАВКА: <команда>»
+(`split_command`): it is cut off before the check and returned as `Reply.command`, and the chat handler stages
+that command as a program edit preview with «Применить» under the answer (handlers/chat_edit.send_suggested).
+
 Several questions in a row reuse the summary: `respond` keeps it per user for CONTEXT_TTL seconds
 (`ContextCache`) unless the local day changes or anything published a change for the user
 (gymbot.services.live.changes: every write from the chat, the Mini App API and MCP does). The weights set
@@ -64,6 +68,8 @@ from gymbot.services.users import active_program, get_or_create_user
 log = logging.getLogger(__name__)
 
 ANSWER_MAX = 1500  # characters sent to the chat; the prompt asks for far less
+COMMAND_MAX = 300  # characters of a suggested program edit
+_COMMAND = re.compile(r"^[\s*_•-]*правка[*_]*\s*[:：][\s*_]*(?P<cmd>.+?)[\s*_]*$", re.IGNORECASE | re.MULTILINE)
 NO_TRAINING = "Сегодня тренировки по программе нет."
 DONE_MAX = 900  # characters of the "done on the last training day" block
 ANSWER_TEMPERATURE = 0.4  # the numbers come from the summary and the check; Claude gets no temperature
@@ -232,6 +238,16 @@ async def build_context(
     return (await gather(session, user, settings, llm, tz, now_utc)).text
 
 
+def split_command(raw: str) -> tuple[str, str | None]:
+    """The model's text without its «ПРАВКА: …» line, and that command (the last one; quotes stripped)."""
+    found = list(_COMMAND.finditer(raw))
+    if not found:
+        return raw, None
+    command = found[-1]["cmd"].strip().strip("«»\"'` ").strip()
+    text = _COMMAND.sub("", raw).strip()
+    return text, (command[:COMMAND_MAX] or None)
+
+
 def _cut(text: str) -> str:
     """Plain text for Telegram (no Markdown tables, ** or #: gymbot.services.tg_format), cut to ANSWER_MAX."""
     text = plain(text)
@@ -249,7 +265,7 @@ async def answer(
     """The model's answer for the chat, unchecked; `dialog` is (question, answer) pairs, oldest first.
     Raises LLMError."""
     messages = build_answer_messages(context, question, dialog or [])
-    return _cut(await llm.complete_text(messages, temperature=ANSWER_TEMPERATURE))
+    return _cut(split_command(await llm.complete_text(messages, temperature=ANSWER_TEMPERATURE))[0])
 
 
 @dataclass
@@ -258,6 +274,7 @@ class Reply:
     layer: str  # DIRECT | LLM | RETRIED | FALLBACK
     flags: list[str] = field(default_factory=list)  # claims the check did not find in the summary
     html: str | None = None  # Telegram HTML of the same text (see the module doc)
+    command: str | None = None  # a program edit the model suggests staging (see the module doc)
 
 
 DIRECT, LLM, RETRIED, FALLBACK = "direct", "llm", "llm-retry", "fallback"
@@ -285,23 +302,24 @@ async def checked_answer(
     """The model's answer after the check (see the module doc). Raises LLMError if the first call fails."""
     dialog = dialog or []
     messages = build_answer_messages(ctx.text, question, dialog)
-    raw = await llm.complete_text(messages, temperature=ANSWER_TEMPERATURE)
+    said = await llm.complete_text(messages, temperature=ANSWER_TEMPERATURE)
+    raw, command = split_command(said)
     text = _cut(raw)
     evidence = ctx.evidence(question, dialog)
     flags = violations(text, evidence)
     if not flags:
-        return Reply(text, LLM, html=_html(raw))
+        return Reply(text, LLM, html=_html(raw), command=command)
     log.warning("diary answer: not in the summary %s, asking again", flags)
-    retry = [*messages, {"role": "assistant", "content": raw}, {"role": "user", "content": correction(flags)}]
+    retry = [*messages, {"role": "assistant", "content": said}, {"role": "user", "content": correction(flags)}]
     try:
-        raw_again = await llm.complete_text(retry, temperature=ANSWER_TEMPERATURE)
+        raw_again, command = split_command(await llm.complete_text(retry, temperature=ANSWER_TEMPERATURE))
     except LLMError as e:
         log.warning("diary answer: the regeneration failed (%s), honest fallback", e)
         return _fallback_reply(ctx, question, flags)
     again = _cut(raw_again)
     still = violations(again, evidence)
     if not still:
-        return Reply(again, RETRIED, flags, html=_html(raw_again))
+        return Reply(again, RETRIED, flags, html=_html(raw_again), command=command)
     log.warning("diary answer: still not in the summary %s, honest fallback", still)
     return _fallback_reply(ctx, question, still)
 
