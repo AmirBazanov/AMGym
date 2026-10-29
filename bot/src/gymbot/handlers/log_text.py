@@ -71,6 +71,7 @@ from gymbot.config import Settings
 from gymbot.db.models import FoodEntry, User, Workout, WorkoutSet
 from gymbot.db.session import Sessionmaker
 from gymbot.handlers import body_weight, saved_edits
+from gymbot.handlers import hub as hub_tasks
 from gymbot.handlers import products as product_cards
 from gymbot.handlers.chat_edit import send_edit, send_suggested, stage_edit
 from gymbot.handlers.chat_settings import send_staged, stage_settings
@@ -87,6 +88,7 @@ from gymbot.services.answer_intent import plan_question
 from gymbot.services.body_weight import parse_chat as parse_body_weight
 from gymbot.services.chat_edit import is_edit_command
 from gymbot.services.chat_settings import is_settings_request
+from gymbot.services.hub_tasks import is_hub_command
 from gymbot.services.programs import exercise_catalog, normalize
 from gymbot.services.tg_html import escape, send_html
 from gymbot.services.users import get_or_create_user
@@ -751,6 +753,14 @@ async def process_text(
     dialog_at = ex.at if ex is not None and _dialog_open(user_id, message.date) else None
     if await product_cards.on_text(message, text, raw, sessionmaker, dialog_at=dialog_at, prefix=prefix):
         return
+    # "добавь задачу купить билеты", "вынес мусор": the dashboard's tasks and chores, its own preview
+    # (handlers/hub.py). Consumes the message only when the model found a valid action; else it goes on.
+    if not _dialog_open(user_id, message.date) and is_hub_command(text):
+        async with keep_typing(message):
+            hub_pending = await hub_tasks.stage(message, text, raw, settings, sessionmaker, llm)
+        if hub_pending is not None:
+            await hub_tasks.send(message, hub_pending, prefix=prefix)
+            return
     # "убери французский жим из дня рук", "поставь на сгибания 30 кг": the program, its own preview
     # (handlers/chat_edit.py). Consumes the message only when the model found a valid edit; else it goes on.
     if not _dialog_open(user_id, message.date) and is_edit_command(text):

@@ -714,6 +714,19 @@ def create_app(
     def hub_error(status: int, detail: str, headers: dict[str, str]) -> JSONResponse:
         return JSONResponse({"detail": detail}, status, headers=headers)
 
+    async def hub_state_access(token: str, write_token: str, init_data: str) -> bool:
+        """The dashboard's state is the owner's: HUB_TOKEN with HUB_WRITE_TOKEN (a browser), or Telegram initData
+        of the owner (the dashboard opened from the bot, gymbot.handlers.hub)."""
+        if init_data:
+            try:
+                tg = validate_init_data(init_data, settings.bot_token)
+            except InitDataError:
+                return False
+            async with sessionmaker() as session:
+                owner = await owner_user(session, settings)
+            return owner is not None and owner.telegram_id == tg.id
+        return same(token, settings.hub_token) and same(write_token, settings.hub_write_token)
+
     if settings.hub_token:  # else no route: /api/hub and /api/hub/state answer 404 like any unknown path
 
         @app.get("/api/hub")
@@ -729,10 +742,10 @@ def create_app(
 
         @app.options("/api/hub/state", include_in_schema=False)
         async def hub_state_preflight(request: Request) -> Response:
-            # X-Hub-Write-Token (GET and PUT) and a JSON body make these non-"simple" requests: the browser asks first.
+            # X-Hub-Write-Token or X-Telegram-Init-Data and a JSON body make these non-"simple": the browser asks first.
             headers = hub_headers(request) | {
                 "Access-Control-Allow-Methods": "GET, PUT, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type, X-Hub-Write-Token",
+                "Access-Control-Allow-Headers": "Content-Type, X-Hub-Write-Token, X-Telegram-Init-Data",
                 "Access-Control-Max-Age": "600",
             }
             return Response(status_code=204, headers=headers)
@@ -742,14 +755,15 @@ def create_app(
             request: Request,
             token: Annotated[str, Query(max_length=200)] = "",
             x_hub_write_token: Annotated[str, Header()] = "",
+            x_telegram_init_data: Annotated[str, Header()] = "",
         ) -> JSONResponse:
             """The dashboard's saved state: {"version", "updated_at", "state"}; version 0 before the first save.
-            Needs X-Hub-Write-Token like PUT: HUB_TOKEN alone is public (data.js) and the state holds the
-            journal and tasks. 404 while HUB_WRITE_TOKEN is empty."""
+            Needs X-Hub-Write-Token like PUT (HUB_TOKEN alone is public in data.js and the state holds the tasks)
+            or the owner's X-Telegram-Init-Data. 404 while HUB_WRITE_TOKEN is empty."""
             headers = hub_headers(request)
             if not settings.hub_write_token:
                 return hub_error(404, "Not Found", headers)
-            if not same(token, settings.hub_token) or not same(x_hub_write_token, settings.hub_write_token):
+            if not await hub_state_access(token, x_hub_write_token, x_telegram_init_data):
                 return hub_error(403, "forbidden", headers)
             async with sessionmaker() as session:
                 user = await owner_user(session, settings)
@@ -761,13 +775,14 @@ def create_app(
             request: Request,
             token: Annotated[str, Query(max_length=200)] = "",
             x_hub_write_token: Annotated[str, Header()] = "",
+            x_telegram_init_data: Annotated[str, Header()] = "",
         ) -> JSONResponse:
             """Body {"base_version", "state"}: saved as base_version + 1 when base_version is the stored one, else
-            409 with the stored state (the dashboard merges and retries). 403 without both tokens."""
+            409 with the stored state (the dashboard merges and retries). 403 without both tokens or initData."""
             headers = hub_headers(request)
             if not settings.hub_write_token:
                 return hub_error(404, "Not Found", headers)
-            if not same(token, settings.hub_token) or not same(x_hub_write_token, settings.hub_write_token):
+            if not await hub_state_access(token, x_hub_write_token, x_telegram_init_data):
                 return hub_error(403, "forbidden", headers)
             raw = await read_capped(request, hub.STATE_MAX_BYTES)
             if raw is None:
