@@ -246,7 +246,8 @@ def create_app(
                 if not await is_allowed(session, settings, telegram_id):
                     raise HTTPException(403, "this is a personal app")
                 since = await session.scalar(select(User.web_login_since).where(User.telegram_id == telegram_id))
-            if since is not None and web_login.issued_at(x_app_token) < life_aware(since).timestamp():
+            # whole seconds on both sides: a link given in the same second right after the revoke still works
+            if since is not None and web_login.issued_at(x_app_token) < int(life_aware(since).timestamp()):
                 raise HTTPException(401, "this sign-in link was revoked: send /web to the bot again")
             return TelegramUser(id=telegram_id, name=None)
         if not x_telegram_init_data:

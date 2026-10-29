@@ -1,6 +1,7 @@
 """Sign-in from a computer browser: the /web link and X-App-Token on the API (gymbot.services.web_login)."""
 
 import time
+from datetime import UTC
 
 import httpx
 from aiogram.filters import CommandObject
@@ -65,3 +66,29 @@ async def test_revoke_all_links(tmp_path, db):
         assert (await c.get("/api/life/view", headers=old)).status_code == 401  # made before the revoke
         fresh = {"X-App-Token": wl.make_token(KEY, 42, now=time.time() + 5)}
         assert (await c.get("/api/life/view", headers=fresh)).status_code == 200
+
+
+async def test_link_given_in_the_revoke_second_works(tmp_path, db):
+    """Tokens hold whole seconds: a link made in the same second right after «/web выйти» is not revoked."""
+    from sqlalchemy import select
+
+    from gymbot.db.models import User
+
+    settings = make_settings(tmp_path, allowed_user_ids=[42])
+    app = create_app(settings, db)
+    await hw.cmd_web(message("/web выйти", user_id=42), settings, db, CommandObject(command="web", args="выйти"))
+    async with db() as s:
+        since = await s.scalar(select(User.web_login_since).where(User.telegram_id == 42))
+    assert since.microsecond == 0
+    stamp = since.replace(tzinfo=UTC).timestamp() if since.tzinfo is None else since.timestamp()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        same = {"X-App-Token": wl.make_token(KEY, 42, now=stamp + 0.9)}
+        assert (await c.get("/api/life/view", headers=same)).status_code == 200
+        before = {"X-App-Token": wl.make_token(KEY, 42, now=stamp - 1)}
+        assert (await c.get("/api/life/view", headers=before)).status_code == 401
+        async with db() as s:  # a revoke stored with microseconds (before this fix): the same second still works
+            user = await s.scalar(select(User).where(User.telegram_id == 42))
+            user.web_login_since = since.replace(microsecond=700000)
+            await s.commit()
+        assert (await c.get("/api/life/view", headers=same)).status_code == 200
+        assert (await c.get("/api/life/view", headers=before)).status_code == 401

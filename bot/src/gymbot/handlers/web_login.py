@@ -34,7 +34,7 @@ async def cmd_web(
     if tg is not None and command is not None and (command.args or "").strip().lower() in REVOKE_WORDS:
         async with sessionmaker() as session:
             user = await get_or_create_user(session, tg.id, tg.full_name)
-            user.web_login_since = datetime.now(UTC)
+            user.web_login_since = datetime.now(UTC).replace(microsecond=0)  # tokens hold whole seconds
             await session.commit()
         await message.answer(REVOKED)
         return
