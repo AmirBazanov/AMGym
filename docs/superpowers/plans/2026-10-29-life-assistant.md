@@ -135,6 +135,25 @@ API (`make_router(sessionmaker, settings, current_user: Callable[..., Awaitable[
 - `POST /api/life/{kind}` (fields) → объект; `PATCH /api/life/{kind}/{id}` → объект; `DELETE /api/life/{kind}/{id}` → 204; `POST /api/life/{kind}/{id}/done` и `/undone` → объект; `GET /api/life/notes/{id}` → с `body`; `PUT /api/life/settings`.
 - Ошибки валидации — 422 с русским текстом; чужой или удалённый id — 404.
 
+**Точная форма JSON (контракт для мини-аппа, camelCase; даты "ГГГГ-ММ-ДД", время "ЧЧ:ММ", пустое = null):**
+
+```json
+{
+  "today": "2026-10-29",
+  "settings": {"remindBefore": 30, "summaryTime": "08:00", "summaryEnabled": true},
+  "slots":     [{"id": 1, "weekday": 1, "start": "10:00", "end": null, "title": "ИЗ Математика", "area": "work", "tag": "math", "place": "Восход · куратор", "vld": "15:00", "note": null}],
+  "events":    [{"id": 1, "day": "2026-10-29", "start": "11:00", "end": null, "title": "Позаниматься HTTP-сервером на C", "area": "study", "projectId": 3, "remindBefore": null, "done": false, "note": null}],
+  "deadlines": [{"id": 1, "day": "2026-11-10", "title": "Лабораторная №1", "course": "Software Engineering", "projectId": null, "done": false}],
+  "tasks":     [{"id": 1, "title": "Обновить резюме", "tag": "работа", "projectId": null, "done": false, "doneAt": null}],
+  "chores":    [{"id": 1, "title": "Уборка", "everyDays": 7, "lastDone": "2026-10-25", "left": 3}],
+  "projects":  [{"id": 1, "name": "AMGym", "kind": "work", "status": "active", "description": "…", "link": "https://…", "nextStep": null}],
+  "notes":     [{"id": 1, "title": "Памятка по epoll", "tags": ["c"], "author": "bot", "projectId": 3, "updatedAt": "2026-10-29T10:00:00Z"}],
+  "agenda":    [{"kind": "slot", "id": 1, "title": "ИЗ Математика", "start": "10:00", "end": null, "area": "work", "place": "Восход · куратор", "done": false, "overdueDays": 0}]
+}
+```
+
+Тела `POST`/`PATCH` — те же ключи без `id` и вычисляемых (`done`, `doneAt`, `left`, `updatedAt`), например `POST /api/life/events {"day": "2026-10-30", "start": "15:00", "title": "Созвон", "area": "work"}`. `GET /api/life/notes/{id}` — объект заметки + `"body"`. `PUT /api/life/settings` — объект `settings` (частично). `POST …/{id}/done` у `chores` принимает необязательное `{"day": "…"}`.
+
 - [ ] Тесты `parse`/`validate_fields`: неизвестный вид/поле отбрасывается с заметкой; дата дальше ±400 дней, «25:00», `weekday` 8 — ошибка; `update` с несуществующим id — заметка.
 - [ ] Тесты `apply`: каждое действие на каждой таблице, мягкое удаление, `done` у chore с датой, публикация `life`.
 - [ ] Тесты API: CRUD каждого вида, 401 без initData, 403 чужой пользователь при `ALLOWED_USER_IDS`, 404 чужой id, 422 кривое поле, `view.agenda` на дату.
