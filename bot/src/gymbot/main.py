@@ -11,6 +11,7 @@ import contextlib
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import uvicorn
@@ -40,7 +41,7 @@ from gymbot.handlers import (
     voice,
 )
 from gymbot.llm.openrouter import OpenRouterClient
-from gymbot.services import baselines, live
+from gymbot.services import baselines, life, live
 from gymbot.services.access import is_allowed
 from gymbot.services.backup import backup_loop
 from gymbot.services.programs import backfill_program_meta, sync_programs
@@ -173,6 +174,11 @@ async def run() -> None:
     async with sessionmaker() as session:
         await sync_programs(session, settings.programs_dir)
         await backfill_program_meta(session, settings.programs_dir)  # day focus of templates imported before it
+    try:  # the old dashboard (data.js + hub_state) into «Дела», once; a failure must not stop the bot
+        if imported := await life.import_on_start(sessionmaker, settings, datetime.now(UTC)):
+            log.info("life: imported %d rows from the old dashboard", imported)
+    except Exception:
+        log.warning("life: import of the old dashboard failed", exc_info=True)
 
     if not settings.miniapp_dist.is_dir():
         log.warning("%s not found: run `npm run build` in miniapp/ to serve the Mini App", settings.miniapp_dist)
