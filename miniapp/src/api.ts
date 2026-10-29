@@ -1,10 +1,64 @@
-// All requests carry Telegram initData; the backend validates its HMAC with the bot token
-// before trusting the user id. Never trust initDataUnsafe on the server.
+import {
+  LIFE_PARSERS,
+  parseNote,
+  parseSettings,
+  parseView,
+  type DoneKind,
+  type LifeItems,
+  type LifeKind,
+  type LifeNote,
+  type LifeSettings,
+  type LifeView,
+} from './life'
+
+// Requests carry Telegram initData; the backend validates its HMAC with the bot token before trusting
+// the user id. Never trust initDataUnsafe on the server. Outside Telegram (a computer browser) the bot's
+// /web command gives a link `/?login=<token>`: the token is kept in localStorage and sent as X-App-Token.
 const initData: string =
   (window as unknown as { Telegram?: { WebApp?: { initData?: string } } }).Telegram?.WebApp?.initData ?? ''
 
 /** Opened from Telegram (as opposed to a plain browser preview). */
 export const inTelegram = initData.length > 0
+
+const APP_TOKEN_KEY = 'gymapp.appToken'
+
+/** Takes `?login=<token>` from the address: stores it and removes it from the URL (other params stay). */
+function takeLoginFromUrl(): void {
+  try {
+    const url = new URL(location.href)
+    const token = url.searchParams.get('login')
+    if (token == null) return
+    url.searchParams.delete('login')
+    if (token.trim()) localStorage.setItem(APP_TOKEN_KEY, token.trim())
+    // The token must not stay in the address bar, history or a shared link.
+    history.replaceState(history.state, '', url.pathname + url.search + url.hash)
+  } catch {
+    // Storage or history unavailable (private mode): the app works without the computer login.
+  }
+}
+
+function readAppToken(): string | null {
+  try {
+    return localStorage.getItem(APP_TOKEN_KEY) || null
+  } catch {
+    return null
+  }
+}
+
+if (!inTelegram) takeLoginFromUrl()
+
+/** Token of the computer login (/web in the bot); used only when there is no Telegram initData. */
+const appToken: string | null = inTelegram ? null : readAppToken()
+
+/** Requests are authenticated: opened from Telegram, or logged in from a computer with /web. */
+export const hasAuth = inTelegram || appToken != null
+
+/** Auth headers of every API request: initData inside Telegram, otherwise the /web token if there is one. */
+export function authHeaders(): Record<string, string> {
+  if (appToken) return { 'X-App-Token': appToken }
+  // Outside Telegram without a token the empty header stays: local dev with DEV_USER_ID answers to it.
+  return { 'X-Telegram-Init-Data': initData }
+}
 
 export class ApiError extends Error {
   constructor(
@@ -21,7 +75,7 @@ export async function apiWithStatus<T>(path: string, init: RequestInit = {}): Pr
     ...init,
     // Without a caller's signal a hung request would never settle: give up after API_TIMEOUT_MS.
     signal: init.signal ?? timeoutSignal(API_TIMEOUT_MS),
-    headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData, ...init.headers },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...init.headers },
   })
   if (!res.ok) throw new ApiError(res.status, `${res.status} ${await res.text()}`)
   return { status: res.status, data: (res.status === 204 ? undefined : await res.json()) as T }
@@ -304,6 +358,52 @@ export function deleteBodyWeight(date: string): Promise<void> {
   return api<void>(`/body-weight/${encodeURIComponent(date)}`, { method: 'DELETE' })
 }
 
+// ---- «Дела» (life): /api/life/*, contract in docs/superpowers/plans/2026-10-29-life-assistant.md, task 1.3.
+// Types, parsing and the rest of the logic live in life.ts. Never cached offline. ----
+
+/** An answer that does not parse (an older server, a proxy page) is a 502-like error, not a crash later. */
+function parsed<T>(value: T | null, what: string): T {
+  if (value == null) throw new ApiError(502, `502 bad ${what}`)
+  return value
+}
+
+/** The view for `date` (its agenda; the server's own "today" without it). */
+export async function getLifeView(date?: string): Promise<LifeView> {
+  return parsed(parseView(await api<unknown>(`/life/view${date ? `?date=${date}` : ''}`)), 'life view')
+}
+
+export async function createLife<K extends LifeKind>(kind: K, body: Record<string, unknown>): Promise<LifeItems[K]> {
+  const raw = await api<unknown>(`/life/${kind}`, { method: 'POST', body: JSON.stringify(body) })
+  return parsed(LIFE_PARSERS[kind](raw), kind)
+}
+
+/** Partial update: only the given keys change, null clears. 404 when gone, 422 with a Russian detail. */
+export async function updateLife<K extends LifeKind>(kind: K, id: number, body: Record<string, unknown>): Promise<LifeItems[K]> {
+  const raw = await api<unknown>(`/life/${kind}/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
+  return parsed(LIFE_PARSERS[kind](raw), kind)
+}
+
+export function deleteLife(kind: LifeKind, id: number): Promise<void> {
+  return api<void>(`/life/${kind}/${id}`, { method: 'DELETE' })
+}
+
+/** POST …/{id}/done or /undone. A chore's done takes the day it was done (the server's today without it). */
+export async function setLifeDone<K extends DoneKind>(kind: K, id: number, done: boolean, day?: string): Promise<LifeItems[K]> {
+  const init: RequestInit = { method: 'POST' }
+  if (done && day) init.body = JSON.stringify({ day })
+  const raw = await api<unknown>(`/life/${kind}/${id}/${done ? 'done' : 'undone'}`, init)
+  return parsed(LIFE_PARSERS[kind](raw), kind)
+}
+
+/** The note with its Markdown body. */
+export async function getLifeNote(id: number): Promise<LifeNote> {
+  return parsed(parseNote(await api<unknown>(`/life/notes/${id}`)), 'note')
+}
+
+export async function putLifeSettings(patch: Partial<LifeSettings>): Promise<LifeSettings> {
+  return parsed(parseSettings(await api<unknown>('/life/settings', { method: 'PUT', body: JSON.stringify(patch) })), 'settings')
+}
+
 // ---- Programs: the server is their source of truth (templates and the user's own copies). ----
 // Contract: docs/superpowers/specs/2026-10-08-program-editor-design.md, section «API». camelCase except
 // `prescription`, which keeps the program JSON keys (program.ts Prescription).
@@ -435,7 +535,7 @@ export interface ProgramPatchOut {
 export async function patchProgram(slug: string, body: ProgramPatch): Promise<{ status: number; body: unknown }> {
   const res = await fetch(`./api/programs/${encodeURIComponent(slug)}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
     signal: timeoutSignal(20_000),
   })

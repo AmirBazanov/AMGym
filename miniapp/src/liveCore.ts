@@ -13,6 +13,7 @@ export const TOPICS = [
   'weight',
   'records',
   'program',
+  'life',
 ] as const
 export type Topic = (typeof TOPICS)[number]
 
