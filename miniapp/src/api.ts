@@ -445,8 +445,9 @@ export async function getLifeNote(id: number): Promise<LifeNote> {
   return parsed(parseNote(await api<unknown>(`/life/notes/${id}`)), 'note')
 }
 
-export async function putLifeSettings(patch: Partial<LifeSettings>): Promise<LifeSettings> {
-  return parsed(parseSettings(await api<unknown>('/life/settings', { method: 'PUT', body: JSON.stringify(patch) })), 'settings')
+/** Partial settings. The saved settings when the server answers with them; null for 204 or another body. */
+export async function putLifeSettings(patch: Partial<LifeSettings>): Promise<LifeSettings | null> {
+  return parseSettings(await api<unknown>('/life/settings', { method: 'PUT', body: JSON.stringify(patch) }))
 }
 
 // ---- Programs: the server is their source of truth (templates and the user's own copies). ----
