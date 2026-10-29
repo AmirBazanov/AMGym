@@ -72,6 +72,7 @@ WEEKDAY_NAMES = ("понедельник", "вторник", "среда", "че
 # The «Дела» conversation: the model sees the last turns like a chat, and a message right after a «Дела» reply
 # («11-12 ночи», «нет, вечером», «перенеси на завтра») goes to «Дела» first (handlers/log_text.py).
 HISTORY_TURNS = 8
+REPLY_MAX = 1500  # characters of the model's answer about «Дела»
 HISTORY_TTL = timedelta(minutes=30)
 FOLLOWUP_TTL = timedelta(minutes=15)
 
@@ -111,6 +112,7 @@ class LifePending:
     question: dict | None = None  # the model's {"text", "options"} when it found nothing to do
     note_draft: NoteDraft | None = None
     preview_id: int | None = None  # the chat message of the preview: a reply to it rewrites the note draft
+    reply: str | None = None  # the model's answer when there is nothing to change («что по проектам?», «уже стоит …»)
 
     def all_acts(self) -> list[la.Act]:
         return [*self.acts, self.note_draft.act()] if self.note_draft is not None else list(self.acts)
@@ -207,6 +209,19 @@ async def _draft(acts: list[la.Act], view: life.LifeView, llm: OpenRouterClient)
     return None
 
 
+_STUDY = re.compile(r"(?<![а-яё])(?:пар[аыуе]|парам|лекци|семинар|зач[её]т|экзамен|сесси[яи])", re.IGNORECASE)
+
+
+def _study_by_words(acts: list[la.Act], text: str) -> None:
+    """A class, a lecture or an exam is study whatever the model said: he studies at the university and teaches
+    elsewhere, and a weaker model calls «пару по матанализу» work."""
+    if not _STUDY.search(text):
+        return
+    for a in acts:
+        if a.op in ("add", "update") and a.entity in ("slot", "event") and a.fields.get("area") == "work":
+            a.fields["area"] = "study"
+
+
 async def _stage(
     tg_id: int, at: datetime, text: str, raw: str, settings: Settings, sessionmaker: Sessionmaker,
     llm: OpenRouterClient,
@@ -229,15 +244,18 @@ async def _stage(
         data = await llm.complete_json(messages, prefer="actions", purpose="json")
         parsed, notes, question = la.parse(data, view, today)
         acts = [a for a in parsed if a.op not in ("write_note", "edit_note")]
+        _study_by_words(acts, text)
         draft = await _draft(parsed, view, llm)
         if len(parsed) - len(acts) > 1:
             notes.append("За раз пишу одну заметку, остальные попроси отдельно.")
         lines = la.describe(acts, view, today, now_local.strftime("%H:%M"))
-        pending = LifePending(tg_id, text, raw, acts, lines, notes, at, question, draft)
+        said = data.get("reply") if isinstance(data, dict) else None
+        reply = said.strip()[:REPLY_MAX] if isinstance(said, str) and said.strip() else None
+        pending = LifePending(tg_id, text, raw, acts, lines, notes, at, question, draft, reply=reply)
     except Exception as e:  # noqa: BLE001 - a failing «Дела» path must never cost the user a record
         log.warning("life command failed (%s)", type(e).__name__)
         return None, FAILED
-    if not pending.ready() and pending.question is None:
+    if not pending.ready() and pending.question is None and pending.reply is None:
         return None, "\n".join(pending.notes) or None
     return pending, None
 
@@ -308,6 +326,8 @@ def render(pending: LifePending) -> str:
         parts.append(_draft_text(pending.note_draft))
     if not pending.ready() and pending.question is not None:
         parts.append(pending.question["text"])
+    elif not pending.ready() and pending.reply is not None:
+        parts.append(pending.reply)
     if pending.notes:
         parts.append("\n".join(pending.notes))
     return "\n\n".join(parts)
@@ -348,8 +368,12 @@ def _store(pending: LifePending, *, replace: bool = False) -> str:
 async def send(message: Message, pending: LifePending, *, prefix: str = "", replace: bool = False) -> None:
     """The preview with «✅ Применить» («Сохранить» for a note alone), or the model's question with its options.
     `replace`: a follow-up — the user's earlier previews stop being appliable."""
-    token = _store(pending, replace=replace)
     text = render(pending)
+    if not pending.ready() and pending.question is None:  # an answer, nothing to apply: no buttons, nothing stored
+        await message.answer(prefix + text)
+        remember(pending.user_id, pending.sent_at.astimezone(UTC), "assistant", text)
+        return
+    token = _store(pending, replace=replace)
     sent = await message.answer(prefix + text, reply_markup=keyboard(token, pending))
     pending.preview_id = _message_id(sent)
     remember(pending.user_id, pending.sent_at.astimezone(UTC), "assistant", text)  # the user's clock, as `recent`

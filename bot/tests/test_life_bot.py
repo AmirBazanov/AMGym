@@ -895,3 +895,38 @@ async def test_history_expires():
     assert hl.recent(1, T0 + timedelta(minutes=14))
     assert not hl.recent(1, T0 + timedelta(minutes=16))
     assert hl.history(1, T0 + timedelta(minutes=31)) == []
+
+
+async def test_question_about_life_gets_an_answer(life_settings, db):
+    """«что по проектам?»: the «Дела» model answers from its lists — no buttons, nothing stored, no «Не понял»."""
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers.append({"actions": [], "question": None, "reply": "В работе: AMGym, Менторика. Обучение: HTTP-сервер."})
+    msg = await say("что по проектам?", llm, life_settings, db)
+    assert shown(msg) == "В работе: AMGym, Менторика. Обучение: HTTP-сервер."
+    assert msg.answer.await_args.kwargs.get("reply_markup") is None
+    assert hl.PENDING == {}
+    assert hl.recent(USER, T0)  # a follow-up («а по учёбе?») is read in this conversation
+
+
+async def test_follow_up_already_done_is_confirmed(life_settings, db):
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers += [{"kind": "life"}, life_answer(add_event(start="23:00", title=WORK_ON))]
+    msg = await say("сегодня в 11 продолжить работу над http сервером", llm, life_settings, db, at=EVENING)
+    await hl.on_apply(callback(f"lapply:{token_of(msg)}"), life_settings, db)
+    llm.answers.append({"actions": [], "question": None, "reply": "Уже стоит: сегодня в 23:00."})
+    again = await say("11-12 ночи", llm, life_settings, db, at=EVENING + timedelta(minutes=1))
+    assert shown(again) == "Уже стоит: сегодня в 23:00."  # not the parser's «Не понял … присед»
+    assert len(llm.bodies) == 3
+
+
+async def test_a_class_is_study_whatever_the_model_says(life_settings, db):
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers.append(life_answer({"op": "add", "entity": "slot", "fields": {
+        "weekday": 3, "start": "08:30", "title": "Матанализ", "area": "work"}}))
+    await say("добавь пару по матанализу каждую среду в 8:30", llm, life_settings, db)
+    await hl.on_apply(callback(f"lapply:{next(iter(hl.PENDING))}"), life_settings, db)
+    [slot] = [s for s in await rows(db, LifeSlot) if s.title == "Матанализ"]
+    assert slot.area == "study"
