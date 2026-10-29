@@ -79,7 +79,7 @@ def clean_state():
 @pytest.fixture(autouse=True)
 def no_diary_answer(monkeypatch):
     async def parser_answer(message, text, result, *args):
-        return result, None
+        return result, None, None
 
     monkeypatch.setattr(log_text, "_diary_answer", parser_answer)
 

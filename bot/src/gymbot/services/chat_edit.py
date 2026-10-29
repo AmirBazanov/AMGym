@@ -1,6 +1,7 @@
 """Program edits from the chat: "убери французский жим из дня рук", "замени сегодняшнюю тренировку на присед 3×8,
 жим лёжа 3×8 на 65 кг", "поставь на сгибания 30 кг", "поменяй
-местами руки и спину", "перенеси тренировку на завтра", "следующая неделя — делоад", "сегодня облегчённо, −20 %", "в пятницу без ног".
+местами руки и спину", "перенеси тренировку на завтра", "следующая неделя — делоад", "сегодня облегчённо, −20 %", "в пятницу без ног",
+"теперь хожу вт, чт, сб".
 
 Plan: docs/plans/2026-10-09-chat-program-control.md (stages 1–3). Flow (handlers/chat_edit.py):
 1. `is_edit_command` — a conservative regex, checked in process_text before saved_edits (a question, a past
@@ -11,7 +12,8 @@ Plan: docs/plans/2026-10-09-chat-program-control.md (stages 1–3). Flow (handle
 3. `compile_ops` resolves days (weekday, today/tomorrow, focus or the exercises of the day), exercises (only
    within that day) and scopes (weeks) into the program editor's PATCH ops (gymbot.services.program_editor)
    and weights for a day (WeightOverride). A swap or a move of days is one `move_day` op (the editor swaps
-   when the target weekday is taken); a deload is a start date for gymbot.services.deload; a lighter day
+   when the target weekday is taken); a new schedule is one `set_weekdays` op (the training days in week order
+   onto the weekdays said); `replace_day` or `add` on a named rest day first makes the day (`add_day`); a deload is a start date for gymbot.services.deload; a lighter day
    ("−20 %", "на подход меньше", "без ног") is a one-day adjustment for gymbot.services.day_adjustments, an
    input of the day plan (merged into the day's existing one; "верни как было" clears it). Ambiguity is a
    `Clarify` with buttons, never a guess.
@@ -173,6 +175,31 @@ _PROGRAM_START = re.compile(
 )
 
 
+# A new schedule without a verb: "я теперь хожу вт, чт, сб", "тренируюсь по понедельникам, средам и пятницам".
+_SCHEDULE_DAY = re.compile(
+    r"(?<!\w)(?:(?P<d1>понедельник\w*|пн)|(?P<d2>вторник\w*|вт)|(?P<d3>сред[аеуы]|средам\w*|ср)|"
+    r"(?P<d4>четверг\w*|чт)|(?P<d5>пятниц\w*|пт)|(?P<d6>суббот\w*|сб)|(?P<d7>воскресень\w*|вс))(?!\w)"
+)
+_SCHEDULE_WORD = re.compile(
+    r"(?<!\w)(?:хожу|хору|буду|тренируюсь|тренироваться|занимаюсь|заниматься|расписани\w*|график\w*|"
+    r"дни|по)(?!\w)"
+)
+MIN_SCHEDULE_DAYS = 2
+
+
+def schedule_days(norm: str) -> set[int]:
+    """Distinct weekdays (1 = Monday) named in the text, full or short ("вт", "четвергам")."""
+    return {int(k[1]) for m in _SCHEDULE_DAY.finditer(norm) for k, v in m.groupdict().items() if v}
+
+
+def _branch_schedule(norm: str) -> bool:
+    """(f) a new schedule: two or more weekdays and a schedule word, or three and more weekdays alone."""
+    if _ASKS.search(norm) or _LOG_NUMBERS.search(norm) or _KG.search(norm):
+        return False
+    days = schedule_days(norm)
+    return len(days) >= 3 or (len(days) >= MIN_SCHEDULE_DAYS and bool(_SCHEDULE_WORD.search(norm)))
+
+
 def _branch_set(norm: str) -> bool:
     m = _LEAD_NA.match(norm)
     if m is None or _LOCATIVE.search(m["word"]) or not _SETS.search(norm) or _KG.search(norm):
@@ -258,6 +285,9 @@ def is_edit_command(text: str) -> bool:
         return True
     # (d) a prescription without a verb: "на разгибания 4 подхода по 10–12"
     if _branch_set(norm):
+        return True
+    # (f) a new schedule: "я теперь хожу вт, чт, сб"
+    if _branch_schedule(norm):
         return True
     # (e) a lighter day (how the user feels is excluded above: it is wellbeing, the plan follows it itself)
     return _branch_lighter(norm)
@@ -413,6 +443,21 @@ class MoveDayA(_Action):
     scope: Scope | None = None
 
 
+class SetWeekdaysA(_Action):
+    """A new schedule («теперь хожу вт, чт, сб»): the training days of a week, in order, go to these weekdays."""
+
+    type: Literal["set_weekdays"]
+    weekdays: list[int] = Field(min_length=1, max_length=7)
+    scope: Scope | None = None
+
+    @field_validator("weekdays")
+    @classmethod
+    def _weekdays(cls, v: list[int]) -> list[int]:
+        if any(not 1 <= d <= 7 for d in v) or len(set(v)) != len(v):
+            raise ValueError("weekdays: distinct 1..7")
+        return sorted(v)
+
+
 class DeloadA(_Action):
     """A deload week (gymbot.services.deload): this week = from today, next week = from next Monday."""
 
@@ -489,7 +534,7 @@ class ClarifyA(_Action):
 
 Action = Annotated[
     ReplaceA | RemoveA | AddA | PrescribeA | ReplaceDayA | ReorderA | WeightA | SwapDaysA | MoveDayA | DeloadA
-    | AdjustDayA | ClearDayA | ClarifyA,
+    | AdjustDayA | ClearDayA | SetWeekdaysA | ClarifyA,
     Field(discriminator="type"),
 ]
 _ACTION: TypeAdapter[Any] = TypeAdapter(Action)
@@ -723,9 +768,10 @@ def prompt_context(snap: Snapshot) -> str:
     lines.append(f"Программа «{snap.name}» ({kind}), неделя {pos.week} из {len(snap.weeks)}{state}.")
     current = snap.weeks.get(pos.week, {})
     lines.append(f"Неделя {pos.week} (текущая):")
-    for wd in sorted(current):
+    for wd in range(1, 8):
         mark = " (сегодня)" if wd == today.isoweekday() and not (pos.not_started or pos.finished) else ""
-        lines.append(_day_line(current[wd]) + mark)
+        line = _day_line(current[wd]) if wd in current else f" {WEEKDAYS[wd - 1]}: отдых"
+        lines.append(line + mark)
     if pos.week + 1 in snap.weeks:
         nxt = snap.weeks[pos.week + 1]
         diff = _same_week(current, nxt)
@@ -946,13 +992,18 @@ class EditPlan:
     # resolved against the days as they are now, so they must run before the days change places.
     move_op: dict[str, Any] | None = None
     move_label: str = ""
+    more_moves: list[dict[str, Any]] = field(default_factory=list)  # set_weekdays for weeks laid out otherwise
     clarify: Clarify | None = None
     copy_name: str | None = None  # set by `preview` when a copy would be made
+    new_days: set[tuple[int, int]] = field(default_factory=set)  # (week, weekday) made by an add_day op
 
     def finish(self) -> EditPlan:
         """Put the swap or move after every other op (called once, at the end of compile_ops)."""
         if self.move_op is not None:
             self.ops.append(self.move_op)
+            self.op_labels.append(self.move_label)
+        for op in self.more_moves:
+            self.ops.append(op)
             self.op_labels.append(self.move_label)
         return self
 
@@ -974,13 +1025,19 @@ class EditPlan:
         keep = {c.line for c in self.adjusts}
         self.lines = [ln for ln in self.lines if ln.startswith((WEIGHT_LINE, DELOAD_LINE)) or ln in keep]
         self.ops, self.op_labels, self.move_notes = [], [], []
-        self.move_op = None
+        self.move_op, self.more_moves = None, []
         self.notes.insert(0, note)
 
 
 DEFAULT_SETS, DEFAULT_REPS = 3, (8, 12)
 NEW_EXERCISE = "новое упражнение, истории нет"
-SKIP_REASON = {pe.NO_ITEM: "там другое упражнение", pe.NO_DAY: "нет этого дня", pe.PAST_WEEK: "неделя уже прошла"}
+SKIP_REASON = {
+    pe.NO_ITEM: "там другое упражнение",
+    pe.NO_DAY: "нет этого дня",
+    pe.PAST_WEEK: "неделя уже прошла",
+    pe.DAY_TAKEN: "там уже есть тренировка",
+    pe.OTHER_SCHEDULE: "там другие дни",
+}
 DELOAD_AHEAD = 28  # days: the latest start of a deload set from the chat
 
 
@@ -1088,7 +1145,7 @@ def _add_op(
     plan.ops.append(_op("add", day, weeks, **fields))
     plan.op_labels.append(f"добавить {new}")
     tail = "" if known else f"; {NEW_EXERCISE}"
-    plan.lines.append(f"{day.label}: добавить {new} {text} {place} ({where}{tail})")
+    plan.lines.append(f"{day.label}: добавить {new} {text}{' ' + place if place else ''} ({where}{tail})")
     return temp
 
 
@@ -1112,7 +1169,7 @@ def _replace_day(snap: Snapshot, a: ReplaceDayA, day: DayView, plan: EditPlan, a
     for new, known, it in wanted:
         existing = next((i for i in day.items if normalize(i.name) == normalize(new)), None)
         if existing is None:
-            temp = _add_op(plan, day, weeks, where, new, known, it, position, "в конец", temp)
+            temp = _add_op(plan, day, weeks, where, new, known, it, position, "в конец" if day.items else "", temp)
             position += 1
             changed = True
         elif it.sets is not None or it.repsMin is not None or it.dropReps:
@@ -1354,6 +1411,109 @@ def _clear_day(snap: Snapshot, a: ClearDayA, plan: EditPlan) -> None:
     plan.lines.append(line)
 
 
+def _rest_day(snap: Snapshot, n: int, ref: DayRef, picks: dict[tuple[int, str], Any]) -> DayView | None:
+    """An empty day for the rest day `ref` names ("сегодня", "в субботу": a weekday in the current week),
+    None when that day has a workout or no day is named (then _pick_day resolves it as usual)."""
+    if picks.get((n, "day")) is not None or (ref.when is None and ref.weekday is None):
+        return None
+    if ref.when is not None:
+        pos = snap.position(snap.today + timedelta(days=1 if ref.when == "tomorrow" else 0))
+        if pos.not_started or pos.finished:
+            return None
+        week, weekday = pos.week, pos.weekday
+    else:
+        week, weekday = snap.week, ref.weekday or 1
+    day = snap.day(week, weekday)
+    if day is not None:
+        return None
+    return DayView(0, week, weekday, None, [])
+
+
+def _new_day(snap: Snapshot, a: AddA | ReplaceDayA, day: DayView, plan: EditPlan, all_weeks: list[int], temp: int) -> int:
+    """A workout on a rest day: an add_day op (once per day), then the exercises of `a` in it."""
+    weeks = scope_weeks(a.scope or "this_week", day.week, all_weeks)
+    where = scope_words(weeks, day.week, all_weeks)
+    when = snap.date_of(day.week, day.weekday)
+    said = _date(when) if when is not None else WEEKDAYS[day.weekday - 1]
+    if when is not None and when < snap.today:
+        raise _Need(note=f"{said.capitalize()} уже прошло — тренировку туда не добавляю.")
+    if (day.week, day.weekday) not in plan.new_days:
+        plan.new_days.add((day.week, day.weekday))
+        plan.ops.append(_op("add_day", day, weeks))
+        plan.op_labels.append(f"тренировка {WEEKDAYS[day.weekday - 1]}")
+        plan.lines.append(f"{said.capitalize()}: тренировка вместо отдыха ({where})")
+    if isinstance(a, ReplaceDayA):
+        return _replace_day(snap, a, day, plan, all_weeks, temp)
+    new, known = _canonical(snap, a.name)
+    return _add_op(plan, day, weeks, where, new, known, a, pe.MAX_ITEMS + 1, "", temp)
+
+
+def _layout(snap: Snapshot, week: int) -> list[int]:
+    """The training weekdays of a program week."""
+    return [wd for wd, d in sorted(snap.weeks.get(week, {}).items()) if d.items]
+
+
+def _days(weekdays: list[int] | tuple[int, ...]) -> str:
+    return "/".join(WEEKDAYS[wd - 1] for wd in weekdays)
+
+
+def _schedule(snap: Snapshot, a: SetWeekdaysA, plan: EditPlan) -> None:
+    """«теперь хожу вт, чт, сб»: each week's training days, in order, onto the weekdays said, from this week to
+    the end unless a scope is said; one set_weekdays op per layout of the weeks (a week moved earlier keeps its
+    own days), a week with another number of days stays and is named. Runs after every other op (move_op)."""
+    if plan.move_op is not None:
+        raise _Need(note="За раз меняю расписание или переношу один день: второе — отдельной командой.")
+    week = snap.week
+    current = _layout(snap, week)
+    if not current:
+        raise _Need(note="На этой неделе в программе нет тренировок.")
+    old = _days(current)
+    if len(a.weekdays) != len(current):
+        raise _Need(
+            note=f"В программе {len(current)} трен. в неделю ({old}), а дней названо {len(a.weekdays)}. "
+            f"Назови {len(current)} дня, например «тренируюсь {old}»."
+        )
+    all_weeks = snap.all_weeks()
+    weeks = scope_weeks(a.scope or "from_this_week", week, all_weeks)
+    groups: dict[tuple[int, ...], list[int]] = {}
+    for w in weeks:
+        groups.setdefault(tuple(_layout(snap, w)), []).append(w)
+    target = tuple(a.weekdays)
+    new = _days(a.weekdays)
+    ops = []
+    for layout, ws in groups.items():
+        if layout == target:
+            continue
+        if len(layout) != len(target):
+            plan.notes.append(f"{_week_words(ws).capitalize()}: {len(layout)} трен. в неделю, расписание там не меняю.")
+            continue
+        ops.append({
+            "op": "set_weekdays", "week": ws[0], "weekday": layout[0], "weeks": ws,
+            "fromWeekdays": list(layout), "toWeekdays": list(target),
+        })
+        plan.lines.append(f"Расписание: {_days(layout)} → {new} ({scope_words(ws, week, all_weeks)})")
+    if not ops:
+        plan.notes.append(f"Расписание уже такое: {new}.")
+        return
+    plan.move_op, plan.more_moves, plan.move_label = ops[0], ops[1:], "расписание"
+    if tuple(current) == target:
+        return
+    for src, dst in zip(current, a.weekdays, strict=True):
+        day = snap.day(week, src)
+        assert day is not None
+        d = snap.date_of(week, dst)
+        mark = " — сегодня" if d == snap.today else ""
+        plan.lines.append(f"{_date(d) if d else WEEKDAYS[dst - 1]}: {day.title}{mark}")
+        if day.id in snap.done and src != dst:
+            plan.move_notes.append(f"{day.title} уже отмечен ✓ — отметка переедет вместе с днём.")
+        elif d is not None and d < snap.today and day.id not in snap.done and src != dst:
+            plan.move_notes.append(f"{day.title} на этой неделе окажется на {_date(d)} — этот день уже прошёл.")
+
+
+def _week_words(weeks: list[int]) -> str:
+    return f"неделя {weeks[0]}" if len(weeks) == 1 else f"недели {format_weeks(weeks)}"
+
+
 def _slot(
     snap: Snapshot,
     n: int,
@@ -1473,6 +1633,12 @@ def compile_ops(snap: Snapshot, actions: list[Any], picks: dict[tuple[int, str],
                 continue
             if isinstance(a, SwapDaysA | MoveDayA):
                 _move(snap, n, a, plan, picks)
+                continue
+            if isinstance(a, SetWeekdaysA):
+                _schedule(snap, a, plan)
+                continue
+            if isinstance(a, AddA | ReplaceDayA) and (rest := _rest_day(snap, n, a.day, picks)) is not None:
+                temp = _new_day(snap, a, rest, plan, all_weeks, temp)
                 continue
             said = getattr(a, "exercise", None)
             about = said or getattr(a, "name", None) or (a.order[0] if isinstance(a, ReorderA) else None)
@@ -1610,15 +1776,23 @@ async def preview(session: AsyncSession, user: User, up: UserProgram, plan: Edit
 async def _move_overrides(
     session: AsyncSession, user_id: int, started_on: date, ops: list[dict[str, Any]], outcome: pe.Outcome
 ) -> None:
-    """Day weights (WeightOverride, by date) follow the days a move_day moved: the moved day's exercises from
+    """Day weights (WeightOverride, by date) follow the days a move_day or set_weekdays moved: the moved day's exercises from
     its old date to the new one and, in a swap, the other day's back. A weight already set for that exercise
     on the target date stays (the moved one is dropped)."""
     program = outcome.program
     moves: list[tuple[date, date, set[int]]] = []  # from, to, exercises of the day that moved
     for n, op in enumerate(ops):
-        if op.get("op") != "move_day":
+        if op.get("op") not in ("move_day", "set_weekdays"):
             continue
         result = next((r for r in outcome.results if r.op == n), None)
+        if op["op"] == "set_weekdays":
+            for w in result.weeks if result is not None else []:
+                for src, dst in zip(op["fromWeekdays"], op["toWeekdays"], strict=True):
+                    a, b = date_of(started_on, w, src), date_of(started_on, w, dst)
+                    day = next((d for pw in program.weeks if pw.number == w for d in pw.days if d.weekday == dst), None)
+                    if src != dst and a is not None and b is not None and day is not None:
+                        moves.append((a, b, {i.exercise_id for i in day.items}))
+            continue
         for w in result.weeks if result is not None else []:
             a, b = date_of(started_on, w, op["weekday"]), date_of(started_on, w, op["toWeekday"])
             if a is None or b is None:

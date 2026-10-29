@@ -14,7 +14,7 @@ In the same transaction:
 Template item ids in the request are translated to the copy's items (`Fork.items`).
 
 Edits (`apply_ops`), in order, each seeing the previous ones: replace, prescribe, add, remove, reorder,
-move_day.
+move_day, add_day, set_weekdays.
 - `week`/`weekday` name the source day; `itemId` is a ProgramItem.id of that day or the `tempId` of an
   `add` earlier in the request (the item it made in the source week).
 - `weeks` (optional) are all the weeks to change and must include `week`; without it only `week` changes.
@@ -25,6 +25,14 @@ move_day.
   at another Exercise, found by name or alias (get_or_create_exercise) or created. ProgramDay rows are never
   deleted (workouts reference them); ProgramItem rows may be.
 - One exercise at most once per day, 1..20 exercises per day, prescriptions within the limits below.
+- `add_day` makes an empty day on a rest weekday (a workout on a day the program has none: "замени сегодняшнюю
+  тренировку на …" on a rest day); the same request must add its exercises, a day left empty is an EditError.
+  A week where the weekday is taken or already past is skipped.
+- `set_weekdays` moves the days on `fromWeekdays` to the `toWeekdays` at the same places, all at once (a new
+  schedule: Mon/Wed/Fri -> Tue/Thu/Sat), so no pair is swapped by accident. A week whose days are not exactly
+  `fromWeekdays` (laid out differently: a half-moved schedule would be worse than none) is skipped; days of a
+  past week never move. Like `move_day`, only
+  `ProgramDay.weekday` changes. Neither op needs an existing day at `week`/`weekday`.
 - `move_day` moves the day to `toWeekday`; a day already there takes the source's weekday (a swap). Only
   `ProgramDay.weekday` changes: the row keeps its id, items, `focus` and `base_day_id`, so the workouts linked
   to it (the ✓ of the current week) move with it, a workout in progress stays on its `programDayId`, and
@@ -93,6 +101,8 @@ LAST_ITEM = "последнее упражнение дня"
 DAY_FULL = f"в дне уже {MAX_ITEMS} упражнений"
 OTHER_SET = "другой набор упражнений"
 PAST_WEEK = "неделя уже прошла"
+DAY_TAKEN = "в этот день уже есть тренировка"
+OTHER_SCHEDULE = "другое расписание"
 
 
 class EditError(Exception):
@@ -164,9 +174,24 @@ class MoveDayOp(_DayOp):
     toWeekday: int
 
 
+class AddDayOp(_DayOp):
+    op: Literal["add_day"]
+    focus: str | None = Field(default=None, max_length=64)
+
+
+class SetWeekdaysOp(_DayOp):
+    """`weekday` is ignored (any of `fromWeekdays`); the days move pairwise fromWeekdays[k] -> toWeekdays[k]."""
+
+    op: Literal["set_weekdays"]
+    fromWeekdays: list[int] = Field(min_length=1, max_length=7)
+    toWeekdays: list[int] = Field(min_length=1, max_length=7)
+
+
 Op = Annotated[
-    ReplaceOp | PrescribeOp | AddOp | RemoveOp | ReorderOp | MoveDayOp, Field(discriminator="op")
+    ReplaceOp | PrescribeOp | AddOp | RemoveOp | ReorderOp | MoveDayOp | AddDayOp | SetWeekdaysOp,
+    Field(discriminator="op"),
 ]
+NO_SOURCE_OPS = (AddDayOp, SetWeekdaysOp)  # ops that do not edit an existing day at week/weekday
 _OPS: TypeAdapter[Any] = TypeAdapter(Op)
 
 
@@ -393,6 +418,7 @@ class _Ctx:
     items: dict[int, int]  # template item id -> copy item id (a fork in this request)
     current_week: int  # the program week of `today` (move_day never touches earlier weeks)
     temp: dict[str, int] = field(default_factory=dict)  # tempId -> item id in the source week
+    new_days: list[ProgramDay] = field(default_factory=list)  # made by add_day: must get exercises
 
     def item(self, day: ProgramDay, ref: int | str) -> ProgramItem:
         if isinstance(ref, str):
@@ -586,6 +612,63 @@ async def _move_day(ctx: _Ctx, op: MoveDayOp, src: ProgramDay, weeks: list[int],
         result.weeks.append(w)
 
 
+def _week(ctx: _Ctx, number: int) -> ProgramWeek | None:
+    return next((pw for pw in ctx.program.weeks if pw.number == number), None)
+
+
+async def _add_day(ctx: _Ctx, op: AddDayOp, src: ProgramDay | None, weeks: list[int], result: OpResult) -> None:
+    if op.week < ctx.current_week:
+        raise EditError(f"Неделя {op.week} уже прошла, добавлять в неё нельзя.")
+    if ctx.day(op.week, op.weekday) is not None:
+        raise EditError(f"В неделе {op.week} уже есть тренировка: {WEEKDAY_TITLES[op.weekday]}.")
+    for w in weeks:
+        pw = _week(ctx, w)
+        if pw is None:
+            continue
+        if w < ctx.current_week:
+            _skip(result, w, PAST_WEEK)
+            continue
+        if ctx.day(w, op.weekday) is not None:
+            _skip(result, w, DAY_TAKEN)
+            continue
+        day = ProgramDay(weekday=op.weekday, focus=op.focus, items=[])
+        pw.days.append(day)
+        pw.days.sort(key=lambda d: d.weekday)
+        ctx.new_days.append(day)
+        result.weeks.append(w)
+    await ctx.session.flush()
+
+
+async def _set_weekdays(
+    ctx: _Ctx, op: SetWeekdaysOp, src: ProgramDay | None, weeks: list[int], result: OpResult
+) -> None:
+    moves = list(zip(op.fromWeekdays, op.toWeekdays, strict=False))
+    if len(op.fromWeekdays) != len(op.toWeekdays):
+        raise EditError("Дней «откуда» и «куда» должно быть поровну.")
+    every = [*op.fromWeekdays, *op.toWeekdays]
+    if any(not 1 <= d <= 7 for d in every):
+        raise EditError("День недели должен быть от 1 до 7.")
+    if len(set(op.fromWeekdays)) != len(moves) or len(set(op.toWeekdays)) != len(moves):
+        raise EditError("Дни недели в расписании не должны повторяться.")
+    if all(a == b for a, b in moves):
+        raise EditError("Расписание уже такое.")
+    for w in weeks:
+        pw = _week(ctx, w)
+        if pw is None:
+            continue
+        if w < ctx.current_week:
+            _skip(result, w, PAST_WEEK)
+            continue
+        by_weekday = {d.weekday: d for d in pw.days}
+        if set(by_weekday) != set(op.fromWeekdays):
+            _skip(result, w, OTHER_SCHEDULE)
+            continue
+        for a, b in moves:
+            by_weekday[a].weekday = b
+        pw.days.sort(key=lambda d: d.weekday)
+        result.weeks.append(w)
+
+
 _HANDLERS = {
     ReplaceOp: _replace,
     PrescribeOp: _prescribe,
@@ -593,6 +676,8 @@ _HANDLERS = {
     RemoveOp: _remove,
     ReorderOp: _reorder,
     MoveDayOp: _move_day,
+    AddDayOp: _add_day,
+    SetWeekdaysOp: _set_weekdays,
 }
 
 
@@ -612,12 +697,14 @@ async def apply_ops(
     for n, op in enumerate(ops):
         weeks = _targets(op, program)
         src = ctx.day(op.week, op.weekday)
-        if src is None:
+        if src is None and not isinstance(op, NO_SOURCE_OPS):
             raise EditError(f"В неделе {op.week} нет тренировки: {WEEKDAY_TITLES[op.weekday]}.")
         result = OpResult(op=n, weeks=[], skipped=[])
         await _HANDLERS[type(op)](ctx, op, src, weeks, result)
         result.weeks.sort()
         results.append(result)
+    if any(not d.items for d in ctx.new_days):
+        raise EditError("В новом дне нет ни одного упражнения.")
     await session.flush()
     return results
 

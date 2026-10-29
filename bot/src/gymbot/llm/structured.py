@@ -251,6 +251,12 @@ class _EditClearDay(BaseModel):
     day: _EditDay
 
 
+class _EditSetWeekdays(BaseModel):
+    type: Literal["set_weekdays"]
+    weekdays: list[int]
+    scope: _EditScope
+
+
 class _EditClarify(BaseModel):
     type: Literal["clarify"]
     question: str
@@ -270,6 +276,7 @@ class EditAnswer(BaseModel):
         | _EditDeload
         | _EditAdjustDay
         | _EditClearDay
+        | _EditSetWeekdays
         | _EditClarify
     ]
     summary: str

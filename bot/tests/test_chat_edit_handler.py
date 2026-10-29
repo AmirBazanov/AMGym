@@ -64,7 +64,7 @@ def clock(monkeypatch):
 @pytest.fixture(autouse=True)
 def no_diary_answer(monkeypatch):
     async def parser_answer(message, text, result, *args):
-        return result, None
+        return result, None, None
 
     monkeypatch.setattr(log_text, "_diary_answer", parser_answer)
 
@@ -608,3 +608,53 @@ async def test_replace_todays_workout_shows_the_preview_and_applies(settings, db
         (TODAY, "жим лёжа"): 65.0, (TODAY, "тяга вертикального блока"): 60.0, (TODAY, "румынская тяга"): 75.0,
     }
     assert published[0][1:] == ("program", "plan", "state")
+
+
+# ---- the edit the diary answer suggested («ПРАВКА: …»), incidents of 27–29.10 ----
+
+
+async def test_suggested_command_gets_a_preview_with_apply_without_the_routing_regex(settings, db, llm):
+    """«так добавь»: the diary answer's command reaches the edit model even though the text never would."""
+    llm.answers.append({"actions": [{
+        "type": "replace_day", "day": {"weekday": None, "focus": None, "when": "tomorrow"},
+        "items": [{"name": "сгибания с гантелями на бицепс с супинацией", "sets": 4, "repsMin": 8,
+                   "repsMax": None, "dropReps": None, "weight_kg": None}], "scope": None,
+    }], "summary": ""})
+    msg = message("так добавь", at=T0)  # Friday: tomorrow is a rest day
+    await hce.send_suggested(msg, "замени завтрашнюю тренировку на сгибания с супинацией 4×8", "так добавь",
+                             settings, db, llm.client)
+    assert llm.edit_calls() == 1
+    assert "тренировка вместо отдыха" in shown(msg)
+    token = token_of(msg)
+    assert buttons(msg) == [f"eapply:{token}", f"edrop:{token}"]
+    await hce.apply_edit(callback(f"eapply:{token}"), settings, db)
+    assert names(await active_snapshot(db), weekday=6) == ["сгибания с гантелями на бицепс с супинацией"]
+
+
+async def test_suggested_command_the_model_cannot_do_is_said_honestly(settings, db, llm):
+    llm.answers.append({"actions": [], "summary": ""})
+    msg = message("давай", at=T0)
+    await hce.send_suggested(msg, "переименуй программу", "давай", settings, db, llm.client)
+    assert shown(msg) == hce.NOT_SUPPORTED.format(command="переименуй программу")
+    assert hce.EDITS == {}
+
+
+async def test_new_schedule_from_the_chat_previews_and_applies(settings, db, llm):
+    """Incident 29.10: «Я теперь хору вторник четверг суббота» got «дни недели бот не переставляет»."""
+    llm.answers.append({"actions": [{"type": "set_weekdays", "weekdays": [2, 4, 6], "scope": None}], "summary": ""})
+    msg = await run("Я теперь хору вторник четверг суббота", settings, db, llm)
+    assert llm.edit_calls() == 1 and llm.parser_calls() == 0
+    assert "Расписание: пн/ср/пт → вт/чт/сб (все недели)" in shown(msg)
+    await hce.apply_edit(callback(f"eapply:{token_of(msg)}"), settings, db)
+    snap = await active_snapshot(db)
+    assert sorted(snap.weeks[1]) == [2, 4, 6] and sorted(snap.weeks[8]) == [2, 4, 6]
+
+
+async def test_suggested_command_on_an_error_says_try_again(settings, db, llm, monkeypatch):
+    async def broken(*args):
+        raise RuntimeError("model down")
+
+    monkeypatch.setattr(hce, "_ask_model", broken)
+    msg = message("давай", at=T0)
+    await hce.send_suggested(msg, "сделай сегодня день рук", "давай", settings, db, llm.client)
+    assert shown(msg) == hce.SUGGESTED_FAILED.format(command="сделай сегодня день рук")

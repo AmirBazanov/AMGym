@@ -26,7 +26,7 @@ def clean(monkeypatch):
     monkeypatch.setattr(hse, "utcnow", lambda: T0 + timedelta(minutes=5))
 
     async def parser_answer(message, text, result, *args):
-        return result, None
+        return result, None, None
 
     monkeypatch.setattr(log_text, "_diary_answer", parser_answer)
     yield

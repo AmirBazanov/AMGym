@@ -43,7 +43,7 @@ def kinds(food: ParsedFood) -> set[tuple[str, bool]]:
 @pytest.fixture(autouse=True)
 def clean_state(monkeypatch):
     async def parser_answer(message, text, result, *args):
-        return result, None
+        return result, None, None
 
     monkeypatch.setattr(log_text, "_diary_answer", parser_answer)
     stores = (
