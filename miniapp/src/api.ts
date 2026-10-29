@@ -22,18 +22,20 @@ export const inTelegram = initData.length > 0
 
 const APP_TOKEN_KEY = 'gymapp.appToken'
 
-/** Takes `?login=<token>` from the address: stores it and removes it from the URL (other params stay). */
-function takeLoginFromUrl(): void {
+/**
+ * `?login=<token>` of this page load, removed from the address at once (history.replaceState, other params
+ * and the hash stay): the token must not stay in the address bar, the history or a shared link.
+ */
+function takeLoginParam(): string | null {
   try {
     const url = new URL(location.href)
     const token = url.searchParams.get('login')
-    if (token == null) return
+    if (token == null) return null
     url.searchParams.delete('login')
-    if (token.trim()) localStorage.setItem(APP_TOKEN_KEY, token.trim())
-    // The token must not stay in the address bar, history or a shared link.
     history.replaceState(history.state, '', url.pathname + url.search + url.hash)
+    return token.trim() || null
   } catch {
-    // Storage or history unavailable (private mode): the app works without the computer login.
+    return null
   }
 }
 
@@ -45,13 +47,56 @@ function readAppToken(): string | null {
   }
 }
 
-if (!inTelegram) takeLoginFromUrl()
+function writeAppToken(token: string | null): void {
+  try {
+    if (token) localStorage.setItem(APP_TOKEN_KEY, token)
+    else localStorage.removeItem(APP_TOKEN_KEY)
+  } catch {
+    // Storage unavailable (private mode): the app works without the computer login.
+  }
+}
+
+// Login CSRF guard: a foreign link must not silently replace a login. Inside Telegram `?login` is ignored
+// (initData decides who it is). A first login is stored, and the app shows whose it is (freshLogin). A link
+// with another token than the stored one waits for the user's «Войти по новой ссылке?» (takePendingLogin).
+const loginParam = takeLoginParam()
+let pendingLogin: string | null = null
+if (!inTelegram && loginParam) {
+  const stored = readAppToken()
+  if (!stored || stored === loginParam) writeAppToken(loginParam)
+  else pendingLogin = loginParam
+}
 
 /** Token of the computer login (/web in the bot); used only when there is no Telegram initData. */
 const appToken: string | null = inTelegram ? null : readAppToken()
 
 /** Requests are authenticated: opened from Telegram, or logged in from a computer with /web. */
 export const hasAuth = inTelegram || appToken != null
+
+/** Logged in from a computer with the /web token (not in Telegram). */
+export const webLogin = !inTelegram && appToken != null
+
+/** This page load stored the token from a /web link: show whose login it is, so a foreign link is seen. */
+export const freshLogin = webLogin && loginParam === appToken
+
+/** A /web link with a token other than the stored one; returned once. Confirm, then switchAppLogin. */
+export function takePendingLogin(): string | null {
+  const t = pendingLogin
+  pendingLogin = null
+  return t
+}
+
+/** Replace the computer login with `token` and reload (the store and live updates start from scratch). */
+export function switchAppLogin(token: string): void {
+  writeAppToken(token)
+  location.reload()
+}
+
+/** Forget the computer login and reload: «Открой /web в боте» again. */
+export function logoutAppLogin(): void {
+  writeAppToken(null)
+  location.reload()
+}
 
 /** Auth headers of every API request: initData inside Telegram, otherwise the /web token if there is one. */
 export function authHeaders(): Record<string, string> {
