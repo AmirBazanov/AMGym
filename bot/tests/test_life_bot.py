@@ -190,6 +190,29 @@ async def test_study_plan_preview_apply_and_stale(life_settings, db, published):
     assert len(await rows(db, LifeEvent)) == 1
 
 
+async def test_apply_failure_answers_and_never_writes_twice(life_settings, db, monkeypatch):
+    """A database error in «Применить» (IntegrityError and the like): the tap is answered, nothing is written and
+    the preview is not put back, so a second tap cannot write it twice."""
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers.append(life_answer(add_event()))
+    msg = await say("в учёбу добавь сегодня в 11 позаниматься", llm, life_settings, db)
+    token = token_of(msg)
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("db is gone")
+
+    monkeypatch.setattr(hl.life, "apply", broken)
+    cb = callback(f"lapply:{token}")
+    await hl.on_apply(cb, life_settings, db)
+    assert cb.answer.await_args.args[0] == hl.SAVE_FAILED == "Не получилось сохранить, попробуй ещё раз"
+    cb.message.edit_text.assert_not_awaited()
+    assert token not in hl.PENDING and await rows(db, LifeEvent) == []
+    again = callback(f"lapply:{token}")
+    await hl.on_apply(again, life_settings, db)
+    assert again.answer.await_args.args[0] == hl.STALE
+
+
 async def test_restart_or_ttl_is_stale(life_settings, db, monkeypatch):
     await owner(db)
     llm = FakeLLM(life_settings)

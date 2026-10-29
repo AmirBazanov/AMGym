@@ -55,6 +55,7 @@ NOT_UNDERSTOOD = (
     "на C», «добавь задачу купить билеты» или «вынес мусор»."
 )
 FAILED = "Не получилось разобрать, попробуй ещё раз чуть позже."
+SAVE_FAILED = "Не получилось сохранить, попробуй ещё раз"
 NOT_OWNER = "«Дела» ведёт только владелец бота."
 SUGGESTED_FAILED = "Не получилось подготовить изменение в делах («{command}»), напиши его сам."
 DRAFT_HINT = "Пока не сохранил, можно поправить словами: «добавь пример», «короче»."
@@ -398,7 +399,12 @@ async def on_apply(cb: CallbackQuery, settings: Settings, sessionmaker: Sessionm
         if owner is None or owner.telegram_id != pending.user_id:
             await cb.answer(STALE, show_alert=True)
             return
-        done = await life.apply(session, owner, pending.all_acts(), now, today=local_day(now, settings))
+        try:
+            done = await life.apply(session, owner, pending.all_acts(), now, today=local_day(now, settings))
+        except Exception as e:  # noqa: BLE001 - the tap gets an answer; the preview stays taken (no double write)
+            log.warning("«Дела» apply failed (%s)", type(e).__name__)
+            await cb.answer(SAVE_FAILED, show_alert=True)
+            return
     log.info("«Дела» from the chat %r: %s", pending.raw, [(a.op, a.entity) for a in pending.all_acts()])
     await cb.answer("Готово")
     if cb.message:
