@@ -140,8 +140,13 @@ class SettingsOut(BaseModel):
     summaryEnabled: bool
 
 
+class ViewUserOut(BaseModel):
+    name: str | None  # who is signed in (the Mini App shows it after a /web sign-in)
+
+
 class ViewOut(BaseModel):
     today: date
+    user: ViewUserOut
     settings: SettingsOut
     slots: list[SlotOut]
     events: list[EventOut]
@@ -215,7 +220,7 @@ def row_out(kind: str, row: Any, today: date) -> dict[str, Any]:
 
 def view_out(view: life.LifeView, user: User, day: date) -> ViewOut:
     return ViewOut(
-        today=view.today, settings=settings_out(user),
+        today=view.today, user=ViewUserOut(name=user.name), settings=settings_out(user),
         slots=[slot_out(r) for r in view.slots], events=[event_out(r) for r in view.events],
         deadlines=[deadline_out(r) for r in view.deadlines], tasks=[task_out(r) for r in view.tasks],
         chores=[chore_out(r, view.today) for r in view.chores], projects=[project_out(r) for r in view.projects],

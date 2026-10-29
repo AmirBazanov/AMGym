@@ -64,7 +64,8 @@ async def test_empty_view(client, auth, today):
     r = await client.get("/api/life/view", headers=auth)
     assert r.status_code == 200
     assert r.json() == {
-        "today": today.isoformat(), "settings": {"remindBefore": 30, "summaryTime": "08:00", "summaryEnabled": True},
+        "today": today.isoformat(), "user": {"name": "Amir"},
+        "settings": {"remindBefore": 30, "summaryTime": "08:00", "summaryEnabled": True},
         "slots": [], "events": [], "deadlines": [], "tasks": [], "chores": [], "projects": [], "notes": [],
         "agenda": [],
     }
