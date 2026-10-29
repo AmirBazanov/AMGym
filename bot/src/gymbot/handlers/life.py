@@ -45,6 +45,7 @@ from gymbot.services import life_actions as la
 from gymbot.services.access import owner_user
 from gymbot.services.chat_edit import is_edit_command
 from gymbot.services.chat_settings import is_settings_request
+from gymbot.services.life_gate import GYM_WORDS as _GYM
 from gymbot.services.life_gate import is_life_command
 
 log = logging.getLogger(__name__)
@@ -336,14 +337,6 @@ _WRITING = re.compile(
     re.IGNORECASE,
 )
 _AMOUNT = re.compile(r"\d+\s*(?:г|гр|грамм\w*|кг|шт\w*|ккал|мл|раз|подход\w*)(?![а-яё])", re.IGNORECASE)
-# Gym words: «замени жим на гантели» is about the program, whatever the edit gate thinks of it.
-_GYM = re.compile(
-    r"жим|присед|тяг[аиуе]|подтяг|отжим|сгибан|разгибан|выпад|упражнен|трениров|программ|подход|гантел|штанг|"
-    r"тренаж|(?<![а-яё])зал(?![а-яё])|(?<![а-яё])(?:день|дня|дне)\s+(?:рук|ног|спин|груд|плеч)",
-    re.IGNORECASE,
-)
-
-
 def is_rewrite(text: str, today: date) -> bool:
     """An instruction for the open draft said without replying to it: an editing verb with a word naming the
     note («а теперь убери из памятки про select», «замени в памятке пример на питон»), or a pure writing

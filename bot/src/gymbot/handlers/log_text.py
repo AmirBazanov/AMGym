@@ -86,9 +86,9 @@ from gymbot.services import products as pr
 from gymbot.services.answer_intent import classify as classify_question
 from gymbot.services.answer_intent import plan_question
 from gymbot.services.body_weight import parse_chat as parse_body_weight
-from gymbot.services.chat_edit import is_edit_command
+from gymbot.services.chat_edit import FOOD_WORDS, WELLBEING_WORDS, is_edit_command
 from gymbot.services.chat_settings import is_settings_request
-from gymbot.services.life_gate import is_life_command
+from gymbot.services.life_gate import GYM_WORDS, SCHEDULE_WORDS, is_life_command
 from gymbot.services.programs import exercise_catalog, normalize
 from gymbot.services.tg_html import escape, send_html
 from gymbot.services.users import get_or_create_user
@@ -567,6 +567,25 @@ _RECORD_VERB = re.compile(
 )
 _RECORD_NUMBERS = re.compile(r"\d+\s*(?:на|x|х|×|\*|по|г|гр|грамм\w*|кг|шт\w*|мл)(?![а-яa-z])|\d+\s*подход")
 
+_WEIGH_IN = re.compile(r"(?<!\w)(?:вес|вешу|взвесил\w*)\s*:?\s*\d")  # inside a longer message too: «уборка, вес 84.6»
+
+
+def _diary_like(text: str) -> bool:
+    """Whether a message may be a gym diary record (food, sets, wellbeing, a weigh-in) or a program edit. Then the
+    «Дела» model is not asked first, even with its quick words («между парами съел шаурму», «после пары сходил в
+    зал, жим 80 на 8», «перенеси тренировку на пару дней»): an action it found would take the message and the
+    record would be lost. The parser gets it, and its kind="life" still reaches «Дела». «сделал» alone is not a
+    sign («сделал уборку»): a workout said that way has gym words or numbers. Nor is a program-edit look with the
+    schedule's words («перенеси урок с понедельника на вторник»)."""
+    t = normalize(text)
+    verb = _RECORD_VERB.search(t)
+    return bool(
+        GYM_WORDS.search(text) or _RECORD_NUMBERS.search(t) or (verb and not verb.group().startswith("сделал"))
+        or FOOD_WORDS.search(t) or WELLBEING_WORDS.search(t) or _WEIGH_IN.search(t)
+        or parse_body_weight(text) is not None
+        or (is_edit_command(text) and not SCHEDULE_WORDS.search(text))
+    )
+
 
 def _factual_question(text: str, result: ParseResult, prev: Exchange | None) -> bool:
     """Whether a message the parser did not take as a question still gets the diary answer from the database
@@ -775,8 +794,9 @@ async def process_text(
         return
     # "в учёбу добавь завтра в 11 …", "добавь задачу купить билеты", "вынес мусор": «Дела», their own preview
     # (handlers/life.py). Consumes the message only when the model found an action or asks a question; else it
-    # goes on ("купил продукты на ужин: курица 300 г" is food).
-    life_asked = not _dialog_open(user_id, message.date) and is_life_command(text)
+    # goes on. A message that may be a diary record is never asked here ("купил продукты на ужин: курица 300 г"
+    # is food): the parser's kind="life" brings it to «Дела» below.
+    life_asked = not _dialog_open(user_id, message.date) and is_life_command(text) and not _diary_like(text)
     if life_asked:
         async with keep_typing(message):
             life_pending = await life_chat.stage(message, text, raw, settings, sessionmaker, llm)

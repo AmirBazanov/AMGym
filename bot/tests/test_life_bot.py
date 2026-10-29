@@ -122,14 +122,23 @@ def is_life_request(body: dict) -> bool:
 # ---- the quick words ----
 
 
+# Diary records and program edits with words that once asked the «Дела» model first (review of 2026-10-29).
+DIARY_WITH_LIFE_LOOKS = (
+    "на завтрак пара яиц и тост", "пара бананов", "после пары сходил в зал, жим 80 на 8", "между парами съел шаурму",
+    "урок бокса 60 минут", "запланируй тренировку ног на завтра", "хочу позаниматься в зале вечером",
+    "подними жим на пару кг", "перенеси тренировку на пару дней",
+)
+
+
 @pytest.mark.parametrize("text", [
     "В учёбу добавь сегодня в 11 позаниматься HTTP-сервером на C", "добавь задачу купить билеты",
     "в дела: позвонить маме", "закрой задачу про резюме", "вынес мусор", "сделал уборку", "убрался дома",
     "постирал вчера", "закупился продуктами", "оплатил коммуналку", "туду: код", "дедлайн по лабе 10 ноября",
     "экзамен по матанализу в пятницу", "зачёт перенесли", "надо сдать лабу", "запиши заметку: идея",
     "составь памятку по epoll", "конспект про сокеты", "перенеси урок с понедельника на вторник",
-    "пара по вышмату отменилась", "после пары зайти в деканат", "поменяй расписание", "запланируй созвон",
-    "добавь в планы поход", "дела по дому", "проект AMGym на паузу",
+    "пара по вышмату отменилась", "поменяй расписание", "запланируй созвон",
+    "добавь в планы поход", "дела по дому", "проект AMGym на паузу", "пара в 10 отменилась",
+    "пары в понедельник перенесли", "урок в 15", "урок английского в субботу", "хочу позаниматься английским",
 ])
 def test_life_words(text):
     assert is_life_command(text)
@@ -139,9 +148,33 @@ def test_life_words(text):
     "купил протеин", "позанимался в зале", "съел гречку 200 г", "убрал жим из программы", "оплатил абонемент",
     "сделал жим 3×8 по 60", "убери французский жим из дня рук", "продукты: курица 200 г", "мои продукты",
     "спал 6 часов", "пару подходов жима сделал", "съел пару яиц", "позанимался в зале, жим 3×8",
+    *DIARY_WITH_LIFE_LOOKS,
+    # pairs only with a time, a day or a subject: «после пары зайти в деканат» reaches «Дела» by the parser's
+    # kind="life" (test_parser_kind_life_goes_to_the_life_model)
+    "после пары зайти в деканат",
 ])
 def test_not_life_words(text):
     assert not is_life_command(text)
+
+
+@pytest.mark.parametrize("text", [
+    *(t for t in DIARY_WITH_LIFE_LOOKS if t != "урок бокса 60 минут"),  # that one has no «Дела» look any more
+    "купил продукты на ужин: курица 300 г", "сдал зачёт, съел пиццу 3 куска",
+    "зачёт завтра, спал 5 часов", "после экзамена выпил кофе", "задача: жим 80 на 8", "уборка, вес 84.6",
+    "перенеси пятничную тренировку на субботу, у меня экзамен",
+])
+def test_diary_records_never_ask_the_life_model_first(text):
+    """Even when the quick words match, a message that may be a record goes to the parser first."""
+    assert log_text._diary_like(text), text
+
+
+@pytest.mark.parametrize("text", [
+    "В учёбу добавь сегодня в 11 позаниматься HTTP-сервером на C", "добавь задачу купить билеты", "вынес мусор",
+    "сделал уборку", "дедлайн по лабе 10 ноября", "перенеси урок ИЗ Математика с понедельника на вторник",
+    "запланируй завтра в 15 созвон", "составь памятку по epoll", "добавь в планы поход",
+])
+def test_life_commands_are_not_diary_records(text):
+    assert is_life_command(text) and not log_text._diary_like(text), text
 
 
 # ---- /life ----
@@ -269,14 +302,25 @@ async def test_tomorrow_after_midnight_in_tashkent(tmp_path, db):
 
 
 async def test_no_action_goes_on_to_the_parser(life_settings, db, no_diary):
-    """Review Focus 1: food with a quick word («купил продукты») is food when the «Дела» model finds nothing."""
+    """Review Focus 1: a message with quick words is the parser's when the «Дела» model finds nothing. (Food
+    with them, «купил продукты на ужин: курица 300 г», goes to the parser first: test_a_record_with_life_words…)"""
     await owner(db)
     llm = FakeLLM(life_settings)
-    llm.answers += [life_answer(), food(1, "курица")]
-    msg = await say("купил продукты на ужин: курица 300 г", llm, life_settings, db)
+    llm.answers += [life_answer(), {"kind": "question", "clarification": "Отдыхай."}]
+    msg = await say("дела по дому подождут", llm, life_settings, db)
     assert len(llm.bodies) == 2 and is_life_request(llm.bodies[0]) and not is_life_request(llm.bodies[1])
     assert not hl.PENDING
-    assert len(log_text.PENDING) == 1 and "курица" in shown(msg)
+    assert shown(msg) == "Отдыхай."
+
+
+@pytest.mark.parametrize("text", ["купил продукты на ужин: курица 300 г", "между парами съел шаурму",
+                                  "после пары сходил в зал, жим 80 на 8", "пара бананов", "запланируй тренировку ног на завтра"])
+async def test_a_record_with_life_words_goes_to_the_parser_first(text, life_settings, db, no_diary):
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers += [food(1, "курица")] * 3  # the parser (and its plausibility round): the «Дела» model never asked
+    await say(text, llm, life_settings, db)
+    assert llm.bodies and not any(is_life_request(b) for b in llm.bodies)
 
 
 async def test_gym_words_never_ask_the_life_model(life_settings, db, no_diary):

@@ -126,6 +126,8 @@ _WELLBEING = re.compile(
     r"устал\w*|усталост\w*|энерги\w*|сил|сил[аыу]|разбит\w*|самочувств\w*|простыл\w*|заболел\w*|"
     r"ноет|ныть|тянет|потянул\w*|травм\w*|простуд\w*|температур\w*|чувству\w*|плохо|стал\w*|дыш\w*|пульс\w*)(?!\w)"
 )
+# Food and wellbeing words, also a sign of a diary record for the «Дела» gate (handlers/log_text).
+FOOD_WORDS, WELLBEING_WORDS = _FOOD, _WELLBEING
 # A diet's unloading days ("на этой неделе разгрузочные дни по еде") are food, not a deload week.
 _DELOAD_FOOD = re.compile(
     r"(?<!\w)(?:ед[аеуы]|едой|питани\w*|кефир\w*|яблок\w*|углевод\w*|калори\w*|диет\w*|голод\w*)(?!\w)"
