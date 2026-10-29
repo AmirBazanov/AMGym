@@ -78,7 +78,7 @@ Caddy и туннель Cloudflare менять не нужно: ответы �
 
 ## Дашборд «Дела Амира» (`/hub/`, `/api/hub`)
 
-Статичный дашборд из репозитория `AmirBazanov/my-hub` (приватный) живёт на `https://gym.algex.ru/hub/` (и по-прежнему на GitHub Pages), его данные — в ручках ниже. Код: `bot/src/gymbot/services/hub.py`, ручки в `bot/src/gymbot/api/app.py`.
+Статичный дашборд из репозитория `AventraLLC/amirs-hub` (приватный; до 29.10.2026 — `AmirBazanov/my-hub`) живёт на `https://gym.algex.ru/hub/` (и на GitHub Pages: `https://aventrallc.github.io/amirs-hub/`), его данные — в ручках ниже. Код: `bot/src/gymbot/services/hub.py`, ручки в `bot/src/gymbot/api/app.py`.
 
 ### Тренировки: `GET /api/hub?token=<HUB_TOKEN>`
 
@@ -95,7 +95,7 @@ Caddy и туннель Cloudflare менять не нужно: ответы �
 - `log` — тренировки за последние 90 дней: подходы `вес×повторы×число подходов`, дропы через `→`, тоннаж и длительность (если тренировка завершена в мини-аппе). Еды, самочувствия и веса тела нет.
 - Владелец — тот же, что у MCP (`gymbot.services.access.owner_user`); ничего не создаёт в базе. Код: `bot/src/gymbot/services/hub.py`.
 - Доступ: `HUB_TOKEN` в `.env` (пустой — 404, маршрута нет), неверный токен — 403. Токен лежит в публичном `data.js`, поэтому открывает только эту ручку. В логах uvicorn `token=` маскируется.
-- CORS только для `https://amirbazanov.github.io` и `http://localhost:8765`, `Cache-Control: no-store`. Лимита запросов нет: ручка дешёвая (один пользователь, дашборд ходит раз в 5 минут).
+- CORS только для `https://aventrallc.github.io`, `https://amirbazanov.github.io` (до переезда) и `http://localhost:8765`, `Cache-Control: no-store`. Лимита запросов нет: ручка дешёвая (один пользователь, дашборд ходит раз в 5 минут).
 
 ### Состояние: `GET/PUT /api/hub/state?token=<HUB_TOKEN>`
 
@@ -111,8 +111,8 @@ Caddy и туннель Cloudflare менять не нужно: ответы �
 
 - Приложение раздаёт клон репозитория из `HUB_DIR` (по умолчанию `~/my-hub` рядом с `~/amgym`) на `/hub/`; `/hub` → `/hub/`. `.git`, `.claude`, `docs/` и любые файлы и папки с точкой в начале — `404`. HTML — `Cache-Control: no-cache`, скрипты и стили кэшируются обычно (ETag; в `index.html` они с `?v=`). Пока клона нет — `404`.
 - `HUB_DIR` — только абсолютный путь вне приложения (иначе сервис не стартует): относительный путь смотрел бы в `~/amgym` с базой. `HUB_DIR=` (пусто) выключает `/hub/` и деплой.
-- Поддомен `hub.algex.ru` не заводили: DNS `algex.ru` у Beget. Дашборд на одном origin с мини-аппом, их localStorage общий (ключи `hub:*` и `gymapp.v1` не пересекаются); код из `my-hub` выполняется на `gym.algex.ru`, так что пуш в `main` этого репозитория равен по доверию правке мини-аппа.
-- `POST /api/hub/deploy` с `X-Hub-Deploy-Token: <HUB_DEPLOY_TOKEN>` → `git -C HUB_DIR pull --ff-only` (а если клона нет — `git clone`), ответ `{"commit": "<hash>", "changed": true|false}`. Таймаут 60 с, не чаще раза в 10 с (`429` с `Retry-After`), ошибка git — `500` с её текстом, неверный токен — `403`, пустой `HUB_DEPLOY_TOKEN` — `404`. Вызывается из GitHub Actions репозитория `my-hub` после пуша в `main`.
+- Поддомен `hub.algex.ru` не заводили: DNS `algex.ru` у Beget. Дашборд на одном origin с мини-аппом, их localStorage общий (ключи `hub:*` и `gymapp.v1` не пересекаются); код дашборда выполняется на `gym.algex.ru`, так что пуш в `main` этого репозитория равен по доверию правке мини-аппа.
+- `POST /api/hub/deploy` с `X-Hub-Deploy-Token: <HUB_DEPLOY_TOKEN>` → `git -C HUB_DIR pull --ff-only` (а если клона нет — `git clone`; если `HUB_REPO` в `.env` сменился — origin переключается и клон сбрасывается на ветку нового репозитория), ответ `{"commit": "<hash>", "changed": true|false}`. Таймаут 60 с, не чаще раза в 10 с (`429` с `Retry-After`), ошибка git — `500` с её текстом, неверный токен — `403`, пустой `HUB_DEPLOY_TOKEN` — `404`. Вызывается из GitHub Actions репозитория дашборда после пуша в `main` (`.github/workflows/deploy-server.yml`).
 - `setup-ec2.sh` при каждом деплое тоже клонирует или подтягивает `HUB_DIR`; ошибка git там не останавливает деплой бота.
 
 ### Включить на сервере
@@ -123,19 +123,19 @@ Caddy и туннель Cloudflare менять не нужно: ответы �
 ssh-keygen -t ed25519 -N "" -C my-hub-deploy -f ~/.ssh/my_hub && cat ~/.ssh/my_hub.pub
 ```
 
-Публичный ключ — в GitHub: `my-hub` → Settings → Deploy keys → Add (без «Allow write access»). Затем в `~/amgym/.env`:
+Публичный ключ — в GitHub: `amirs-hub` → Settings → Deploy keys (в организации AventraLLC deploy-ключи должны быть разрешены: Organization settings → Member privileges → Deploy keys; один ключ нельзя повесить на два репозитория) → Add (без «Allow write access»). Затем в `~/amgym/.env`:
 
 ```bash
 HUB_TOKEN=<openssl rand -hex 32>
 HUB_WRITE_TOKEN=<openssl rand -hex 32>
 HUB_DEPLOY_TOKEN=<openssl rand -hex 32>
-HUB_REPO=git@github.com:AmirBazanov/my-hub.git
+HUB_REPO=git@github.com:AventraLLC/amirs-hub.git
 HUB_SSH_KEY=/home/ec2-user/.ssh/my_hub
 ```
 
 `sudo systemctl restart gymbot`, потом первый клон: `curl -X POST -H "X-Hub-Deploy-Token: $HUB_DEPLOY_TOKEN" https://gym.algex.ru/api/hub/deploy`.
 
-В `my-hub` — секрет `HUB_DEPLOY_TOKEN` и шаг workflow после пуша в `main`:
+В `amirs-hub` — секрет `HUB_DEPLOY_TOKEN` и шаг workflow после пуша в `main`:
 
 ```yaml
 - run: curl -fsS -X POST -H "X-Hub-Deploy-Token: ${{ secrets.HUB_DEPLOY_TOKEN }}" https://gym.algex.ru/api/hub/deploy

@@ -91,7 +91,7 @@ class Settings(BaseSettings):
     # hub_dir must be absolute (it is served as is); empty = no /hub/ and no deploy. hub_ssh_key: a read-only
     # deploy key for a private hub_repo (git@github.com:...).
     hub_dir: Path | None = ROOT.parent / "my-hub"
-    hub_repo: str = "https://github.com/AmirBazanov/my-hub.git"
+    hub_repo: str = "https://github.com/AventraLLC/amirs-hub.git"
     hub_ssh_key: Path | None = None
     hub_write_token: str = ""
     hub_deploy_token: str = ""

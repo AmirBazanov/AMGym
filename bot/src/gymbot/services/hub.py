@@ -1,4 +1,4 @@
-"""The owner's personal dashboard «Дела Амира» (repository AmirBazanov/my-hub, a static site).
+"""The owner's personal dashboard «Дела Амира» (repository AventraLLC/amirs-hub, a static site).
 
 - Workouts (GET /api/hub): read only, never creates rows: the owner as in the MCP server
   (gymbot.services.access.owner_user), the program through next_weights.program_ref / day_weights, so the week
@@ -323,14 +323,25 @@ async def git(*args: str, env: dict[str, str] | None = None, timeout: float = GI
 
 
 async def pull(hub_dir: Path, repo: str, ssh_key: Path | None = None) -> dict[str, Any]:
-    """git pull --ff-only in `hub_dir`, or the first clone of `repo` there: {"commit", "changed"}."""
+    """git pull --ff-only in `hub_dir`, or the first clone of `repo` there: {"commit", "changed"}.
+
+    When HUB_REPO names another repository than the clone's origin (the dashboard moved), origin is switched
+    and the clone reset to the new repository's branch: its history need not continue the old one, and the
+    clone is deploy-only, nothing local to keep."""
     env = git_env(ssh_key)
+    d = str(hub_dir)
     if not (hub_dir / ".git").exists():
-        await git("clone", "-q", repo, str(hub_dir), env=env)
-        return {"commit": await git("-C", str(hub_dir), "rev-parse", "HEAD", env=env), "changed": True}
-    before = await git("-C", str(hub_dir), "rev-parse", "HEAD", env=env)
-    await git("-C", str(hub_dir), "pull", "-q", "--ff-only", env=env)
-    after = await git("-C", str(hub_dir), "rev-parse", "HEAD", env=env)
+        await git("clone", "-q", repo, d, env=env)
+        return {"commit": await git("-C", d, "rev-parse", "HEAD", env=env), "changed": True}
+    before = await git("-C", d, "rev-parse", "HEAD", env=env)
+    if await git("-C", d, "remote", "get-url", "origin", env=env) != repo:
+        branch = await git("-C", d, "rev-parse", "--abbrev-ref", "HEAD", env=env)
+        await git("-C", d, "remote", "set-url", "origin", repo, env=env)
+        await git("-C", d, "fetch", "-q", "origin", branch, env=env)
+        await git("-C", d, "reset", "-q", "--hard", "FETCH_HEAD", env=env)
+    else:
+        await git("-C", d, "pull", "-q", "--ff-only", env=env)
+    after = await git("-C", d, "rev-parse", "HEAD", env=env)
     return {"commit": after, "changed": after != before}
 
 

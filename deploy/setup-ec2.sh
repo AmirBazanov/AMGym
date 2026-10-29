@@ -147,7 +147,7 @@ if grep -qx 'HUB_DIR=' "$APP_DIR/.env"; then
   echo "== dashboard: HUB_DIR is empty, skipped"
 else
   HUB_DIR="$(env_value HUB_DIR)"; HUB_DIR="${HUB_DIR:-$HOME/my-hub}"
-  HUB_REPO="$(env_value HUB_REPO)"; HUB_REPO="${HUB_REPO:-https://github.com/AmirBazanov/my-hub.git}"
+  HUB_REPO="$(env_value HUB_REPO)"; HUB_REPO="${HUB_REPO:-https://github.com/AventraLLC/amirs-hub.git}"
   HUB_SSH_KEY="$(env_value HUB_SSH_KEY)"
   echo "== dashboard: $HUB_REPO -> $HUB_DIR"
   (
@@ -155,12 +155,17 @@ else
     if [ -n "$HUB_SSH_KEY" ]; then
       export GIT_SSH_COMMAND="ssh -i $HUB_SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
     fi
-    if [ -d "$HUB_DIR/.git" ]; then
+    if [ -d "$HUB_DIR/.git" ] && [ "$(git -C "$HUB_DIR" remote get-url origin)" != "$HUB_REPO" ]; then
+      # The dashboard moved (HUB_REPO changed): follow it, as POST /api/hub/deploy does.
+      git -C "$HUB_DIR" remote set-url origin "$HUB_REPO"
+      git -C "$HUB_DIR" fetch -q origin "$(git -C "$HUB_DIR" rev-parse --abbrev-ref HEAD)"
+      git -C "$HUB_DIR" reset -q --hard FETCH_HEAD
+    elif [ -d "$HUB_DIR/.git" ]; then
       git -C "$HUB_DIR" pull -q --ff-only
     else
       git clone -q "$HUB_REPO" "$HUB_DIR"
     fi
-  ) || echo "!! dashboard: git failed (a private repo needs HUB_REPO=git@github.com:... and HUB_SSH_KEY, see deploy/README.md)"
+  ) || echo "!! dashboard: git failed (a private repo needs credentials: HUB_REPO + HUB_SSH_KEY, see deploy/README.md)"
 fi
 
 PUBLIC_URL="$(env_value PUBLIC_URL)"

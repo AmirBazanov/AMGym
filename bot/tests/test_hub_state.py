@@ -22,7 +22,7 @@ from gymbot.services.users import get_or_create_user
 READ = "hub-read"
 WRITE = "hub-write"
 DEPLOY = "hub-deploy"
-ORIGIN = "https://amirbazanov.github.io"
+ORIGIN = "https://aventrallc.github.io"
 URL = f"/api/hub/state?token={READ}"
 W = {"X-Hub-Write-Token": WRITE}
 UPDATED_AT = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
@@ -204,7 +204,7 @@ async def test_deploy(tmp_path, db, monkeypatch):
         assert calls == []
         r = await c.post("/api/hub/deploy", headers={"X-Hub-Deploy-Token": DEPLOY})
         assert r.status_code == 200 and r.json() == {"commit": "abc123", "changed": True}
-        assert calls == [(tmp_path / "my-hub", "https://github.com/AmirBazanov/my-hub.git")]
+        assert calls == [(tmp_path / "my-hub", "https://github.com/AventraLLC/amirs-hub.git")]
         r = await c.post("/api/hub/deploy", headers={"X-Hub-Deploy-Token": DEPLOY})  # within 10 s
         assert r.status_code == 429 and int(r.headers["retry-after"]) >= 1
         assert len(calls) == 1
@@ -255,6 +255,26 @@ async def test_pull_clones_then_fast_forwards(tmp_path):
     assert (target / "index.html").read_text() == "v2"
     with pytest.raises(hub.GitError):
         await hub.pull(tmp_path / "other", str(tmp_path / "missing"))
+
+
+async def test_pull_follows_a_moved_repository(tmp_path):
+    """HUB_REPO changed to a copy whose history went another way: origin switches, the clone takes the copy."""
+    old, moved = tmp_path / "old", tmp_path / "moved"
+    old.mkdir()
+    sh("git", "init", "-q", "-b", "main", cwd=old)
+    commit(old, "index.html", "v1")
+    sh("git", "clone", "-q", str(old), str(moved))
+    commit(old, "workflow.yml", "old only")  # the clone has it, the moved repository never will
+    commit(moved, "index.html", "moved v2")
+    target = tmp_path / "my-hub"
+    await hub.pull(target, str(old))
+    assert (target / "workflow.yml").exists()
+
+    r = await hub.pull(target, str(moved))
+    assert r["changed"] is True
+    assert (target / "index.html").read_text() == "moved v2" and not (target / "workflow.yml").exists()
+    assert await hub.git("-C", str(target), "remote", "get-url", "origin") == str(moved)
+    assert (await hub.pull(target, str(moved)))["changed"] is False  # then plain fast-forward pulls
 
 
 async def test_git_timeout(monkeypatch):

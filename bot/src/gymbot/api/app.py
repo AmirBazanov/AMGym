@@ -57,9 +57,9 @@ log = logging.getLogger(__name__)
 
 HEALTH_TIMEOUT = 2.0  # seconds for the database ping in /api/health
 NUTRITION_MIN_DATE = date(2000, 1, 1)
-# Pages allowed to call /api/hub and /api/hub/state from the browser: the dashboard on GitHub Pages and its
-# local preview (served on /hub/ from this app it is same-origin and needs no CORS).
-HUB_ORIGINS = ("https://amirbazanov.github.io", "http://localhost:8765")
+# Pages allowed to call /api/hub and /api/hub/state from the browser: the dashboard on GitHub Pages
+# (aventrallc.github.io/amirs-hub; amirbazanov.github.io before the move) and its local preview (served on /hub/ from this app it is same-origin and needs no CORS).
+HUB_ORIGINS = ("https://aventrallc.github.io", "https://amirbazanov.github.io", "http://localhost:8765")
 
 
 class StateOut(BaseModel):
@@ -793,7 +793,7 @@ def create_app(
     @app.post("/api/hub/deploy")
     async def hub_deploy(x_hub_deploy_token: Annotated[str, Header()] = "") -> JSONResponse:
         """git pull --ff-only of the dashboard in HUB_DIR (the first clone when it is missing), called by the
-        my-hub repository's GitHub Actions after a push: {"commit", "changed"}. 404 while HUB_DEPLOY_TOKEN or
+        dashboard repository's GitHub Actions after a push: {"commit", "changed"}. 404 while HUB_DEPLOY_TOKEN or
         HUB_DIR is empty."""
         headers = {"Cache-Control": "no-store"}
         if not settings.hub_deploy_token or deployer is None:

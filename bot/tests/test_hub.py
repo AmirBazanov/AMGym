@@ -24,7 +24,7 @@ MSK = ZoneInfo("Europe/Moscow")
 HUB_TOKEN = "hub-secret"
 MON = date(2026, 10, 5)
 NOW = datetime(2026, 10, 6, 10, 0, tzinfo=MSK).astimezone(UTC)  # Tuesday, a rest day
-ORIGIN = "https://amirbazanov.github.io"
+ORIGIN = "https://aventrallc.github.io"
 
 
 @pytest.fixture(autouse=True)
