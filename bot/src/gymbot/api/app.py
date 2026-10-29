@@ -779,25 +779,28 @@ def create_app(
             live.publish(user.id, "hub")
             return JSONResponse(body, headers=headers)
 
-    if settings.hub_deploy_token and settings.hub_dir is not None:  # else no route (404)
-        deployer = hub.Deployer(settings.hub_dir, settings.hub_repo, settings.hub_ssh_key)
+    deployer = hub.Deployer(settings.hub_dir, settings.hub_repo, settings.hub_ssh_key) if settings.hub_dir else None
 
-        @app.post("/api/hub/deploy")
-        async def hub_deploy(x_hub_deploy_token: Annotated[str, Header()] = "") -> JSONResponse:
-            """git pull --ff-only of the dashboard in HUB_DIR (the first clone when it is missing), called by the
-            my-hub repository's GitHub Actions after a push: {"commit", "changed"}."""
-            headers = {"Cache-Control": "no-store"}
-            if not same(x_hub_deploy_token, settings.hub_deploy_token):
-                return hub_error(403, "forbidden", headers)
-            try:
-                body = await deployer.run()
-            except hub.TooSoon as e:
-                return hub_error(429, "one deploy per 10 s", headers | {"Retry-After": str(e.retry_after)})
-            except hub.GitError as e:
-                log.warning("hub deploy failed: %s", e)
-                return hub_error(500, str(e), headers)
-            log.info("hub deploy: %s (changed: %s)", body["commit"], body["changed"])
-            return JSONResponse(body, headers=headers)
+    # Always routed: without it a POST would fall through to the Mini App mount and get 405, not 404.
+    @app.post("/api/hub/deploy")
+    async def hub_deploy(x_hub_deploy_token: Annotated[str, Header()] = "") -> JSONResponse:
+        """git pull --ff-only of the dashboard in HUB_DIR (the first clone when it is missing), called by the
+        my-hub repository's GitHub Actions after a push: {"commit", "changed"}. 404 while HUB_DEPLOY_TOKEN or
+        HUB_DIR is empty."""
+        headers = {"Cache-Control": "no-store"}
+        if not settings.hub_deploy_token or deployer is None:
+            return hub_error(404, "Not Found", headers)
+        if not same(x_hub_deploy_token, settings.hub_deploy_token):
+            return hub_error(403, "forbidden", headers)
+        try:
+            body = await deployer.run()
+        except hub.TooSoon as e:
+            return hub_error(429, "one deploy per 10 s", headers | {"Retry-After": str(e.retry_after)})
+        except hub.GitError as e:
+            log.warning("hub deploy failed: %s", e)
+            return hub_error(500, str(e), headers)
+        log.info("hub deploy: %s (changed: %s)", body["commit"], body["changed"])
+        return JSONResponse(body, headers=headers)
 
     @app.get("/hub", include_in_schema=False)
     async def hub_slash() -> RedirectResponse:

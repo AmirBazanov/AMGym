@@ -205,8 +205,13 @@ async def test_deploy(tmp_path, db, monkeypatch):
         r = await c.post("/api/hub/deploy", headers={"X-Hub-Deploy-Token": DEPLOY})  # within 10 s
         assert r.status_code == 429 and int(r.headers["retry-after"]) >= 1
         assert len(calls) == 1
-    async with client(tmp_path, db) as c:  # HUB_DEPLOY_TOKEN empty
+    dist = tmp_path / "dist"  # with the Mini App mounted at "/" (as on the server) a missing route would be 405
+    dist.mkdir()
+    (dist / "index.html").write_text("app")
+    async with client(tmp_path, db, miniapp_dist=dist) as c:  # HUB_DEPLOY_TOKEN empty
         assert (await c.post("/api/hub/deploy", headers={"X-Hub-Deploy-Token": ""})).status_code == 404
+    async with deploy_client(tmp_path, db, miniapp_dist=dist, hub_dir="") as c:  # HUB_DIR empty
+        assert (await c.post("/api/hub/deploy", headers={"X-Hub-Deploy-Token": DEPLOY})).status_code == 404
 
 
 async def test_deploy_git_error(tmp_path, db, monkeypatch):
