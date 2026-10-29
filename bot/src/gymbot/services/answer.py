@@ -79,7 +79,9 @@ _COMMAND = re.compile(r"^[\s*_•-]*правка[*_]*\s*[:：][\s*_]*(?P<cmd>.+?
 # «ДЕЛА: …» in capitals only: «Дела: пара в 10:00» is an ordinary line of an answer about the agenda.
 _LIFE_COMMAND = re.compile(r"^[\s*_•-]*ДЕЛА[*_]*\s*[:：][\s*_]*(?P<cmd>.+?)[\s*_]*$", re.MULTILINE)
 # A day question about the training itself («какая завтра тренировка», «веса на пятницу») gets no agenda.
-_TRAINING_WORDS = re.compile(r"трен|упражн|вражен|зал|вес|подход|жим|присед|тяг|кардио")
+_TRAINING_WORDS = re.compile(
+    r"(?<![а-яё])(?:трен|упражн|вражен|зал(?:е|а|у|ом)?(?![а-яё])|вес(?:а|ом|ы|у|ов|ах)?(?![а-яё])|подход|жим|присед|тяг|кардио)"
+)
 NO_TRAINING = "Сегодня тренировки по программе нет."
 DONE_MAX = 900  # characters of the "done on the last training day" block
 ANSWER_TEMPERATURE = 0.4  # the numbers come from the summary and the check; Claude gets no temperature

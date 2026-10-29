@@ -396,10 +396,34 @@ async def test_saved_note_rewritten(life_settings, db):
 
 
 def test_rewrite_instructions():
-    for text in ("добавь пример", "короче", "а теперь убери про select", "сделай подробнее", "добавь в памятку таблицу"):
-        assert hl.is_rewrite(text), text
-    for text in ("съел гречку 200 г", "добавь задачу купить билеты", "вынес мусор", "жим 3 подхода по 8", "привет"):
-        assert not hl.is_rewrite(text), text
+    # «убери про select» alone reads as a program edit too («убери жим»): the gym path wins, the note needs naming.
+    for text in ("добавь пример", "короче", "а теперь убери из памятки про select", "сделай подробнее",
+                 "добавь в памятку таблицу",
+                 "замени в памятке пример на питон", "перепиши проще", "убери из памятки про poll"):
+        assert hl.is_rewrite(text, TODAY), text
+    for text in ("съел гречку 200 г", "добавь задачу купить билеты", "вынес мусор", "жим 3 подхода по 8", "привет",
+                 "сделай сегодня день рук", "убери французский жим из дня рук", "замени жим на гантели",
+                 "удали самсу", "исправь: самса была 2", "норма 2800 ккал"):
+        assert not hl.is_rewrite(text, TODAY), text
+
+
+async def test_a_program_edit_while_a_draft_is_open_is_a_program_edit(life_settings, db, monkeypatch):
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers += [
+        life_answer({"op": "write_note", "fields": {"title": "Памятка по epoll", "brief": "epoll"}}), EPOLL,
+    ]
+    await say("составь памятку по epoll", llm, life_settings, db)
+    staged = []
+
+    async def stage_edit(message, text, *args):
+        staged.append(text)
+
+    monkeypatch.setattr(log_text, "stage_edit", stage_edit)
+    monkeypatch.setattr(log_text, "send_edit", stage_edit)
+    await say("убери французский жим из дня рук", llm, life_settings, db, at=T0 + timedelta(minutes=1))
+    assert staged[0] == "убери французский жим из дня рук"
+    assert len(llm.bodies) == 2 and len(hl.PENDING) == 1  # no rewrite call; the draft is still there
 
 
 # ---- kind="life" from the parser ----

@@ -37,9 +37,11 @@ from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.llm.prompts_life import build_life_messages
 from gymbot.llm.prompts_note import build_note_messages
-from gymbot.services import life
+from gymbot.services import life, saved_edits
 from gymbot.services import life_actions as la
 from gymbot.services.access import owner_user
+from gymbot.services.chat_edit import is_edit_command
+from gymbot.services.chat_settings import is_settings_request
 from gymbot.services.life_gate import is_life_command
 
 log = logging.getLogger(__name__)
@@ -307,14 +309,27 @@ _REWRITE = re.compile(
 )
 _NOTE_WORDS = re.compile(r"заметк|памятк|конспект|шпаргалк|черновик|текст", re.IGNORECASE)
 _AMOUNT = re.compile(r"\d+\s*(?:г|гр|грамм\w*|кг|шт\w*|ккал|мл|раз|подход\w*)(?![а-яё])", re.IGNORECASE)
+# Gym words: «замени жим на гантели» is about the program, whatever the edit gate thinks of it.
+_GYM = re.compile(
+    r"жим|присед|тяг[аиуе]|подтяг|отжим|сгибан|разгибан|выпад|упражнен|трениров|программ|подход|гантел|штанг|"
+    r"тренаж|(?<![а-яё])зал(?![а-яё])|(?<![а-яё])(?:день|дня|дне)\s+(?:рук|ног|спин|груд|плеч)",
+    re.IGNORECASE,
+)
 
 
-def is_rewrite(text: str) -> bool:
+def is_rewrite(text: str, today: date) -> bool:
     """«добавь пример», «короче», «убери про select»: an instruction for the open draft. Not a record with
-    amounts, and not another «Дела» command («добавь задачу …») unless it names the note."""
+    amounts, and, unless it names the note, not a command of another path: «Дела» («добавь задачу …»), a
+    program edit or gym words («убери французский жим из дня рук», «замени жим на гантели»), a settings
+    request, a saved-record edit («удали самсу»)."""
     if len(text) > 300 or _AMOUNT.search(text) or not _REWRITE.search(text):
         return False
-    return not is_life_command(text) or bool(_NOTE_WORDS.search(text))
+    if _NOTE_WORDS.search(text):
+        return True
+    return not (
+        _GYM.search(text) or is_life_command(text) or is_edit_command(text) or is_settings_request(text)
+        or saved_edits.detect(text, today) is not None
+    )
 
 
 def open_draft(tg_id: int, now: datetime) -> tuple[str, LifePending] | None:
@@ -333,7 +348,9 @@ async def on_text(
     if tg is None:
         return False
     found = open_draft(tg.id, message.date)
-    if found is None or (dialog_at is not None and dialog_at > found[1].sent_at) or not is_rewrite(text):
+    if found is None or (dialog_at is not None and dialog_at > found[1].sent_at):
+        return False
+    if not is_rewrite(text, message.date.date()):  # the UTC date: only for the saved-edit words' day check
         return False
     token, pending = found
     draft = pending.note_draft
