@@ -9,12 +9,12 @@ from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
-from aiogram.exceptions import TelegramForbiddenError, TelegramNetworkError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError
 from aiogram.methods import SendMessage
 from sqlalchemy import select
 
 from gymbot.config import Settings
-from gymbot.db.models import LifeDeadline, LifeEvent, User
+from gymbot.db.models import LifeDeadline, LifeEvent, Program, User, UserProgram
 from gymbot.handlers import life_reminders as hlr
 from gymbot.services import life, live
 from gymbot.services import life_reminders as lr
@@ -69,9 +69,9 @@ async def _owner(db, **fields) -> int:
         return user.id
 
 
-async def _add(db, uid: int, kind: str, **fields) -> int:
+async def _add(db, uid: int, entity: str, **fields) -> int:
     async with db() as s:
-        row = await life.add(s, uid, kind, fields, at(7))
+        row = await life.add(s, uid, entity, fields, at(7))
         await s.commit()
         return row.id
 
@@ -336,3 +336,130 @@ async def test_reminded_at_stays_after_restart_of_the_window(db):
         stamp = await s.scalar(select(LifeEvent.reminded_at).where(LifeEvent.id == eid))
     assert life.aware(stamp) == at(10, 30)
     assert await _tick(db, FakeBot(), at(10, 40)) == 0
+
+
+# ---- the morning summary ----
+
+MON = date(2026, 11, 2)  # week 2 of the program below, «Руки и плечи»
+
+
+async def _on_program(db, uid: int, start: date = date(2026, 10, 26)) -> None:
+    async with db() as s:
+        program = await s.scalar(select(Program).where(Program.slug == "arms_specialization_8w"))
+        s.add(UserProgram(user_id=uid, program_id=program.id, started_on=start))
+        await s.commit()
+
+
+async def _sent_on(db, uid: int) -> date | None:
+    async with db() as s:
+        return await s.scalar(select(User.life_summary_sent_on).where(User.id == uid))
+
+
+async def test_summary_once_a_day_with_everything(db):
+    uid = await _owner(db)
+    await _on_program(db, uid)
+    await _add(db, uid, "slot", weekday=1, start="10:00", end="11:30", title="ИЗ Математика", area="work",
+               place="Восход")
+    await _add(db, uid, "slot", weekday=2, start="17:00", title="Не сегодня", area="work")
+    await _add(db, uid, "event", day=MON, start="14:00", title="HTTP-сервер <на C>", area="study")
+    await _add(db, uid, "event", day=MON, start="09:00", title="Созвон", area="work")
+    await _add(db, uid, "event", day=MON, title="Купить билеты")
+    await _add(db, uid, "deadline", day=MON, title="Лаба №1", course="Сети")
+    await _add(db, uid, "deadline", day=MON + timedelta(days=3), title="Эссе")
+    await _add(db, uid, "deadline", day=MON + timedelta(days=4), title="Далеко")
+    await _add(db, uid, "deadline", day=MON - timedelta(days=2), title="Забыл")
+    await _add(db, uid, "chore", title="Вынести мусор", every_days=2, last_done=MON - timedelta(days=4))
+    await _add(db, uid, "chore", title="Уборка", every_days=7, last_done=MON - timedelta(days=1))
+    for i in range(1, 7):
+        await _add(db, uid, "task", title=f"Задача {i}")
+    await _add(db, uid, "project", name="HTTP-сервер на C", kind="learning", next_step="epoll")
+    await _add(db, uid, "project", name="Пауза", kind="learning", status="paused", next_step="не сейчас")
+    await _add(db, uid, "project", name="AMGym", kind="work", next_step="ревью")
+    bot = FakeBot()
+    assert await _tick(db, bot, at(7, 59, day=MON)) == 0
+    assert await _tick(db, bot, at(8, 0, day=MON)) == 1
+    assert await _tick(db, bot, at(8, 0, s=30, day=MON)) == 0
+    assert await _tick(db, bot, at(8, 20, day=MON)) == 0
+    assert await _sent_on(db, uid) == MON
+    [(chat, text, kb, parse_mode)] = bot.calls
+    assert chat == OWNER and parse_mode == "HTML"
+    expected = [
+        "<b>Сводка на понедельник, 02.11</b>",
+        "",
+        "<b>09:00</b> Созвон",
+        "<b>10:00–11:30</b> ИЗ Математика · Восход",
+        "<b>14:00</b> HTTP-сервер &lt;на C&gt;",
+        "• Купить билеты",
+        "",
+        "🏋️ Тренировка: Руки и плечи",
+        "",
+        "<b>Дедлайны</b>",
+        "• просрочен с 31.10 — Забыл",
+        "• сегодня — Лаба №1 (Сети)",
+        "• 05.11, чт — Эссе",
+        "",
+        "<b>Дом</b>",
+        "• Вынести мусор — просрочено на 2 дн.",
+        "",
+        "<b>Задачи</b>",
+        "• Задача 1",
+        "• Задача 2",
+        "• Задача 3",
+        "• Задача 4",
+        "• Задача 5",
+        "и ещё 1",
+        "",
+        "<b>Учёба</b>",
+        "• HTTP-сервер на C: epoll",
+    ]
+    assert text == "\n".join(expected)
+    assert kb.inline_keyboard[0][0].text == "Открыть дела"
+    assert kb.inline_keyboard[0][0].web_app.url == URL + "?section=life"
+    assert await _tick(db, bot, at(8, 0, day=MON + timedelta(days=1))) == 1  # the next day again
+
+
+async def test_summary_empty_day_and_rest_day(db):
+    uid = await _owner(db)
+    await _on_program(db, uid)
+    await _add(db, uid, "slot", weekday=1, start="10:00", title="Не в четверг", area="work")
+    bot = FakeBot()
+    assert await _tick(db, bot, at(8, 0)) == 1
+    assert bot.calls[0][1] == "<b>Сводка на четверг, 29.10</b>\n\nСегодня свободно\n\n🏋️ Тренировка: день отдыха"
+
+
+async def test_summary_without_program_and_without_url(db):
+    await _owner(db)
+    bot = FakeBot()
+    assert await _tick(db, bot, at(8, 0), make_settings(miniapp_url="")) == 1
+    [(_, text, kb, _)] = bot.calls
+    assert text == "<b>Сводка на четверг, 29.10</b>\n\nСегодня свободно"
+    assert kb is None
+
+
+async def test_summary_disabled_and_own_time(db):
+    uid = await _owner(db, life_summary_enabled=False)
+    bot = FakeBot()
+    assert await _tick(db, bot, at(8, 0)) == 0
+    assert await _sent_on(db, uid) is None
+    async with db() as s:
+        user = await s.get(User, uid)
+        life.set_settings(user, {"summary_enabled": True, "summary_time": "07:00"})
+        await s.commit()
+    assert await _tick(db, bot, at(6, 59)) == 0
+    assert await _tick(db, bot, at(7, 0)) == 1
+    assert await _tick(db, bot, at(8, 0)) == 0  # once a day
+
+
+async def test_summary_falls_back_to_plain_text(db):
+    """Telegram rejecting the markup must not lose the summary (send_html)."""
+    await _owner(db)
+
+    class PickyBot(FakeBot):
+        async def send_message(self, chat_id, text, reply_markup=None, parse_mode=None, **kw):
+            if parse_mode == "HTML":
+                raise TelegramBadRequest(method=SendMessage(chat_id=1, text="x"), message="can't parse entities")
+            await super().send_message(chat_id, text, reply_markup, parse_mode)
+
+    bot = PickyBot()
+    assert await _tick(db, bot, at(8, 0)) == 1
+    assert bot.calls[0][1] == "Сводка на четверг, 29.10\n\nСегодня свободно"
