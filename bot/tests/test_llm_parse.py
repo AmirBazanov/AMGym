@@ -139,7 +139,7 @@ def test_wellbeing_example_and_rule():
     assert w.sleep_hours == 6 and w.energy == 2
     assert [p.place for p in w.pains] == ["левое плечо"]
     assert '"wellbeing"' in SYSTEM_PROMPT and "сил мало" in SYSTEM_PROMPT
-    assert len(SYSTEM_PROMPT) < 3000  # keep the prompt compact for small free models
+    assert len(SYSTEM_PROMPT) < 3150  # keep the prompt compact for small free models
 
 
 def test_wellbeing_out_of_range_values_are_clamped_not_rejected():

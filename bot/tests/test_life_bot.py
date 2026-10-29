@@ -4,6 +4,7 @@ the diary answer and the «Дела» block of the answer (gymbot.services.answe
 Also the dashboard's Telegram initData on /api/hub/state (moved from the removed tests/test_hub_tasks.py)."""
 
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -12,10 +13,11 @@ from sqlalchemy import select
 from test_log_text import T0, USER, FakeLLM, callback, food, message, token_of
 
 from gymbot.api.app import create_app
-from gymbot.db.models import LifeEvent, LifeNote, LifeSlot
+from gymbot.db.models import LifeDeadline, LifeEvent, LifeNote, LifeSlot
 from gymbot.handlers import life as hl
 from gymbot.handlers import log_text
 from gymbot.llm.prompts_life import LIFE_SYSTEM_PROMPT
+from gymbot.services import answer as qa
 from gymbot.services import live
 from gymbot.services.life_gate import is_life_command
 from gymbot.services.users import get_or_create_user
@@ -398,6 +400,137 @@ def test_rewrite_instructions():
         assert hl.is_rewrite(text), text
     for text in ("съел гречку 200 г", "добавь задачу купить билеты", "вынес мусор", "жим 3 подхода по 8", "привет"):
         assert not hl.is_rewrite(text), text
+
+
+# ---- kind="life" from the parser ----
+
+
+async def test_parser_kind_life_goes_to_the_life_model(life_settings, db):
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers += [{"kind": "life"}, life_answer(add_event(day="2026-10-10", start="15:00", title="Созвон с Ильёй",
+                                                            area="work"))]
+    msg = await say("в субботу в 15 созвон с Ильёй", llm, life_settings, db)
+    assert not is_life_request(llm.bodies[0]) and is_life_request(llm.bodies[1])
+    assert shown(msg) == "В работу: «Созвон с Ильёй» — сб 10.10 в 15:00"
+
+
+async def test_parser_kind_life_nothing_to_do(life_settings, db):
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers += [{"kind": "life"}, life_answer()]
+    msg = await say("в субботу что-то с Ильёй", llm, life_settings, db)
+    assert len(llm.bodies) == 2
+    assert shown(msg) == hl.NOT_UNDERSTOOD and "Не понял, что сделать в делах" in hl.NOT_UNDERSTOOD
+
+
+async def test_parser_kind_life_after_the_quick_words_asks_the_model_once(life_settings, db):
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers += [life_answer(), {"kind": "life"}]
+    msg = await say("зачёт перенесли, кажется", llm, life_settings, db)
+    assert len(llm.bodies) == 2 and is_life_request(llm.bodies[0])
+    assert shown(msg) == hl.NOT_UNDERSTOOD
+
+
+async def test_parser_kind_life_shows_why_an_action_was_dropped(life_settings, db):
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers += [{"kind": "life"}, life_answer(add_event(day="2099-01-01", title="Созвон"))]
+    msg = await say("созвон первого января 2099", llm, life_settings, db)
+    assert shown(msg) == "Дата 2099-01-01 дальше 400 дней от сегодня."
+
+
+# ---- the diary answer: «ДЕЛА: …» and the «Дела» block ----
+
+
+def test_split_commands():
+    assert qa.split_commands("Добавлю.\nДЕЛА: «добавь задачу купить билеты»") == (
+        "Добавлю.", None, "добавь задачу купить билеты")
+    assert qa.split_commands("Ок.\nПРАВКА: сделай сегодня день рук\n**ДЕЛА:** закрой задачу x") == (
+        "Ок.", "сделай сегодня день рук", "закрой задачу x")
+    assert qa.split_command("Руки — ок.\nПРАВКА: сделай сегодня день рук") == ("Руки — ок.", "сделай сегодня день рук")
+    assert qa.split_command("Ок.\nДЕЛА: x") == ("Ок.", None)  # the line never reaches the chat
+    plain = "Завтра:\nДела: пара в 10:00, потом зал"  # «Дела:» in an answer is not a command
+    assert qa.split_commands(plain) == (plain, None, None)
+
+
+async def test_answer_suggests_a_life_change_under_itself(life_settings, db):
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers += [
+        {"kind": "question", "clarification": "Не знаю."},
+        "Добавлю в задачи.\nДЕЛА: добавь задачу купить билеты на поезд",
+        life_answer({"op": "add", "entity": "task", "fields": {"title": "Купить билеты на поезд"}}),
+    ]
+    msg = await say("не забыть бы купить билеты на поезд, поможешь?", llm, life_settings, db)
+    first, second = [c.args[0] for c in msg.answer.await_args_list]
+    assert first == "Добавлю в задачи." and "ДЕЛА" not in first
+    assert second == "Добавлю задачу «Купить билеты на поезд»"
+    assert is_life_request(llm.bodies[2])
+    assert llm.bodies[2]["messages"][1]["content"].endswith("Сообщение: добавь задачу купить билеты на поезд")
+    assert log_text.QA[USER][-1][1].endswith("\nДЕЛА: добавь задачу купить билеты на поезд")
+
+
+async def test_answer_context_has_the_life_block_for_the_owner_only(life_settings, db):
+    uid = await owner(db)
+    await put(
+        db,
+        LifeEvent(user_id=uid, day=TODAY, start="11:00", title=HTTP, area="study"),
+        LifeSlot(user_id=uid, weekday=3, start="10:00", title="ИЗ Математика", area="work", place="Восход"),
+    )
+    tz = ZoneInfo(life_settings.timezone)
+    async with db() as s:
+        user = await get_or_create_user(s, USER, "Amir")
+        text = await qa.build_context(s, user, life_settings, None, tz, T0)
+        other = await get_or_create_user(s, 7, "Other")
+        others = await qa.build_context(s, other, life_settings, None, tz, T0)
+    assert "Дела (раздел «Дела»" in text
+    assert f"Сегодня (вт 06.10): 11:00 {HTTP}" in text
+    assert "Завтра (ср 07.10): 10:00 ИЗ Математика (Восход)" in text
+    assert "Дела (раздел" not in others
+
+
+async def test_answer_request_holds_the_life_block(life_settings, db):
+    """A question that reaches the model: the «Дела» block is in its request."""
+    uid = await owner(db)
+    await put(db, LifeEvent(user_id=uid, day=TODAY + timedelta(days=1), start="09:00", title="Созвон", area="work"))
+    llm = FakeLLM(life_settings)
+    llm.answers.append("Завтра в 9:00 созвон.")
+    reply = await qa.respond(db, USER, "Amir", "есть что-нибудь важное на неделе?", [], life_settings, llm.client, T0)
+    assert reply.text == "Завтра в 9:00 созвон."
+    assert "Завтра (ср 07.10): 09:00 Созвон" in llm.bodies[0]["messages"][0]["content"]
+
+
+async def test_what_do_i_have_tomorrow_adds_the_agenda_to_the_training_day(life_settings, db):
+    """«Что у меня завтра?» is answered from the database (the program day); the owner's «Дела» of that day
+    follow in the same message. A question about the training itself gets the training alone."""
+    from test_next_weights_day import NOW, OWNER_FRIDAY, NoModel, _owner
+
+    async with db() as s:
+        user = await _owner(s)
+        s.add_all([
+            LifeSlot(user_id=user.id, weekday=5, start="10:00", title="ИЗ Математика", area="work", place="Восход"),
+            LifeDeadline(user_id=user.id, day=date(2026, 10, 9), title="Лаба 1"),
+        ])
+        await s.commit()
+    reply = await qa.respond(db, 42, "Amir", "что у меня завтра?", [], life_settings, NoModel(), NOW)
+    agenda = "\n\nДела на завтра (пт 09.10):\n• 10:00 ИЗ Математика (Восход)\n• дедлайн: Лаба 1"
+    assert reply.text == OWNER_FRIDAY + agenda
+    assert reply.html.endswith(agenda)
+    training = await qa.respond(db, 42, "Amir", "какая завтра тренировка", [], life_settings, NoModel(), NOW)
+    assert training.text == OWNER_FRIDAY
+
+
+async def test_general_question_with_numbers_passes_the_check(life_settings, db):
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    said = ("epoll следит за множеством дескрипторов одним вызовом.\n"
+            "• epoll_create1 создаёт экземпляр, epoll_ctl добавляет fd, epoll_wait ждёт до 64 событий за раз.\n"
+            "• Было медленнее с select: он копирует весь набор, до 1024 fd.")
+    llm.answers.append(said)
+    reply = await qa.respond(db, USER, "Amir", "как работает epoll?", [], life_settings, llm.client, T0)
+    assert reply.layer == qa.LLM and reply.text.startswith("epoll следит")
 
 
 # ---- the dashboard inside Telegram: initData instead of the write token (moved from test_hub_tasks.py) ----
