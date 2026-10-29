@@ -1385,3 +1385,246 @@ table.nutrition-table td.over {
 .scope-preview > * + * {
   margin-top: 6px;
 }
+
+/* ---------- section switch «Зал | Дела» and the computer login ---------- */
+.segmented.section-switch {
+  margin-bottom: 12px;
+}
+.segmented.section-switch button {
+  height: 40px;
+  font-size: 15px;
+}
+.notice.web-login {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.notice.web-login .grow {
+  flex: 1;
+  min-width: 0;
+}
+.notice.web-login .link-btn {
+  margin-top: 0;
+}
+.notice.web-login.fresh {
+  color: var(--text);
+  border-left: 3px solid var(--accent);
+  padding-left: 10px;
+}
+
+/* ---------- «Дела» (screens/life) ---------- */
+.life-error {
+  margin: 0 4px 10px;
+}
+.row.life-row {
+  padding: 0 8px 0 0;
+  gap: 8px;
+}
+.life-row > .check:first-child {
+  margin-left: 8px;
+}
+.life-open {
+  flex: 1;
+  min-width: 0;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0 8px 16px;
+  text-align: left;
+}
+.life-row > .check:first-child + .life-open {
+  padding-left: 4px;
+}
+.life-open:disabled {
+  opacity: 1;
+}
+.life-open .grow {
+  flex: 1;
+  min-width: 0;
+}
+.life-open .title,
+.life-open .sub {
+  display: block;
+}
+.life-title {
+  overflow-wrap: anywhere;
+}
+.life-row.done .life-title {
+  color: var(--hint);
+  text-decoration: line-through;
+}
+.life-time {
+  flex: none;
+  min-width: 48px;
+  font-weight: 600;
+  font-size: 15px;
+}
+.sub.life-overdue {
+  color: var(--danger);
+}
+.btn.secondary.life-did {
+  width: auto;
+  flex: none;
+  min-height: 44px;
+  padding: 0 14px;
+  font-size: 15px;
+}
+.life-actions {
+  display: flex;
+  gap: 8px;
+}
+h2.life-today {
+  color: var(--link);
+}
+.card.life-free {
+  padding: 10px 16px;
+}
+.field.life-short-field {
+  flex: none;
+  width: 132px;
+}
+.field.life-short-field.date {
+  width: 168px;
+}
+.field.life-text-field {
+  text-align: left;
+  font-size: 17px;
+  font-weight: 500;
+  padding: 0 12px;
+}
+.select.life-select {
+  background-color: var(--bg);
+  height: 46px;
+}
+.field.life-textarea {
+  font-family: inherit;
+}
+.life-project-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  text-align: left;
+}
+.life-project-head .title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 17px;
+}
+.badge.life-status {
+  color: var(--link);
+  background: var(--soft);
+}
+.badge.life-status.paused,
+.badge.life-status.idea,
+.badge.life-status.done {
+  color: var(--hint);
+  background: var(--sep);
+}
+.life-project.done {
+  opacity: 0.7;
+}
+.life-next {
+  margin-top: 4px;
+}
+.life-desc {
+  margin-top: 6px;
+  white-space: pre-line;
+}
+.life-link {
+  display: inline-block;
+  margin-top: 6px;
+  color: var(--link);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.list.life-project-tasks {
+  margin: 10px -16px 0;
+  border-radius: 0;
+  border-top: 1px solid var(--sep);
+}
+.btn.ghost.life-add-task {
+  margin-top: 4px;
+  justify-content: flex-start;
+  padding: 0;
+}
+
+/* ---------- Markdown of the notes (components/Markdown) ---------- */
+.md {
+  overflow-wrap: anywhere;
+}
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md p,
+.md ul,
+.md ol,
+.md blockquote,
+.md pre {
+  margin: 0 0 10px;
+}
+.md .md-h {
+  margin: 16px 0 8px;
+  line-height: 1.2;
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: normal;
+}
+.md h3.md-h {
+  font-size: 20px;
+}
+.md h4.md-h {
+  font-size: 17px;
+}
+.md h5.md-h {
+  font-size: 15px;
+}
+.md ul,
+.md ol {
+  padding-left: 22px;
+}
+.md li + li {
+  margin-top: 4px;
+}
+.md li.md-task {
+  list-style: none;
+  margin-left: -18px;
+}
+.md blockquote {
+  padding-left: 10px;
+  border-left: 3px solid var(--sep);
+  color: var(--hint);
+}
+.md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  background: var(--bg);
+  border-radius: 5px;
+  padding: 1px 4px;
+}
+.md pre {
+  background: var(--bg);
+  border-radius: 10px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+.md pre code {
+  background: none;
+  padding: 0;
+  white-space: pre;
+}
+.md a {
+  color: var(--link);
+}
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--sep);
+  margin: 14px 0;
+}

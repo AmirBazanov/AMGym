@@ -65,6 +65,37 @@ export const IconChevron = () => (
     <path d="M9 5l7 7-7 7" />
   </svg>
 )
+// «Дела» tabs.
+export const IconSun = () => (
+  <svg {...base}>
+    <circle cx="12" cy="12" r="4" />
+    <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4" />
+  </svg>
+)
+export const IconCalendar = () => (
+  <svg {...base}>
+    <rect x="3.5" y="4.5" width="17" height="16" rx="3" />
+    <path d="M3.5 9.5h17M8 2.5v4M16 2.5v4" />
+    <path d="M8 13.5h.01M12 13.5h.01M16 13.5h.01M8 17h.01M12 17h.01" strokeWidth={2.6} />
+  </svg>
+)
+export const IconTasks = () => (
+  <svg {...base}>
+    <path d="M4 6.5l1.8 1.8L9 5M4 12.5l1.8 1.8L9 11M4 18.5l1.8 1.8L9 17" />
+    <path d="M12.5 7h8M12.5 13h8M12.5 19h8" />
+  </svg>
+)
+export const IconProjects = () => (
+  <svg {...base}>
+    <path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
+  </svg>
+)
+export const IconNotes = () => (
+  <svg {...base}>
+    <path d="M6.5 2.5h8l4 4v13a2 2 0 0 1-2 2h-10a2 2 0 0 1-2-2v-15a2 2 0 0 1 2-2z" />
+    <path d="M14.5 2.5v4h4M8.5 12h7M8.5 16h7" />
+  </svg>
+)
 export const IconPlus = () => (
   <svg {...base} width={18} height={18}>
     <path d="M12 5v14M5 12h14" />

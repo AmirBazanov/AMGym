@@ -7,7 +7,7 @@ import {
   ApiError,
   EMPTY_PROFILE,
   EMPTY_TARGETS,
-  inTelegram,
+  hasAuth,
   timeoutSignal,
   getProgramOut,
   getPrograms,
@@ -175,9 +175,9 @@ function initialState(): State {
     restEnd: null,
     skipAutoStart: null,
     active: null,
-    // Inside Telegram the real history comes from the server; never show demo data there.
-    history: inTelegram ? [] : buildDemoHistory(program, startDate),
-    mode: inTelegram ? 'server' : 'demo',
+    // Inside Telegram (or logged in with /web) the real history comes from the server; never show demo data.
+    history: hasAuth ? [] : buildDemoHistory(program, startDate),
+    mode: hasAuth ? 'server' : 'demo',
     pending: [],
     rejected: [],
     targets: EMPTY_TARGETS,
@@ -200,7 +200,7 @@ function load(): State {
       const saved = JSON.parse(raw) as Partial<State>
       // A browser preview (demo mode) may share this origin's storage with Telegram Web. Inside
       // Telegram the history is the server's: never restore demo workouts or a demo session.
-      if (inTelegram && saved.mode === 'demo') {
+      if (hasAuth && saved.mode === 'demo') {
         delete saved.history
         delete saved.pending
         delete saved.rejected
@@ -787,7 +787,7 @@ export async function syncFromServer(): Promise<void> {
     retryActiveDeletes()
     if (activeOnServer(state)) void pushActive()
   } catch {
-    if (!inTelegram && state.mode !== 'demo') commit({ ...state, mode: 'demo' })
+    if (!hasAuth && state.mode !== 'demo') commit({ ...state, mode: 'demo' })
   }
 }
 
