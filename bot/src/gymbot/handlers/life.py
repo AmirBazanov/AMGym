@@ -11,8 +11,11 @@ Three ways in from handlers/log_text.process_text:
 
 Notes the bot writes («составь памятку по epoll»): the model returns write_note {title, brief}; a second call
 (gymbot.llm.prompts_note, purpose "advice") writes the Markdown and the preview shows its start with
-«Сохранить». While that draft is open, an instruction («добавь пример», «короче») rewrites it (`on_text`, asked
-first by process_text). edit_note of a saved note goes the same way with the note's text as the draft.
+«Сохранить». While that draft is open, `on_text` (asked first by process_text) rewrites it by a reply to the
+preview, by words that name the note («убери из памятки про select») or by a short writing instruction
+(«короче», «добавь пример», «перепиши проще»). Everyday words («добавь банан», «замени курицу на индейку»,
+«больше не болит колено») never rewrite it: they go on to the parser, so a record is never lost to a draft.
+edit_note of a saved note goes the same way with the note's text as the draft.
 
 Only the owner (gymbot.services.access.owner_user). Nothing is written until the button: previews live in
 memory (PENDING) for TTL and the first tap takes them, so a second tap or a restart answers STALE.
@@ -58,7 +61,7 @@ FAILED = "Не получилось разобрать, попробуй ещё 
 SAVE_FAILED = "Не получилось сохранить, попробуй ещё раз"
 NOT_OWNER = "«Дела» ведёт только владелец бота."
 SUGGESTED_FAILED = "Не получилось подготовить изменение в делах («{command}»), напиши его сам."
-DRAFT_HINT = "Пока не сохранил, можно поправить словами: «добавь пример», «короче»."
+DRAFT_HINT = "Пока не сохранил. Поправить: ответь на это сообщение, что изменить, или напиши «короче», «добавь пример»."
 TTL = timedelta(minutes=15)
 MAX_PENDING = 100
 PREVIEW_CHARS = 600  # of a note draft in the preview
@@ -99,6 +102,7 @@ class LifePending:
     sent_at: datetime
     question: dict | None = None  # the model's {"text", "options"} when it found nothing to do
     note_draft: NoteDraft | None = None
+    preview_id: int | None = None  # the chat message of the preview: a reply to it rewrites the note draft
 
     def all_acts(self) -> list[la.Act]:
         return [*self.acts, self.note_draft.act()] if self.note_draft is not None else list(self.acts)
@@ -296,19 +300,41 @@ def _store(pending: LifePending) -> str:
 async def send(message: Message, pending: LifePending, *, prefix: str = "") -> None:
     """The preview with «✅ Применить» («Сохранить» for a note alone), or the model's question with its options."""
     token = _store(pending)
-    await message.answer(prefix + render(pending), reply_markup=keyboard(token, pending))
+    sent = await message.answer(prefix + render(pending), reply_markup=keyboard(token, pending))
+    pending.preview_id = _message_id(sent)
+
+
+def _message_id(msg: Any) -> int | None:
+    mid = getattr(msg, "message_id", None)
+    return mid if isinstance(mid, int) else None
 
 
 # ---- the open note draft rewritten by words ----
 
+_FILLER = r"^[\s,.!]*(?:(?:а|и|ну|давай|можешь|пожалуйста|теперь|ещё|еще)[\s,]+)*"
+# Any editing verb: rewrites the draft only together with a word naming it («убери из памятки про select»).
 _REWRITE = re.compile(
-    r"^[\s,.!]*(?:(?:а|и|ну|давай|можешь|пожалуйста|теперь|ещё|еще)[\s,]+)*"
+    _FILLER + r"(?:(?:в|из)\s+(?:заметк|памятк|конспект|шпаргалк|черновик|текст)\w*[\s,]+)?"
     r"(?:добав|допиш|убер|удали|сократ|короч|покороч|подробн|длинн|расширь|расшир|упрост|проще|перепиш|передела|"
     r"исправ|замен|помен|сделай|оставь|без\s|больше|меньше|раскро|поясн|объясн|привед|пример|переведи|распиши|"
     r"уточни|разбей|структур)",
     re.IGNORECASE,
 )
 _NOTE_WORDS = re.compile(r"заметк|памятк|конспект|шпаргалк|черновик|текст", re.IGNORECASE)
+# «добавь задачу дописать конспект» is «Дела», not the draft.
+_LIFE_TARGET = re.compile(r"задач|туду|todo|дедлайн|(?<![а-яё])в\s+(?:дела|план)", re.IGNORECASE)
+# Pure writing instructions, good without naming the note. The bare adverbs only as the whole message: «короче,
+# съел шаурму» is a record with a filler word.
+_WRITING = re.compile(
+    _FILLER + r"(?:"
+    r"(?:сделай\s+|напиши\s+)?(?:(?:ещё|еще|чуть|немного)\s+)?"
+    r"(?:короче|покороче|подробнее|поподробнее|проще|попроще|понятнее)[\s.!,]*(?:пожалуйста[\s.!]*)?$"
+    r"|перепиши|упрости|перефразируй|переформулируй|переведи|(?:добавь|приведи)\s+пример"
+    r"|сделай\s+(?:\w+\s+)?(?:списком|таблиц\w*|в\s+виде\s+(?:списка|таблицы))"
+    r"|(?:другой|новый)\s+заголовок|(?:смени|поменяй|измени|придумай)\s+(?:\w+\s+)?заголовок"
+    r")",
+    re.IGNORECASE,
+)
 _AMOUNT = re.compile(r"\d+\s*(?:г|гр|грамм\w*|кг|шт\w*|ккал|мл|раз|подход\w*)(?![а-яё])", re.IGNORECASE)
 # Gym words: «замени жим на гантели» is about the program, whatever the edit gate thinks of it.
 _GYM = re.compile(
@@ -319,14 +345,18 @@ _GYM = re.compile(
 
 
 def is_rewrite(text: str, today: date) -> bool:
-    """«добавь пример», «короче», «убери про select»: an instruction for the open draft. Not a record with
-    amounts, and, unless it names the note, not a command of another path: «Дела» («добавь задачу …»), a
-    program edit or gym words («убери французский жим из дня рук», «замени жим на гантели»), a settings
-    request, a saved-record edit («удали самсу»)."""
-    if len(text) > 300 or _AMOUNT.search(text) or not _REWRITE.search(text):
+    """An instruction for the open draft said without replying to it: an editing verb with a word naming the
+    note («а теперь убери из памятки про select», «замени в памятке пример на питон»), or a pure writing
+    instruction («короче», «добавь пример», «перепиши проще», «сделай списком»). Everyday words without the note
+    («добавь банан», «замени курицу на индейку», «оставь только завтрак», «больше не болит колено») are not:
+    they may be a record. Never a record with amounts, nor a command of another path: «Дела» («добавь задачу
+    …»), a program edit or gym words, a settings request, a saved-record edit («удали самсу»)."""
+    if len(text) > 300 or _AMOUNT.search(text):
         return False
-    if _NOTE_WORDS.search(text):
+    if _NOTE_WORDS.search(text) and _REWRITE.search(text) and not _LIFE_TARGET.search(text):
         return True
+    if not _WRITING.search(text):
+        return False
     return not (
         _GYM.search(text) or is_life_command(text) or is_edit_command(text) or is_settings_request(text)
         or saved_edits.detect(text, today) is not None
@@ -343,16 +373,21 @@ def open_draft(tg_id: int, now: datetime) -> tuple[str, LifePending] | None:
 async def on_text(
     message: Message, text: str, llm: OpenRouterClient, *, dialog_at: datetime | None = None, prefix: str = ""
 ) -> bool:
-    """Rewrite the open note draft by `text` when it reads as an instruction for it and the draft is newer than
-    the parser's open dialog (`dialog_at`); True when the message was used here."""
+    """Rewrite the open note draft by `text`: a reply to its preview, whatever it says; else when it reads as an
+    instruction for the draft (`is_rewrite`) and the draft is newer than the parser's open dialog (`dialog_at`).
+    True when the message was used here."""
     tg = message.from_user
     if tg is None:
         return False
     found = open_draft(tg.id, message.date)
-    if found is None or (dialog_at is not None and dialog_at > found[1].sent_at):
+    if found is None:
         return False
-    if not is_rewrite(text, message.date.date()):  # the UTC date: only for the saved-edit words' day check
-        return False
+    replied = _message_id(getattr(message, "reply_to_message", None))
+    if replied is None or replied != found[1].preview_id:
+        if dialog_at is not None and dialog_at > found[1].sent_at:
+            return False
+        if not is_rewrite(text, message.date.date()):  # the UTC date: only for the saved-edit words' day check
+            return False
     token, pending = found
     draft = pending.note_draft
     assert draft is not None
@@ -434,6 +469,7 @@ async def on_option(cb: CallbackQuery, settings: Settings, sessionmaker: Session
         return
     token = _store(again)
     await cb.message.edit_text(render(again), reply_markup=keyboard(token, again))  # type: ignore[union-attr]
+    again.preview_id = _message_id(cb.message)  # the question's message now shows the preview
 
 
 @router.callback_query(F.data.startswith("ldrop:"))

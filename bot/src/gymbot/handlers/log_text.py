@@ -766,8 +766,9 @@ async def process_text(
     # open dialog is newer, or a short message about a saved product ("тот же батончик", "протеин 1 скуп").
     ex = recent_exchange(user_id, message.date)
     dialog_at = ex.at if ex is not None and _dialog_open(user_id, message.date) else None
-    # An open «Дела» note draft ("составь памятку по epoll") rewritten by words: "добавь пример", "короче"
-    # (handlers/life.py), unless the parser's open dialog is newer.
+    # An open «Дела» note draft ("составь памятку по epoll") rewritten by a reply to its preview, or by words that
+    # name the note or only make sense for a text ("добавь пример", "короче"; handlers/life.py), unless the
+    # parser's open dialog is newer. "добавь банан" is never one: it goes on to the parser.
     if await life_chat.on_text(message, text, llm, dialog_at=dialog_at, prefix=prefix):
         return
     if await product_cards.on_text(message, text, raw, sessionmaker, dialog_at=dialog_at, prefix=prefix):

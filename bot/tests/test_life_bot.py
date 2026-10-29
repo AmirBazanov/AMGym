@@ -4,6 +4,7 @@ the diary answer and the «Дела» block of the answer (gymbot.services.answe
 Also the dashboard's Telegram initData on /api/hub/state (moved from the removed tests/test_hub_tasks.py)."""
 
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -426,8 +427,74 @@ def test_rewrite_instructions():
         assert hl.is_rewrite(text, TODAY), text
     for text in ("съел гречку 200 г", "добавь задачу купить билеты", "вынес мусор", "жим 3 подхода по 8", "привет",
                  "сделай сегодня день рук", "убери французский жим из дня рук", "замени жим на гантели",
-                 "удали самсу", "исправь: самса была 2", "норма 2800 ккал"):
+                 "удали самсу", "исправь: самса была 2", "норма 2800 ккал", *RECORDS_NOT_REWRITES,
+                 "короче, съел шаурму", "добавь задачу дописать конспект", "переведи тренировку на завтра"):
         assert not hl.is_rewrite(text, TODAY), text
+    for text in ("сделай списком", "переведи на английский", "перефразируй", "другой заголовок", "упрости",
+                 "покороче, пожалуйста", "в памятку добавь про edge-triggered", "добавь примеры кода"):
+        assert hl.is_rewrite(text, TODAY), text
+
+
+# Everyday words of a gym diary: with a draft open they still go to the parser, never to the note writer.
+RECORDS_NOT_REWRITES = (
+    "добавь банан", "добавь 2 яйца к завтраку", "замени курицу на индейку", "поменяй рис на гречку",
+    "оставь только завтрак", "больше не болит колено", "меньше спал сегодня, 5 часов", "без сахара кофе выпил",
+)
+
+
+def open_draft(token: str = "draft", preview_id: int | None = 555) -> None:
+    hl.PENDING[token] = hl.LifePending(
+        USER, "составь памятку по epoll", "составь памятку по epoll", [], [], [], T0,
+        note_draft=hl.NoteDraft("Памятка по epoll", "epoll", EPOLL), preview_id=preview_id,
+    )
+
+
+@pytest.fixture
+def writer(monkeypatch) -> list[str]:
+    calls: list[str] = []
+
+    async def write(llm, brief, draft, instruction):
+        calls.append(instruction)
+        return EPOLL_EXAMPLE
+
+    monkeypatch.setattr(hl, "_write", write)
+    return calls
+
+
+@pytest.mark.parametrize("text", RECORDS_NOT_REWRITES)
+async def test_record_words_with_a_draft_open_go_their_way(text, life_settings, db, no_diary, writer):
+    await owner(db)
+    open_draft()
+    llm = FakeLLM(life_settings)
+    llm.answers += [food(1, "банан")] * 4  # whatever path takes it (parser, saved edits) gets an answer
+    await say(text, llm, life_settings, db, at=T0 + timedelta(minutes=1))
+    assert writer == [] and "draft" in hl.PENDING  # the draft is untouched
+    assert llm.bodies and not any(is_life_request(b) for b in llm.bodies)
+
+
+async def test_a_reply_to_the_draft_rewrites_it(life_settings, db, writer):
+    await owner(db)
+    open_draft()
+    llm = FakeLLM(life_settings)
+    msg = message("добавь банан в конце", T0 + timedelta(minutes=1))
+    msg.reply_to_message = SimpleNamespace(message_id=555)
+    msg.answer.return_value = SimpleNamespace(message_id=777)
+    await log_text.process_text(msg, msg.text, life_settings, db, llm.client)
+    assert writer == ["добавь банан в конце"] and llm.bodies == []
+    assert "epoll_create1" in shown(msg) and "draft" not in hl.PENDING
+    [(_, pending)] = hl.PENDING.items()
+    assert pending.preview_id == 777  # the next reply goes to the new preview
+
+
+async def test_a_reply_to_another_message_is_not_a_rewrite(life_settings, db, no_diary, writer):
+    await owner(db)
+    open_draft()
+    llm = FakeLLM(life_settings)
+    llm.answers += [food(1, "банан")] * 4  # the parser and its plausibility repair round
+    msg = message("добавь банан", T0 + timedelta(minutes=1))
+    msg.reply_to_message = SimpleNamespace(message_id=1)
+    await log_text.process_text(msg, msg.text, life_settings, db, llm.client)
+    assert writer == [] and "draft" in hl.PENDING and len(log_text.PENDING) == 1
 
 
 async def test_a_program_edit_while_a_draft_is_open_is_a_program_edit(life_settings, db, monkeypatch):
