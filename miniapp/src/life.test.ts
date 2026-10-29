@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  parseEvent,
   addDays,
   agendaDoneKind,
   agendaLabel,
@@ -141,6 +142,14 @@ const sample = {
     { kind: 'chore', id: 5, title: 'Уборка', start: null, end: null, area: null, place: null, done: false, overdueDays: 0 },
   ],
 }
+
+describe('parseEvent midnight', () => {
+  it('keeps 24:00 as the end (the server stores midnight so)', () => {
+    const e = parseEvent({ id: 1, day: '2026-10-29', start: '23:00', end: '24:00', title: 'HTTP', area: 'study',
+      projectId: null, remindBefore: null, done: false, note: null })
+    expect(e?.end).toBe('24:00')
+  })
+})
 
 describe('parseView', () => {
   it('round-trips a full valid sample', () => {

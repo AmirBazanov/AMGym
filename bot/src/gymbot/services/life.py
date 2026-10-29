@@ -268,9 +268,10 @@ async def _check_project(session: AsyncSession, user_id: int, fields: dict[str, 
 
 
 def _check_span(row: Any, fields: dict[str, Any]) -> None:
+    """An update moving only the start or the end: the same rule as life_actions.fix_span, on the merged values."""
     start, end = fields.get("start", getattr(row, "start", None)), fields.get("end", getattr(row, "end", None))
     if start and end and end <= start:
-        raise ValueError("Конец раньше начала")
+        fields["end"] = "24:00" if end == "00:00" else None  # life_actions.MIDNIGHT (it imports this module)
 
 
 async def add(
@@ -361,6 +362,21 @@ def _name(row: Any) -> str:
     return getattr(row, "title", None) or getattr(row, "name", None) or f"#{row.id}"
 
 
+def _when(row: Any, today: date) -> str:
+    """« — сегодня в 23:00–24:00», « — каждый чт в 10:00» for plans, deadlines and the schedule; "" otherwise:
+    the done message shows when, so a wrong day or hour is seen at once."""
+    start, end = getattr(row, "start", None), getattr(row, "end", None)
+    at = f" в {start}" + (f"–{end}" if end else "") if start else ""
+    day = getattr(row, "day", None)
+    if isinstance(day, date):
+        near = {0: "сегодня", 1: "завтра", 2: "послезавтра", -1: "вчера"}.get((day - today).days)
+        return f" — {near or f'{WEEKDAYS[day.weekday()]} {day:%d.%m}'}{at}"
+    weekday = getattr(row, "weekday", None)
+    if isinstance(weekday, int):
+        return f" — каждый {WEEKDAYS[weekday - 1]}{at}"
+    return ""
+
+
 async def apply(
     session: AsyncSession, user: User, acts: list[Act], now: datetime, *, today: date | None = None,
     source: str = "me",
@@ -377,7 +393,7 @@ async def apply(
         try:
             if a.op == "add":
                 row = await add(session, user.id, kind, a.fields, now, source=source)
-                lines.append(f"Добавил {_ADDED[kind]} «{_name(row)}»")
+                lines.append(f"Добавил {_ADDED[kind]} «{_name(row)}»{_when(row, today)}")
             elif a.op == "settings":
                 set_settings(user, a.fields)
                 lines.append("Обновил настройки напоминаний")
@@ -395,7 +411,7 @@ async def apply(
                 if row is None:
                     lines.append(f"Не нашёл #{a.id} {_IN.get(kind, '')}")
                     continue
-                lines.append(f"{verb} «{_name(row)}»")
+                lines.append(f"{verb} «{_name(row)}»{_when(row, today) if a.op == 'update' else ''}")
             else:
                 log.warning("life.apply: %s is not applied here", a.op)
                 continue

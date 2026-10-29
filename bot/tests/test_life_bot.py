@@ -54,7 +54,7 @@ def clock(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def clean():
-    stores = (hl.PENDING, log_text.PENDING, log_text.CONTEXT, log_text.FACTS, log_text.QA)
+    stores = (hl.PENDING, hl.HISTORY, log_text.PENDING, log_text.CONTEXT, log_text.FACTS, log_text.QA)
     for store in stores:
         store.clear()
     yield
@@ -205,8 +205,9 @@ async def test_study_plan_preview_apply_and_stale(life_settings, db, published):
     msg = await say("В учёбу добавь сегодня в 11 позаниматься HTTP-сервером на C", llm, life_settings, db,
                     raw_text="[voice] …", prefix="Распознал\n\n")
     assert len(llm.bodies) == 1 and is_life_request(llm.bodies[0])  # only the «Дела» model, not the parser
-    assert "Сегодня: 2026-10-06, вторник" in llm.bodies[0]["messages"][1]["content"]
-    assert shown(msg) == f"Распознал\n\nВ учёбу: «{HTTP}» — сегодня в 11:00"
+    assert "Сейчас: 2026-10-06, вторник, 15:00" in llm.bodies[0]["messages"][-1]["content"]
+    # The fake model put it at 11:00 while it is 15:00: the preview says so (the real one is told the time).
+    assert shown(msg) == f"Распознал\n\nВ учёбу: «{HTTP}» — сегодня в 11:00 (это время сегодня уже прошло)"
     assert [t for t, _ in buttons(msg)] == ["✅ Применить", "Отмена"]
     assert await rows(db, LifeEvent) == []  # nothing before the button
 
@@ -217,7 +218,7 @@ async def test_study_plan_preview_apply_and_stale(life_settings, db, published):
     assert (event.day, event.start, event.title, event.area, event.user_id) == (TODAY, "11:00", HTTP, "study", uid)
     assert (uid, "life") in published
     edited = cb.message.edit_text.await_args
-    assert edited.args[0] == f"Готово:\n• Добавил план «{HTTP}»"
+    assert edited.args[0] == f"Готово:\n• Добавил план «{HTTP}» — сегодня в 11:00"  # the when, to catch a wrong hour
     assert edited.kwargs["reply_markup"].inline_keyboard[0][0].web_app.url == "https://gym.example?section=life"
 
     again = callback(f"lapply:{token}")  # a second tap adds nothing
@@ -273,7 +274,7 @@ async def test_slot_moved_to_another_weekday(life_settings, db):
     llm = FakeLLM(life_settings)
     llm.answers.append(life_answer({"op": "update", "entity": "slot", "id": slot.id, "fields": {"weekday": 2}}))
     msg = await say("перенеси урок ИЗ Математика с понедельника на вторник", llm, life_settings, db)
-    assert f"#{slot.id} пн 10:00 ИЗ Математика" in llm.bodies[0]["messages"][1]["content"]
+    assert f"#{slot.id} пн 10:00 ИЗ Математика" in llm.bodies[0]["messages"][-1]["content"]
     assert shown(msg) == "Перенесу «ИЗ Математика» с пн на вт"
     await hl.on_apply(callback(f"lapply:{token_of(msg)}"), life_settings, db)
     [slot] = await rows(db, LifeSlot)
@@ -299,7 +300,7 @@ async def test_tomorrow_after_midnight_in_tashkent(tmp_path, db):
     llm.answers.append(life_answer(add_event(day="2026-10-08", start="15:00", title="Созвон", area="work")))
     at = datetime(2026, 10, 6, 19, 30, tzinfo=UTC)
     msg = await say("запланируй завтра в 15 созвон", llm, settings, db, at=at)
-    assert "Сегодня: 2026-10-07, среда" in llm.bodies[0]["messages"][1]["content"]
+    assert "Сейчас: 2026-10-07, среда, 00:30" in llm.bodies[0]["messages"][-1]["content"]
     assert shown(msg) == "В работу: «Созвон» — завтра в 15:00"
 
 
@@ -364,7 +365,7 @@ async def test_question_with_options_then_preview(life_settings, db):
     data = buttons(msg)[1][1]
     cb = callback(data)
     await hl.on_option(cb, life_settings, db, llm.client)
-    assert llm.bodies[1]["messages"][1]["content"].endswith("Сообщение: запланируй созвон\nУточнение: Завтра")
+    assert llm.bodies[1]["messages"][-1]["content"].endswith("Сообщение: запланируй созвон\nУточнение: Завтра")
     edited = cb.message.edit_text.await_args
     assert edited.args[0] == "В работу: «Созвон» — завтра"
     apply = edited.kwargs["reply_markup"].inline_keyboard[0][0].callback_data
@@ -719,7 +720,7 @@ async def test_answer_suggests_a_life_change_under_itself(life_settings, db):
     assert first == "Добавлю в задачи." and "ДЕЛА" not in first
     assert second == "Добавлю задачу «Купить билеты на поезд»"
     assert is_life_request(llm.bodies[2])
-    assert llm.bodies[2]["messages"][1]["content"].endswith("Сообщение: добавь задачу купить билеты на поезд")
+    assert llm.bodies[2]["messages"][-1]["content"].endswith("Сообщение: добавь задачу купить билеты на поезд")
     assert log_text.QA[USER][-1][1].endswith("\nДЕЛА: добавь задачу купить билеты на поезд")
 
 
@@ -816,3 +817,81 @@ async def test_state_with_init_data(hub_settings, db):
                                                       "Access-Control-Request-Method": "GET"})
         assert "X-Telegram-Init-Data" in r.headers["access-control-allow-headers"]
 
+
+
+# ---- the conversation: a follow-up is read in context (Amir, 2026-10-29) ----
+
+EVENING = datetime(2026, 10, 6, 19, 55, tzinfo=ZoneInfo("Europe/Moscow")).astimezone(UTC)
+WORK_ON = "Продолжить работу над HTTP-сервером на C"
+
+
+async def test_follow_up_corrects_the_open_preview(life_settings, db):
+    """«Сегодня в 11-12 …» at 19:55, then «11-12 ночи»: the second message goes to «Дела» with the conversation (not
+    to the parser as sleep), its preview replaces the first one, and the plan is 23:00–24:00."""
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers += [{"kind": "life"}, life_answer(add_event(start="11:00", title=WORK_ON) | {"fields": {
+        "day": "2026-10-06", "start": "11:00", "end": "12:00", "title": WORK_ON, "area": "study"}})]
+    first = await say("Сегодня в 11-12 продолжить работу над c http сервером", llm, life_settings, db, at=EVENING)
+    assert "Сейчас: 2026-10-06, вторник, 19:55" in llm.bodies[1]["messages"][-1]["content"]
+    assert "(это время сегодня уже прошло)" in shown(first)
+    old_token = token_of(first)
+
+    llm.answers.append(life_answer({"op": "add", "entity": "event", "fields": {
+        "day": "2026-10-06", "start": "23:00", "end": "00:00", "title": WORK_ON, "area": "study"}}))
+    second = await say("11-12 ночи", llm, life_settings, db, at=EVENING + timedelta(minutes=1))
+    assert len(llm.bodies) == 3 and is_life_request(llm.bodies[2])  # «Дела», not the parser («сон»)
+    talk = llm.bodies[2]["messages"]
+    assert talk[1] == {"role": "user", "content": "Сегодня в 11-12 продолжить работу над c http сервером"}
+    assert talk[2]["role"] == "assistant" and WORK_ON in talk[2]["content"]
+    assert talk[-1]["content"].endswith("Сообщение: 11-12 ночи")
+    assert shown(second) == f"В учёбу: «{WORK_ON}» — сегодня в 23:00–24:00"  # midnight as the end, no error
+
+    stale = callback(f"lapply:{old_token}")  # the first preview no longer adds a 11:00 plan
+    await hl.on_apply(stale, life_settings, db)
+    assert stale.answer.await_args.args[0] == hl.STALE
+    cb = callback(f"lapply:{token_of(second)}")
+    await hl.on_apply(cb, life_settings, db)
+    [event] = await rows(db, LifeEvent)
+    assert (event.start, event.end) == ("23:00", "24:00")
+    assert cb.message.edit_text.await_args.args[0] == f"Готово:\n• Добавил план «{WORK_ON}» — сегодня в 23:00–24:00"
+
+
+async def test_follow_up_after_apply_updates_the_plan(life_settings, db):
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers += [{"kind": "life"}, life_answer(add_event(start="21:00", title=WORK_ON))]
+    msg = await say("сегодня в 9 продолжить работу над http сервером", llm, life_settings, db, at=EVENING)
+    await hl.on_apply(callback(f"lapply:{token_of(msg)}"), life_settings, db)
+    [event] = await rows(db, LifeEvent)
+
+    llm.answers.append(life_answer({"op": "update", "entity": "event", "id": event.id, "fields": {"start": "23:00"}}))
+    fix = await say("нет, в 11", llm, life_settings, db, at=EVENING + timedelta(minutes=2))
+    talk = llm.bodies[2]["messages"]
+    assert any(m["role"] == "assistant" and m["content"].startswith("Готово:") for m in talk)
+    assert f"#{event.id}" in talk[-1]["content"]  # the plan just added is in the list with its id
+    await hl.on_apply(callback(f"lapply:{token_of(fix)}"), life_settings, db)
+    [event] = await rows(db, LifeEvent)
+    assert event.start == "23:00"
+
+
+async def test_a_record_after_a_life_reply_is_still_a_record(life_settings, db, monkeypatch):
+    """Right after a «Дела» reply «съел гречку 200 г» is food: the follow-up path never takes a diary record."""
+    async def parser_answer(message, text, result, *args):
+        return result, None, None
+
+    monkeypatch.setattr(log_text, "_diary_answer", parser_answer)
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers += [{"kind": "life"}, life_answer(add_event(start="21:00", title=WORK_ON))]
+    await say("сегодня в 9 продолжить работу над http сервером", llm, life_settings, db, at=EVENING)
+    llm.answers.append(food(1, "гречка"))
+    await say("съел гречку 200 г", llm, life_settings, db, at=EVENING + timedelta(minutes=1))
+    assert len(llm.bodies) == 3 and not is_life_request(llm.bodies[2])  # the parser, not «Дела»
+
+
+async def test_history_expires():
+    hl.remember(1, T0, "assistant", "В планы: …")
+    assert hl.recent(1, T0 + timedelta(minutes=14))
+    assert not hl.recent(1, T0 + timedelta(minutes=16))
+    assert hl.history(1, T0 + timedelta(minutes=31)) == []

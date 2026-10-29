@@ -173,8 +173,9 @@ const posId = (v: unknown): number | null => {
   return n != null && n > 0 ? n : null
 }
 const dateStr = (v: unknown): string | null => (typeof v === 'string' && DATE_RE.test(v) ? v : null)
-/** "HH:MM", also from "HH:MM:SS". */
-const timeStr = (v: unknown): string | null => (typeof v === 'string' && TIME_RE.test(v.slice(0, 5)) ? v.slice(0, 5) : null)
+/** "HH:MM", also from "HH:MM:SS"; "24:00" too — the server's end at midnight («11-12 ночи» = 23:00–24:00). */
+const timeStr = (v: unknown): string | null =>
+  typeof v === 'string' && (TIME_RE.test(v.slice(0, 5)) || v.slice(0, 5) === '24:00') ? v.slice(0, 5) : null
 function oneOf<T extends string>(v: unknown, list: readonly T[], fallback: T): T {
   return typeof v === 'string' && (list as readonly string[]).includes(v) ? (v as T) : fallback
 }

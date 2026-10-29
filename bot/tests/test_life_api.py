@@ -133,7 +133,6 @@ async def test_validation_422(client, auth, today):
         ("slots", {"weekday": 8, "start": "10:00", "title": "x"}, "день недели"),
         ("slots", {"weekday": 1, "start": "25:00", "title": "x"}, "ЧЧ:ММ"),
         ("events", {"day": (today + timedelta(days=500)).isoformat(), "title": "x"}, "дальше 400 дней"),
-        ("events", {"day": today.isoformat(), "title": "x", "start": "12:00", "end": "11:00"}, "Конец раньше"),
         ("projects", {"name": "x", "kind": "hobby"}, "work, learning, own"),
         ("chores", {"title": "x", "everyDays": 0}, "от 1 до 365"),
     ]
@@ -144,8 +143,11 @@ async def test_validation_422(client, auth, today):
     assert (await client.post("/api/life/tasks", json=["x"], headers=auth)).status_code == 422
     assert (await client.get("/api/life/view", headers=auth)).json()["tasks"] == []
     sid = (await client.post("/api/life/slots", json=BODIES["slots"] | {"end": "11:00"}, headers=auth)).json()["id"]
-    r = await client.patch(f"/api/life/slots/{sid}", json={"end": "09:00"}, headers=auth)  # against the stored start
-    assert r.status_code == 422 and r.json()["detail"] == "Конец раньше начала"
+    r = await client.patch(f"/api/life/slots/{sid}", json={"end": "09:00"}, headers=auth)  # before the stored start
+    assert r.status_code == 200 and r.json()["end"] is None  # dropped, the start stays
+    r = await client.post("/api/life/events", json={"day": today.isoformat(), "title": "x", "start": "23:00",
+                                                    "end": "00:00"}, headers=auth)
+    assert r.status_code == 201 and r.json()["end"] == "24:00"  # midnight as the end of the day
     r = await client.patch(f"/api/life/slots/{sid}", json={"title": None}, headers=auth)
     assert r.status_code == 422
 

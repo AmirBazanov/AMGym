@@ -412,6 +412,11 @@ def test_validate_fields():
     assert v("settings", {"summary_time": "7:00", "summary_enabled": False, "remind_before": 0}, TODAY,
              partial=True) == {"summary_time": "07:00", "summary_enabled": False, "remind_before": 0}
     assert v("task", {}, TODAY, partial=True) == {}
+    # An end not after the start is never an error for the user: midnight is the end of the day, an end past
+    # midnight («с 23 до 1») is dropped, the start stays.
+    assert v("event", {"start": "23:00", "end": "00:00"}, TODAY, partial=True) == {"start": "23:00", "end": "24:00"}
+    assert v("event", {"start": "23:00", "end": "24:00"}, TODAY, partial=True) == {"start": "23:00", "end": "24:00"}
+    assert v("event", {"start": "23:00", "end": "01:00"}, TODAY, partial=True) == {"start": "23:00", "end": None}
     bad = [
         ("slot", {"weekday": 8}, "день недели"),
         ("slot", {"start": "25:00"}, "ЧЧ:ММ"),
@@ -419,7 +424,7 @@ def test_validate_fields():
         ("event", {"day": "завтра"}, "ГГГГ-ММ-ДД"),
         ("event", {"color": "red"}, "Неизвестное поле «color»"),
         ("event", {"area": "gym"}, "одно из study, work, other"),
-        ("event", {"start": "12:00", "end": "11:00"}, "Конец раньше начала"),
+        ("event", {"start": "24:00"}, "ЧЧ:ММ"),  # midnight only as an end
         ("task", {"title": "   "}, "не может быть пустым"),
         ("task", {"title": "я" * 201}, "не длиннее 200"),
         ("chore", {"every_days": 0}, "от 1 до 365"),
@@ -569,9 +574,11 @@ async def test_apply_every_action(db, monkeypatch):
         user = await s.get(User, uid)
         lines = await life.apply(s, user, acts, later, today=TODAY)
     assert lines == [
-        "Добавил в расписание «Сети»", "Добавил план «HTTP»", "Добавил дедлайн «Лаба»",
+        "Добавил в расписание «Сети» — каждый ср в 10:00", "Добавил план «HTTP» — сегодня в 11:00",
+        "Добавил дедлайн «Лаба» — сегодня",
         "Добавил задачу «Купить билеты»", "Добавил дело по дому «Полить цветы»", "Добавил проект «Трекер идей»",
-        "Добавил заметку «Идея»", "Изменил «HTTP-сервер»", "Изменил «Курсовая»", "Изменил «ИЗ Математика»",
+        "Добавил заметку «Идея»", "Изменил «HTTP-сервер» — сегодня в 11:30", "Изменил «Курсовая» — пн 02.11",
+        "Изменил «ИЗ Математика» — каждый вт в 10:00",
         "Отметил сделанным «Обновить резюме»", "Отметил сделанным «HTTP-сервер»", "Отметил сделанным «Уборка»",
         "Удалил «Памятка по epoll»", f"Не нашёл #{ids['note']} в заметках", "Не нашёл #999 в задачах",
         "Нет проекта #999", "Обновил настройки напоминаний",

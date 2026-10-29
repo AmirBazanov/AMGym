@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import re
 import secrets
+from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -68,6 +69,11 @@ TTL = timedelta(minutes=15)
 MAX_PENDING = 100
 PREVIEW_CHARS = 600  # of a note draft in the preview
 WEEKDAY_NAMES = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+# The «Дела» conversation: the model sees the last turns like a chat, and a message right after a «Дела» reply
+# («11-12 ночи», «нет, вечером», «перенеси на завтра») goes to «Дела» first (handlers/log_text.py).
+HISTORY_TURNS = 8
+HISTORY_TTL = timedelta(minutes=30)
+FOLLOWUP_TTL = timedelta(minutes=15)
 
 
 def utcnow() -> datetime:
@@ -116,6 +122,33 @@ class LifePending:
 PENDING: dict[str, LifePending] = {}
 
 
+@dataclass
+class Turn:
+    at: datetime
+    role: str  # "user" | "assistant"
+    text: str
+
+
+HISTORY: dict[int, deque[Turn]] = {}
+
+
+def remember(tg_id: int, at: datetime, role: str, text: str) -> None:
+    """One turn of the «Дела» conversation (the owner's message or the bot's reply), newest last."""
+    turns = HISTORY.setdefault(tg_id, deque(maxlen=HISTORY_TURNS))
+    turns.append(Turn(at, role, text))
+
+
+def history(tg_id: int, now: datetime) -> list[dict[str, str]]:
+    """The recent turns as chat messages for the model (only the last HISTORY_TTL)."""
+    return [{"role": t.role, "content": t.text} for t in HISTORY.get(tg_id, ()) if now - t.at <= HISTORY_TTL]
+
+
+def recent(tg_id: int, now: datetime) -> bool:
+    """The bot answered about «Дела» in the last FOLLOWUP_TTL: the next message may be its follow-up."""
+    turns = HISTORY.get(tg_id)
+    return bool(turns) and turns[-1].role == "assistant" and now - turns[-1].at <= FOLLOWUP_TTL
+
+
 # ---- the Mini App button ----
 
 
@@ -147,8 +180,9 @@ def local_day(at: datetime, settings: Settings) -> date:
     return at.astimezone(ZoneInfo(settings.timezone)).date()
 
 
-def today_line(today: date) -> str:
-    return f"Сегодня: {today.isoformat()}, {WEEKDAY_NAMES[today.weekday()]}"
+def today_line(now_local: datetime) -> str:
+    """«Сейчас: 2026-10-29, четверг, 19:55»: the time decides «сегодня в 11» (already past: the evening)."""
+    return f"Сейчас: {now_local.date().isoformat()}, {WEEKDAY_NAMES[now_local.weekday()]}, {now_local:%H:%M}"
 
 
 async def _write(llm: OpenRouterClient, brief: str, draft: str | None, instruction: str | None) -> str:
@@ -181,20 +215,25 @@ async def _stage(
     found nothing, the notes about the actions it dropped («Дата … дальше 400 дней»), NOT_OWNER for anyone but
     the owner (no model call), FAILED on any error."""
     try:
-        today = local_day(at, settings)
+        now_local = at.astimezone(ZoneInfo(settings.timezone))
+        today = now_local.date()
         async with sessionmaker() as session:
             owner = await owner_user(session, settings)
             if owner is None or owner.telegram_id != tg_id:
                 return None, NOT_OWNER
             view = await life.snapshot(session, owner.id, today)
-        messages = build_life_messages(text, life.prompt_text(view), today_line(today))
+        messages = build_life_messages(
+            text, life.prompt_text(view), today_line(now_local), history(tg_id, at.astimezone(UTC))
+        )
+        remember(tg_id, at.astimezone(UTC), "user", text)
         data = await llm.complete_json(messages, prefer="actions", purpose="json")
         parsed, notes, question = la.parse(data, view, today)
         acts = [a for a in parsed if a.op not in ("write_note", "edit_note")]
         draft = await _draft(parsed, view, llm)
         if len(parsed) - len(acts) > 1:
             notes.append("За раз пишу одну заметку, остальные попроси отдельно.")
-        pending = LifePending(tg_id, text, raw, acts, la.describe(acts, view, today), notes, at, question, draft)
+        lines = la.describe(acts, view, today, now_local.strftime("%H:%M"))
+        pending = LifePending(tg_id, text, raw, acts, lines, notes, at, question, draft)
     except Exception as e:  # noqa: BLE001 - a failing «Дела» path must never cost the user a record
         log.warning("life command failed (%s)", type(e).__name__)
         return None, FAILED
@@ -227,6 +266,7 @@ async def handle_parsed(
     pending, why = await _stage(tg.id, message.date, text, raw, settings, sessionmaker, llm)
     if pending is None:
         await message.answer(prefix + (why or NOT_UNDERSTOOD))
+        remember(tg.id, message.date.astimezone(UTC), "assistant", why or NOT_UNDERSTOOD)
         return
     await send(message, pending, prefix=prefix)
 
@@ -286,8 +326,13 @@ def keyboard(token: str, pending: LifePending) -> InlineKeyboardMarkup:
     )
 
 
-def _store(pending: LifePending) -> str:
+def _store(pending: LifePending, *, replace: bool = False) -> str:
+    """`replace`: the preview corrects the user's earlier one («11-12 ночи» after «сегодня в 11-12 …»), which
+    stops being appliable, so the plan is never added twice."""
     now = utcnow()
+    if replace:
+        for t in [t for t, p in PENDING.items() if p.user_id == pending.user_id]:
+            PENDING.pop(t, None)
     for t in [t for t, p in PENDING.items() if now - p.sent_at > TTL]:
         PENDING.pop(t, None)
     while len(PENDING) >= MAX_PENDING:
@@ -300,11 +345,14 @@ def _store(pending: LifePending) -> str:
     return token
 
 
-async def send(message: Message, pending: LifePending, *, prefix: str = "") -> None:
-    """The preview with «✅ Применить» («Сохранить» for a note alone), or the model's question with its options."""
-    token = _store(pending)
-    sent = await message.answer(prefix + render(pending), reply_markup=keyboard(token, pending))
+async def send(message: Message, pending: LifePending, *, prefix: str = "", replace: bool = False) -> None:
+    """The preview with «✅ Применить» («Сохранить» for a note alone), or the model's question with its options.
+    `replace`: a follow-up — the user's earlier previews stop being appliable."""
+    token = _store(pending, replace=replace)
+    text = render(pending)
+    sent = await message.answer(prefix + text, reply_markup=keyboard(token, pending))
     pending.preview_id = _message_id(sent)
+    remember(pending.user_id, pending.sent_at.astimezone(UTC), "assistant", text)  # the user's clock, as `recent`
 
 
 def _message_id(msg: Any) -> int | None:
@@ -437,8 +485,9 @@ async def on_apply(cb: CallbackQuery, settings: Settings, sessionmaker: Sessionm
             return
     log.info("«Дела» from the chat %r: %s", pending.raw, [(a.op, a.entity) for a in pending.all_acts()])
     await cb.answer("Готово")
+    text = "Готово:\n" + _bullets(done) if done else "Менять нечего."
+    remember(pending.user_id, max(utcnow(), pending.sent_at.astimezone(UTC)), "assistant", text)
     if cb.message:
-        text = "Готово:\n" + _bullets(done) if done else "Менять нечего."
         await cb.message.edit_text(text, reply_markup=open_kb(settings))  # type: ignore[union-attr]
 
 

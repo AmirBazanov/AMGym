@@ -819,13 +819,22 @@ async def process_text(
     # (handlers/life.py). Consumes the message only when the model found an action or asks a question; else it
     # goes on. A message that may be a diary record is never asked here ("купил продукты на ужин: курица 300 г"
     # is food): the parser's kind="life" brings it to «Дела» below.
-    life_asked = not _dialog_open(user_id, message.date) and is_life_command(text) and not _diary_like(text)
+    # Right after a «Дела» reply a message may be its follow-up («11-12 ночи», «нет, вечером»): the «Дела» model
+    # reads it in the conversation (handlers/life.history) before the parser could take it for sleep or food.
+    life_followup = not _dialog_open(user_id, message.date) and life_chat.recent(user_id, message.date)
+    life_asked = (
+        not _dialog_open(user_id, message.date)
+        and (is_life_command(text) or life_followup)
+        and not _diary_like(text)
+    )
     life_why: str | None = None
     if life_asked:
         async with keep_typing(message):
-            life_pending, life_why = await life_chat.stage(message, text, raw, settings, sessionmaker, llm)
+            life_pending, life_why = await life_chat.stage(
+                message, text, raw, settings, sessionmaker, llm, forced=life_followup
+            )
         if life_pending is not None:
-            await life_chat.send(message, life_pending, prefix=prefix)
+            await life_chat.send(message, life_pending, prefix=prefix, replace=life_followup)
             return
     # "убери французский жим из дня рук", "поставь на сгибания 30 кг": the program, its own preview
     # (handlers/chat_edit.py). Consumes the message only when the model found a valid edit; else it goes on.

@@ -103,8 +103,13 @@ def _block(value: Any, limit: int, key: str) -> str:
     return out
 
 
+MIDNIGHT = "24:00"  # an end at midnight («11-12 ночи» = 23:00–24:00): sorts after every start of the day
+
+
 def check_time(value: Any, key: str = "start") -> str:
-    """"9:00" / "09:00" -> "09:00"; ValueError for "25:00" and anything else."""
+    """"9:00" / "09:00" -> "09:00"; "24:00" only as an end (midnight); ValueError for "25:00" and anything else."""
+    if key == "end" and isinstance(value, str) and value.strip() in (MIDNIGHT, "24:0"):
+        return MIDNIGHT
     m = _TIME.match(value.strip()) if isinstance(value, str) else None
     if m is None:
         raise ValueError(f"Поле {_name(key)}: время в виде ЧЧ:ММ, а не «{value}»")
@@ -219,9 +224,16 @@ def validate_fields(entity: str, fields: dict, today: date, *, partial: bool) ->
         for key in REQUIRED[entity]:
             if out.get(key) is None:
                 raise ValueError(f"Нужно поле {_name(key)}")
-    if out.get("start") and out.get("end") and out["end"] <= out["start"]:
-        raise ValueError("Конец раньше начала")
+    fix_span(out, out.get("start"))
     return out
+
+
+def fix_span(fields: dict, start: str | None) -> None:
+    """An end not after `start`: midnight ("00:00") becomes "24:00", an end past midnight («с 23 до 1») is
+    dropped — the plan keeps its start; never an error for the user."""
+    end = fields.get("end")
+    if start and end and end <= start:
+        fields["end"] = MIDNIGHT if end == "00:00" else None
 
 
 # ---- the model's answer ----
@@ -423,7 +435,7 @@ def _describe_settings(f: dict) -> list[str]:
     return out
 
 
-def describe(acts: list[Act], view: LifeView, today: date) -> list[str]:
+def describe(acts: list[Act], view: LifeView, today: date, now_hhmm: str | None = None) -> list[str]:
     """Preview lines: «В учёбу: «Позаниматься HTTP-сервером на C» — сегодня в 11:00», «Закрою задачу «…»»,
     «Перенесу «ИЗ Математика» с пн на вт»."""
     lines: list[str] = []
@@ -432,7 +444,11 @@ def describe(acts: list[Act], view: LifeView, today: date) -> list[str]:
             lines += _describe_settings(a.fields)
             continue
         if a.op == "add":
-            lines.append(_describe_add(a, today))
+            line = _describe_add(a, today)
+            f = a.fields
+            if a.entity == "event" and now_hhmm and f.get("day") == today and f.get("start") and f["start"] < now_hhmm:
+                line += " (это время сегодня уже прошло)"
+            lines.append(line)
             continue
         if a.op == "write_note":
             lines.append(f"Напишу заметку «{a.fields['title']}»")
