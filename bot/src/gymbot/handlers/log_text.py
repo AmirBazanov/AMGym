@@ -567,6 +567,8 @@ _RECORD_VERB = re.compile(
 )
 _RECORD_NUMBERS = re.compile(r"\d+\s*(?:на|x|х|×|\*|по|г|гр|грамм\w*|кг|шт\w*|мл)(?![а-яa-z])|\d+\s*подход")
 
+# Buying food is a task, not a meal: «добавь задачу купить молоко и хлеб» (past «купил» stays a diary sign).
+_BUY = re.compile(r"(?<!\w)(?:купить|купи|куплю|закупить|докупить|покупк\w*)(?!\w)")
 _WEIGH_IN = re.compile(r"(?<!\w)(?:вес|вешу|взвесил\w*)\s*:?\s*\d")  # inside a longer message too: «уборка, вес 84.6»
 
 
@@ -575,13 +577,14 @@ def _diary_like(text: str) -> bool:
     «Дела» model is not asked first, even with its quick words («между парами съел шаурму», «после пары сходил в
     зал, жим 80 на 8», «перенеси тренировку на пару дней»): an action it found would take the message and the
     record would be lost. The parser gets it, and its kind="life" still reaches «Дела». «сделал» alone is not a
-    sign («сделал уборку»): a workout said that way has gym words or numbers. Nor is a program-edit look with the
+    sign («сделал уборку»): a workout said that way has gym words or numbers; nor food words with buying
+    («добавь задачу купить молоко и хлеб»). Nor is a program-edit look with the
     schedule's words («перенеси урок с понедельника на вторник»)."""
     t = normalize(text)
     verb = _RECORD_VERB.search(t)
     return bool(
         GYM_WORDS.search(text) or _RECORD_NUMBERS.search(t) or (verb and not verb.group().startswith("сделал"))
-        or FOOD_WORDS.search(t) or WELLBEING_WORDS.search(t) or _WEIGH_IN.search(t)
+        or (FOOD_WORDS.search(t) and not _BUY.search(t)) or WELLBEING_WORDS.search(t) or _WEIGH_IN.search(t)
         or parse_body_weight(text) is not None
         or (is_edit_command(text) and not SCHEDULE_WORDS.search(text))
     )

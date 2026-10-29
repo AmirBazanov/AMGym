@@ -162,7 +162,7 @@ def test_not_life_words(text):
     *(t for t in DIARY_WITH_LIFE_LOOKS if t != "урок бокса 60 минут"),  # that one has no «Дела» look any more
     "купил продукты на ужин: курица 300 г", "сдал зачёт, съел пиццу 3 куска",
     "зачёт завтра, спал 5 часов", "после экзамена выпил кофе", "задача: жим 80 на 8", "уборка, вес 84.6",
-    "перенеси пятничную тренировку на субботу, у меня экзамен",
+    "перенеси пятничную тренировку на субботу, у меня экзамен", "убрался, на ужин курица с рисом",
 ])
 def test_diary_records_never_ask_the_life_model_first(text):
     """Even when the quick words match, a message that may be a record goes to the parser first."""
@@ -173,6 +173,7 @@ def test_diary_records_never_ask_the_life_model_first(text):
     "В учёбу добавь сегодня в 11 позаниматься HTTP-сервером на C", "добавь задачу купить билеты", "вынес мусор",
     "сделал уборку", "дедлайн по лабе 10 ноября", "перенеси урок ИЗ Математика с понедельника на вторник",
     "запланируй завтра в 15 созвон", "составь памятку по epoll", "добавь в планы поход",
+    "добавь задачу купить молоко и хлеб", "в дела: купить курицу и рис", "закрой задачу про риски",
 ])
 def test_life_commands_are_not_diary_records(text):
     assert is_life_command(text) and not log_text._diary_like(text), text
