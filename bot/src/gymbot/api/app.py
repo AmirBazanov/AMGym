@@ -732,7 +732,7 @@ def create_app(
 
     async def hub_state_access(token: str, write_token: str, init_data: str) -> bool:
         """The dashboard's state is the owner's: HUB_TOKEN with HUB_WRITE_TOKEN (a browser), or Telegram initData
-        of the owner (the dashboard opened from the bot, gymbot.handlers.hub)."""
+        of the owner (the old dashboard opened inside Telegram)."""
         if init_data:
             try:
                 tg = validate_init_data(init_data, settings.bot_token)
