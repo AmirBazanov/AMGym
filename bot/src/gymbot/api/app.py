@@ -29,6 +29,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.routing import BaseRoute
 
+from gymbot.api import life as life_api
 from gymbot.api.auth import InitDataError, TelegramUser, validate_init_data
 from gymbot.config import Settings
 from gymbot.db.models import FoodEntry, Reminder, User, UserFact, UserProgram, WellbeingEntry, Workout
@@ -844,6 +845,16 @@ def create_app(
 
     for router in routers:
         app.include_router(router)
+
+    async def life_user(tg: TgUser) -> User:
+        """«Дела» (gymbot.api.life): the user's row from its own committed session, so the router's sessions
+        never wait for this one's write lock (SQLite) on a first visit."""
+        async with sessionmaker() as session:
+            user = await get_or_create_user(session, tg.id, tg.name)
+            await session.commit()
+            return user
+
+    app.include_router(life_api.make_router(sessionmaker, settings, life_user))
 
     app.router.routes.extend(mcp_routes)  # before the Mini App mount at "/", which swallows every path
     if settings.mcp_token:

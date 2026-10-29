@@ -17,9 +17,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gymbot.config import Settings
@@ -36,6 +36,9 @@ from gymbot.db.models import (
 from gymbot.db.session import Sessionmaker
 from gymbot.services import life_import, live
 from gymbot.services.access import owner_user
+
+if TYPE_CHECKING:
+    from gymbot.services.life_actions import Act
 
 log = logging.getLogger(__name__)
 
@@ -240,6 +243,168 @@ async def commit(session: AsyncSession, user_id: int) -> None:
     """Commit the session's «Дела» changes and tell open Mini Apps (topic "life")."""
     await session.commit()
     live.publish(user_id, "life")
+
+
+# ---- writing (the caller validated the fields with life_actions.validate_fields, then commits with `commit`) ----
+
+
+def _defaults(kind: str) -> dict[str, Any]:
+    return {
+        "slot": {"area": "work"}, "event": {"area": "other"}, "chore": {"every_days": 7},
+        "project": {"kind": "own", "status": "active"}, "note": {"body": "", "tags": [], "author": "me"},
+    }.get(kind, {})
+
+
+async def get(session: AsyncSession, user_id: int, kind: str, row_id: int) -> Any | None:
+    """The user's live (not deleted) row of `kind`, or None."""
+    model = MODELS[kind]
+    return await session.scalar(_alive(model, user_id).where(model.id == row_id))
+
+
+async def _check_project(session: AsyncSession, user_id: int, fields: dict[str, Any]) -> None:
+    pid = fields.get("project_id")
+    if pid is not None and await get(session, user_id, "project", pid) is None:
+        raise ValueError(f"Нет проекта #{pid}")
+
+
+def _check_span(row: Any, fields: dict[str, Any]) -> None:
+    start, end = fields.get("start", getattr(row, "start", None)), fields.get("end", getattr(row, "end", None))
+    if start and end and end <= start:
+        raise ValueError("Конец раньше начала")
+
+
+async def add(
+    session: AsyncSession, user_id: int, kind: str, fields: dict[str, Any], now: datetime, *, source: str = "me"
+) -> Any:
+    """A new row of `kind` (flushed, so it has its id). Unset fields take their defaults (slot area work, event
+    area other, chore every 7 days, project own/active, note by me); a task goes last. ValueError: no such
+    project."""
+    await _check_project(session, user_id, fields)
+    values = _defaults(kind) | fields
+    if kind == "task" and "position" not in values:
+        last = await session.scalar(select(func.max(LifeTask.position)).where(LifeTask.user_id == user_id))
+        values["position"] = (last or 0) + 1
+    row = MODELS[kind](user_id=user_id, source=source, created_at=now, updated_at=now, **values)
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def update(
+    session: AsyncSession, user_id: int, kind: str, row_id: int, fields: dict[str, Any], now: datetime
+) -> Any | None:
+    """Change the given fields; None when there is no such live row. A plan moved (day or start) is reminded
+    again, a deadline moved gets its eve reminder again. ValueError (nothing changed): no such project, the end
+    before the start."""
+    row = await get(session, user_id, kind, row_id)
+    if row is None:
+        return None
+    await _check_project(session, user_id, fields)
+    _check_span(row, fields)
+    for key, value in fields.items():
+        setattr(row, key, value)
+    if kind == "event" and {"day", "start"} & fields.keys():
+        row.reminded_at = None
+    if kind == "deadline" and "day" in fields:
+        row.reminded_on = None
+    row.updated_at = now
+    return row
+
+
+async def remove(session: AsyncSession, user_id: int, kind: str, row_id: int, now: datetime) -> Any | None:
+    """Soft delete; None when there is no such live row."""
+    row = await get(session, user_id, kind, row_id)
+    if row is not None:
+        row.deleted_at = row.updated_at = now
+    return row
+
+
+async def set_done(
+    session: AsyncSession, user_id: int, kind: str, row_id: int, done: bool, now: datetime, day: date | None = None
+) -> Any | None:
+    """Mark a task, plan or deadline done (`done_at`, kept when already set) or not; a chore done on `day` (local
+    date; now's date when None) or never (`last_done` cleared). None when there is no such live row."""
+    if kind not in DONE_KINDS:
+        raise ValueError(f"«{kind}» нельзя отметить сделанным")
+    row = await get(session, user_id, kind, row_id)
+    if row is None:
+        return None
+    if kind == "chore":
+        row.last_done = (day or now.date()) if done else None
+    elif not done:
+        row.done_at = None
+    elif row.done_at is None:
+        row.done_at = now
+    row.updated_at = now
+    return row
+
+
+def set_settings(user: User, fields: dict[str, Any]) -> LifeSettings:
+    """remind_before (minutes), summary_time "ЧЧ:ММ", summary_enabled on the user's row."""
+    if "remind_before" in fields:
+        user.life_remind_before = fields["remind_before"]
+    if "summary_time" in fields:
+        hours, minutes = fields["summary_time"].split(":")
+        user.life_summary_minute = int(hours) * 60 + int(minutes)
+    if "summary_enabled" in fields:
+        user.life_summary_enabled = fields["summary_enabled"]
+    return settings_of(user)
+
+
+_ADDED = {"slot": "в расписание", "event": "план", "deadline": "дедлайн", "task": "задачу", "chore": "дело по дому",
+          "project": "проект", "note": "заметку"}
+_IN = {"slot": "в расписании", "event": "в планах", "deadline": "в дедлайнах", "task": "в задачах",
+       "chore": "в делах по дому", "project": "в проектах", "note": "в заметках"}
+
+
+def _name(row: Any) -> str:
+    return getattr(row, "title", None) or getattr(row, "name", None) or f"#{row.id}"
+
+
+async def apply(
+    session: AsyncSession, user: User, acts: list[Act], now: datetime, *, today: date | None = None,
+    source: str = "me",
+) -> list[str]:
+    """Carry out validated actions (life_actions.parse / validate_fields) for `user` (a row of this session):
+    one Russian line per action, what was done or why not (an id gone meanwhile, no such project). Commits and
+    publishes "life" when anything changed. `today` (local) is the day a chore is done when the action has none;
+    `source` marks new rows. write_note / edit_note are skipped: the bot writes the note and sends add / update."""
+    today = today or now.date()
+    lines: list[str] = []
+    changed = False
+    for a in acts:
+        kind = a.entity or ""
+        try:
+            if a.op == "add":
+                row = await add(session, user.id, kind, a.fields, now, source=source)
+                lines.append(f"Добавил {_ADDED[kind]} «{_name(row)}»")
+            elif a.op == "settings":
+                set_settings(user, a.fields)
+                lines.append("Обновил настройки напоминаний")
+            elif a.op in ("update", "remove", "done", "undone") and a.id is not None:
+                if a.op == "update":
+                    row = await update(session, user.id, kind, a.id, a.fields, now)
+                    verb = "Изменил"
+                elif a.op == "remove":
+                    row = await remove(session, user.id, kind, a.id, now)
+                    verb = "Удалил"
+                else:
+                    day = a.fields.get("day", today)
+                    row = await set_done(session, user.id, kind, a.id, a.op == "done", now, day)
+                    verb = "Отметил сделанным" if a.op == "done" else "Снял отметку:"
+                if row is None:
+                    lines.append(f"Не нашёл #{a.id} {_IN.get(kind, '')}")
+                    continue
+                lines.append(f"{verb} «{_name(row)}»")
+            else:
+                log.warning("life.apply: %s is not applied here", a.op)
+                continue
+            changed = True
+        except ValueError as e:
+            lines.append(str(e))
+    if changed:
+        await commit(session, user.id)
+    return lines
 
 
 # ---- import of the old dashboard ----

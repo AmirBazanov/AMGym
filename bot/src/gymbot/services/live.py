@@ -28,11 +28,13 @@ from typing import Any, Literal
 log = logging.getLogger(__name__)
 
 Topic = Literal[
-    "state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts", "weight", "records", "program", "hub"
+    "state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts", "weight", "records", "program", "hub",
+    "life",
 ]
 TOPICS: frozenset[str] = frozenset(
     {"state", "nutrition", "reminders", "facts", "wellbeing", "plan", "workouts", "weight", "records", "program",
-     "hub"}  # "hub": the dashboard's state (PUT /api/hub/state); the Mini App ignores it
+     "hub",  # "hub": the dashboard's state (PUT /api/hub/state); the Mini App ignores it
+     "life"}  # «Дела» (gymbot.services.life): any change of the life_* tables or their settings
 )
 MAX_RECORDS = 5  # records carried by one event (gymbot.services.records announces at most 5 lines)
 

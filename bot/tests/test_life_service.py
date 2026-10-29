@@ -21,6 +21,7 @@ from gymbot.db.models import (
 )
 from gymbot.db.session import make_engine
 from gymbot.services import hub, life, live
+from gymbot.services import life_actions as la
 from gymbot.services.users import get_or_create_user
 
 TODAY = date(2026, 10, 29)  # Thursday
@@ -394,3 +395,238 @@ async def test_import_on_start(tmp_path, db, settings):
     await owner_id(db)
     assert await life.import_on_start(db, s, NOW) == 25
     assert await life.import_on_start(db, s, NOW) == 0
+
+
+# ---- fields, the model's actions, the preview ----
+
+
+def test_validate_fields():
+    v = la.validate_fields
+    assert v("slot", {"weekday": "2", "start": "9:00", "title": "  ИЗ   Математика ", "area": "work", "end": ""},
+             TODAY, partial=False) == {"weekday": 2, "start": "09:00", "title": "ИЗ Математика", "area": "work",
+                                       "end": None}
+    assert v("event", {"day": "2026-10-30", "title": "Созвон"}, TODAY, partial=False) == {
+        "day": date(2026, 10, 30), "title": "Созвон"}
+    assert v("note", {"title": "x", "tags": [" c ", "c", "epoll"], "body": "  # T\n\nтекст  "}, TODAY,
+             partial=False) == {"title": "x", "tags": ["c", "epoll"], "body": "# T\n\nтекст"}
+    assert v("settings", {"summary_time": "7:00", "summary_enabled": False, "remind_before": 0}, TODAY,
+             partial=True) == {"summary_time": "07:00", "summary_enabled": False, "remind_before": 0}
+    assert v("task", {}, TODAY, partial=True) == {}
+    bad = [
+        ("slot", {"weekday": 8}, "день недели"),
+        ("slot", {"start": "25:00"}, "ЧЧ:ММ"),
+        ("event", {"day": (TODAY + timedelta(days=401)).isoformat()}, "дальше 400 дней"),
+        ("event", {"day": "завтра"}, "ГГГГ-ММ-ДД"),
+        ("event", {"color": "red"}, "Неизвестное поле «color»"),
+        ("event", {"area": "gym"}, "одно из study, work, other"),
+        ("event", {"start": "12:00", "end": "11:00"}, "Конец раньше начала"),
+        ("task", {"title": "   "}, "не может быть пустым"),
+        ("task", {"title": "я" * 201}, "не длиннее 200"),
+        ("chore", {"every_days": 0}, "от 1 до 365"),
+        ("project", {"kind": "hobby"}, "work, learning, own"),
+        ("settings", {"summary_enabled": "да"}, "да или нет"),
+        ("settings", {"remind_before": None}, "не может быть пустым"),
+        ("car", {}, "Не знаю"),
+    ]
+    for entity, fields, msg in bad:
+        with pytest.raises(ValueError, match=msg):
+            v(entity, fields, TODAY, partial=True)
+    with pytest.raises(ValueError, match="Нужно поле «название»"):
+        v("task", {"tag": "x"}, TODAY, partial=False)
+    assert v("event", {"day": (TODAY - timedelta(days=400)).isoformat(), "title": "x"}, TODAY, partial=False)
+
+
+async def life_rows(db, uid):
+    """One live row of every kind; returns their ids by kind."""
+    rows = {
+        "project": LifeProject(user_id=uid, name="HTTP-сервер на C", kind="learning", status="active"),
+        "slot": LifeSlot(user_id=uid, weekday=1, start="10:00", title="ИЗ Математика", area="work"),
+        "event": LifeEvent(user_id=uid, day=TODAY, start="11:00", title="HTTP-сервер", area="study",
+                           reminded_at=NOW),
+        "deadline": LifeDeadline(user_id=uid, day=TODAY + timedelta(days=3), title="Курсовая", reminded_on=TODAY),
+        "task": LifeTask(user_id=uid, title="Обновить резюме", position=1),
+        "chore": LifeChore(user_id=uid, title="Уборка", every_days=7, last_done=TODAY - timedelta(days=3)),
+        "note": LifeNote(user_id=uid, title="Памятка по epoll", body="текст"),
+    }
+    ids = await put(db, *rows.values())
+    return dict(zip(rows, ids, strict=True))
+
+
+async def test_parse(db):
+    uid = await owner_id(db)
+    ids = await life_rows(db, uid)
+    v = await view(db, uid)
+    data = {"actions": [
+        {"op": "add", "entity": "event", "fields": {"day": "2026-10-29", "start": "11:00", "area": "study",
+                                                    "title": "Позаниматься HTTP-сервером на C",
+                                                    "project_id": ids["project"]}},
+        {"op": "add", "entity": "task", "fields": {"title": "Купить билеты", "color": "red", "project_id": 999}},
+        {"op": "add", "entity": "event", "fields": {"day": "2099-01-01", "title": "Далеко"}},
+        {"op": "fly", "entity": "task"},
+        {"op": "add", "entity": "car", "fields": {}},
+        {"op": "update", "entity": "task", "id": 999, "fields": {"title": "x"}},
+        {"op": "update", "entity": "slot", "id": f"#{ids['slot']}", "fields": {"weekday": 2}},
+        {"op": "update", "entity": "task", "id": ids["task"], "fields": {}},
+        {"op": "done", "entity": "chore", "id": ids["chore"], "fields": {"date": "2026-11-05"}},
+        {"op": "done", "entity": "chore", "id": ids["chore"], "fields": {"day": "2026-10-28"}},
+        {"op": "done", "entity": "project", "id": ids["project"]},
+        {"op": "done", "entity": "task", "id": ids["task"]},
+        {"op": "remove", "entity": "deadline", "id": ids["deadline"]},
+        {"op": "settings", "entity": "task", "fields": {"summary_time": "7:00", "remind_before": 15}},
+        {"op": "write_note", "fields": {"title": "Памятка по select", "brief": "сравнить с epoll"}},
+        {"op": "edit_note", "id": ids["note"], "fields": {"instruction": "добавь пример"}},
+        "мусор",
+    ], "question": {"text": "Во сколько?", "options": ["10:00", "11:00", "12:00", "13:00", "14:00", 5]}}
+    acts, notes, question = la.parse(data, v, TODAY)
+    assert acts == [
+        la.Act("add", "event", None, {"day": TODAY, "start": "11:00", "area": "study",
+                                      "title": "Позаниматься HTTP-сервером на C", "project_id": ids["project"]}),
+        la.Act("add", "task", None, {"title": "Купить билеты"}),
+        la.Act("update", "slot", ids["slot"], {"weekday": 2}),
+        la.Act("done", "chore", ids["chore"], {"day": TODAY}),  # a future date is today
+        la.Act("done", "chore", ids["chore"], {"day": TODAY - timedelta(days=1)}),
+        la.Act("done", "task", ids["task"], {}),
+        la.Act("remove", "deadline", ids["deadline"], {}),
+        la.Act("settings", None, None, {"summary_time": "07:00", "remind_before": 15}),
+        la.Act("write_note", "note", None, {"title": "Памятка по select", "brief": "сравнить с epoll"}),
+        la.Act("edit_note", "note", ids["note"], {"instruction": "добавь пример"}),
+    ]
+    assert notes == [
+        "Поле «color» не знаю, пропустил.",
+        "Не нашёл проект #999.",
+        "Дата 2099-01-01 дальше 400 дней от сегодня.",
+        "Не понял действие «fly».",
+        "Не знаю, что такое «car».",
+        "Не нашёл #999 в задачах.",
+        "«project» нельзя отметить сделанным.",
+    ]
+    assert question == {"text": "Во сколько?", "options": ["10:00", "11:00", "12:00", "13:00"]}
+    assert la.parse({"actions": []}, v, TODAY) == ([], [], None)
+    assert la.parse("не json", v, TODAY) == ([], [], None)
+
+    assert la.describe(acts, v, TODAY) == [
+        "В учёбу: «Позаниматься HTTP-сервером на C» — сегодня в 11:00",
+        "Добавлю задачу «Купить билеты»",
+        "Перенесу «ИЗ Математика» с пн на вт",
+        "Отмечу «Уборка» — сделано сегодня",
+        "Отмечу «Уборка» — сделано 28.10",
+        "Закрою задачу «Обновить резюме»",
+        "Удалю дедлайн «Курсовая»",
+        "Напоминать за 15 мин до планов",
+        "Утреннюю сводку присылать в 07:00",
+        "Напишу заметку «Памятка по select»",
+        "Перепишу заметку «Памятка по epoll»: добавь пример",
+    ]
+    more = [
+        la.Act("update", "event", ids["event"], {"day": TODAY + timedelta(days=1), "start": "15:00"}),
+        la.Act("update", "task", ids["task"], {"title": "Резюме", "tag": None}),
+        la.Act("add", "slot", None, {"weekday": 3, "start": "10:00", "title": "Сети", "area": "study"}),
+        la.Act("add", "deadline", None, {"day": date(2026, 11, 3), "title": "Лаба", "course": "Сети"}),
+        la.Act("undone", "task", ids["task"], {}),
+        la.Act("settings", None, None, {"summary_enabled": False}),
+    ]
+    assert la.describe(more, v, TODAY) == [
+        "Перенесу «HTTP-сервер» на завтра в 15:00",
+        "Изменю «Обновить резюме»: название: Резюме, метка — убрать",
+        "В расписание: «Сети» — по средам в 10:00",
+        "Дедлайн: «Лаба» (Сети) — вт 03.11",
+        "Верну в работу «Обновить резюме»",
+        "Утреннюю сводку не присылать",
+    ]
+
+
+# ---- life.apply ----
+
+
+async def test_apply_every_action(db, monkeypatch):
+    published: list[tuple] = []
+    monkeypatch.setattr(live, "publish", lambda *a: published.append(a))
+    uid = await owner_id(db)
+    ids = await life_rows(db, uid)
+    later = NOW + timedelta(hours=1)
+    acts = [
+        la.Act("add", "slot", None, {"weekday": 3, "start": "10:00", "title": "Сети", "area": "study"}),
+        la.Act("add", "event", None, {"day": TODAY, "start": "11:00", "title": "HTTP", "project_id": ids["project"]}),
+        la.Act("add", "deadline", None, {"day": TODAY, "title": "Лаба"}),
+        la.Act("add", "task", None, {"title": "Купить билеты"}),
+        la.Act("add", "chore", None, {"title": "Полить цветы"}),
+        la.Act("add", "project", None, {"name": "Трекер идей"}),
+        la.Act("add", "note", None, {"title": "Идея", "body": "статус прода рядом с задачами"}),
+        la.Act("update", "event", ids["event"], {"start": "11:30"}),
+        la.Act("update", "deadline", ids["deadline"], {"day": TODAY + timedelta(days=4)}),
+        la.Act("update", "slot", ids["slot"], {"weekday": 2}),
+        la.Act("done", "task", ids["task"], {}),
+        la.Act("done", "event", ids["event"], {}),
+        la.Act("done", "chore", ids["chore"], {"day": TODAY - timedelta(days=1)}),
+        la.Act("remove", "note", ids["note"], {}),
+        la.Act("remove", "note", ids["note"], {}),  # gone already
+        la.Act("update", "task", 999, {"title": "x"}),
+        la.Act("add", "task", None, {"title": "y", "project_id": 999}),
+        la.Act("settings", None, None, {"remind_before": 15, "summary_time": "07:00", "summary_enabled": False}),
+        la.Act("write_note", "note", None, {"title": "t", "brief": "b"}),
+    ]
+    async with db() as s:
+        user = await s.get(User, uid)
+        lines = await life.apply(s, user, acts, later, today=TODAY)
+    assert lines == [
+        "Добавил в расписание «Сети»", "Добавил план «HTTP»", "Добавил дедлайн «Лаба»",
+        "Добавил задачу «Купить билеты»", "Добавил дело по дому «Полить цветы»", "Добавил проект «Трекер идей»",
+        "Добавил заметку «Идея»", "Изменил «HTTP-сервер»", "Изменил «Курсовая»", "Изменил «ИЗ Математика»",
+        "Отметил сделанным «Обновить резюме»", "Отметил сделанным «HTTP-сервер»", "Отметил сделанным «Уборка»",
+        "Удалил «Памятка по epoll»", f"Не нашёл #{ids['note']} в заметках", "Не нашёл #999 в задачах",
+        "Нет проекта #999", "Обновил настройки напоминаний",
+    ]
+    assert published == [(uid, "life")]
+    async with db() as s:
+        event = await s.get(LifeEvent, ids["event"])
+        assert event.start == "11:30" and event.reminded_at is None and event.done_at is not None
+        deadline = await s.get(LifeDeadline, ids["deadline"])
+        assert deadline.reminded_on is None
+        assert (await s.get(LifeSlot, ids["slot"])).weekday == 2
+        assert (await s.get(LifeChore, ids["chore"])).last_done == TODAY - timedelta(days=1)
+        note = await s.get(LifeNote, ids["note"])
+        assert note.deleted_at is not None  # soft: the row stays
+        new_task = await s.scalar(select(LifeTask).where(LifeTask.title == "Купить билеты"))
+        assert new_task.position == 2 and new_task.source == "me"
+        assert (await s.scalar(select(LifeChore).where(LifeChore.title == "Полить цветы"))).every_days == 7
+        project = await s.scalar(select(LifeProject).where(LifeProject.name == "Трекер идей"))
+        assert (project.kind, project.status) == ("own", "active")
+        added = await s.scalar(select(LifeNote).where(LifeNote.title == "Идея"))
+        assert (added.author, added.tags, added.body) == ("me", [], "статус прода рядом с задачами")
+        assert await s.scalar(select(LifeTask).where(LifeTask.title == "y")) is None
+        user = await s.get(User, uid)
+        assert (user.life_remind_before, user.life_summary_minute, user.life_summary_enabled) == (15, 420, False)
+    v = await view(db, uid)
+    assert ids["note"] not in {n.id for n in v.notes}
+    assert life.settings_of(user) == life.LifeSettings(15, "07:00", False)
+
+    # undone, and a run where nothing changes publishes nothing
+    async with db() as s:
+        user = await s.get(User, uid)
+        lines = await life.apply(s, user, [
+            la.Act("undone", "task", ids["task"], {}), la.Act("undone", "chore", ids["chore"], {}),
+        ], later, today=TODAY)
+        assert lines == ["Снял отметку: «Обновить резюме»", "Снял отметку: «Уборка»"]
+        assert await life.apply(s, user, [la.Act("update", "task", 999, {"title": "x"})], later) == [
+            "Не нашёл #999 в задачах"]
+    assert published == [(uid, "life"), (uid, "life")]
+    async with db() as s:
+        assert (await s.get(LifeTask, ids["task"])).done_at is None
+        assert (await s.get(LifeChore, ids["chore"])).last_done is None
+
+
+async def test_apply_source_and_other_users_rows(db):
+    uid = await owner_id(db)
+    other = await owner_id(db, 7)
+    theirs = await life_rows(db, other)
+    async with db() as s:
+        user = await s.get(User, uid)
+        lines = await life.apply(s, user, [
+            la.Act("remove", "task", theirs["task"], {}),
+            la.Act("add", "note", None, {"title": "Памятка", "author": "bot"}),
+        ], NOW, source="bot")
+    assert lines[0] == f"Не нашёл #{theirs['task']} в задачах"
+    async with db() as s:
+        assert (await s.get(LifeTask, theirs["task"])).deleted_at is None
+        note = await s.scalar(select(LifeNote).where(LifeNote.user_id == uid))
+        assert (note.source, note.author) == ("bot", "bot")

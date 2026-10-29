@@ -13,6 +13,8 @@ export const TOPICS = [
   'weight',
   'records',
   'program',
+  // «Дела»: any change of the schedule, plans, deadlines, tasks, chores, projects, notes or their settings.
+  'life',
 ] as const
 export type Topic = (typeof TOPICS)[number]
 
