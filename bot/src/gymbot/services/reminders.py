@@ -317,7 +317,10 @@ async def tick(
 async def reminder_loop(
     bot: Bot, sessionmaker: Sessionmaker, settings: Settings, llm: OpenRouterClient | None = None
 ) -> None:
-    """Check every CHECK_SECONDS until cancelled. One failed check is logged and does not stop the loop."""
+    """Check every CHECK_SECONDS until cancelled, «Дела» too (life_reminders.tick). One failed check is logged and
+    does not stop the loop."""
+    from gymbot.services import life_reminders  # imports this module's time helpers
+
     tz = ZoneInfo(settings.timezone)
     log.info("reminders: checking every %s s", CHECK_SECONDS)
     while True:
@@ -328,4 +331,9 @@ async def reminder_loop(
                 log.info("reminders: sent %s", sent)
         except Exception:
             log.exception("reminders: check failed")
+        try:  # «Дела»: plans, deadlines, the morning summary (own claims, own failures)
+            if life_sent := await life_reminders.tick(bot.send_message, sessionmaker, settings, datetime.now(UTC)):
+                log.info("life reminders: sent %s", life_sent)
+        except Exception:
+            log.exception("life reminders: check failed")
         await asyncio.sleep(CHECK_SECONDS)
