@@ -71,7 +71,7 @@ from gymbot.config import Settings
 from gymbot.db.models import FoodEntry, User, Workout, WorkoutSet
 from gymbot.db.session import Sessionmaker
 from gymbot.handlers import body_weight, saved_edits
-from gymbot.handlers import hub as hub_tasks
+from gymbot.handlers import life as life_chat
 from gymbot.handlers import products as product_cards
 from gymbot.handlers.chat_edit import send_edit, send_suggested, stage_edit
 from gymbot.handlers.chat_settings import send_staged, stage_settings
@@ -88,7 +88,7 @@ from gymbot.services.answer_intent import plan_question
 from gymbot.services.body_weight import parse_chat as parse_body_weight
 from gymbot.services.chat_edit import is_edit_command
 from gymbot.services.chat_settings import is_settings_request
-from gymbot.services.hub_tasks import is_hub_command
+from gymbot.services.life_gate import is_life_command
 from gymbot.services.programs import exercise_catalog, normalize
 from gymbot.services.tg_html import escape, send_html
 from gymbot.services.users import get_or_create_user
@@ -496,25 +496,38 @@ def with_typing(message: Message, reparse: plausibility.Reparse) -> plausibility
     return run
 
 
+@dataclass(frozen=True)
+class Suggested:
+    """What the diary answer suggests staging under itself: a program edit («ПРАВКА: …») and a «Дела» change
+    («ДЕЛА: …»), see gymbot.services.answer."""
+
+    edit: str | None = None
+    life: str | None = None
+
+
 async def _suggested(
-    message: Message, command: str | None, raw: str, settings: Settings, sessionmaker: Sessionmaker,
+    message: Message, suggested: Suggested | None, raw: str, settings: Settings, sessionmaker: Sessionmaker,
     llm: OpenRouterClient,
 ) -> None:
-    """The program edit the diary answer suggested, as a preview with «Применить» right under the answer."""
-    if not command:
+    """The changes the diary answer suggested, as previews with «Применить» right under the answer."""
+    if suggested is None:
         return
-    async with keep_typing(message):  # the edit model and a dry run
-        await send_suggested(message, command, raw, settings, sessionmaker, llm)
+    if suggested.edit:
+        async with keep_typing(message):  # the edit model and a dry run
+            await send_suggested(message, suggested.edit, raw, settings, sessionmaker, llm)
+    if suggested.life:
+        async with keep_typing(message):  # the «Дела» model (and the note writer)
+            await life_chat.send_suggested(message, suggested.life, raw, settings, sessionmaker, llm)
 
 
 async def _diary_answer(
     message: Message, text: str, result: ParseResult, settings: Settings, sessionmaker: Sessionmaker,
     llm: OpenRouterClient,
-) -> tuple[ParseResult, str | None, str | None]:
+) -> tuple[ParseResult, str | None, Suggested | None]:
     """The question answered from the user's diary (gymbot.services.answer: from the database for a factual
     question, else the model's checked answer) instead of the parser's one-liner without data; that one
     stays on any failure. Also returns the answer's Telegram HTML (None: send the plain clarification) and
-    the program edit it suggests («ПРАВКА: …», staged under the answer)."""
+    the changes it suggests («ПРАВКА: …», «ДЕЛА: …», staged under the answer)."""
     tg_user = message.from_user
     assert tg_user is not None
     try:  # the plan and the answer may take a few model calls
@@ -535,13 +548,15 @@ async def _diary_answer(
     except Exception:
         log.exception("answer from the diary failed")
         return result, None, None
-    reply, rich, command = answered.text, answered.html, answered.command
+    reply, rich, command, life_command = answered.text, answered.html, answered.command, answered.life
     if claims_action(reply):
         log.info("the diary answer claimed an action it did not do: replaced")
         reply, rich = NO_ACTION, None
-    remembered = reply + (f"\nПРАВКА: {command}" if command else "")  # the model sees what it suggested
+    # The model sees what it suggested, so «давай» / «так добавь» can follow up on it.
+    remembered = reply + (f"\nПРАВКА: {command}" if command else "") + (f"\nДЕЛА: {life_command}" if life_command else "")
     _remember_answer(tg_user.id, text, remembered, message.date)
-    return result.model_copy(update={"clarification": reply}), rich, command
+    suggested = Suggested(command, life_command) if command or life_command else None
+    return result.model_copy(update={"clarification": reply}), rich, suggested
 
 
 # A record in the same message ("съел курт, сколько белка осталось", "сделал жим 3 подхода по 8"): the
@@ -751,15 +766,21 @@ async def process_text(
     # open dialog is newer, or a short message about a saved product ("тот же батончик", "протеин 1 скуп").
     ex = recent_exchange(user_id, message.date)
     dialog_at = ex.at if ex is not None and _dialog_open(user_id, message.date) else None
+    # An open «Дела» note draft ("составь памятку по epoll") rewritten by words: "добавь пример", "короче"
+    # (handlers/life.py), unless the parser's open dialog is newer.
+    if await life_chat.on_text(message, text, llm, dialog_at=dialog_at, prefix=prefix):
+        return
     if await product_cards.on_text(message, text, raw, sessionmaker, dialog_at=dialog_at, prefix=prefix):
         return
-    # "добавь задачу купить билеты", "вынес мусор": the dashboard's tasks and chores, its own preview
-    # (handlers/hub.py). Consumes the message only when the model found a valid action; else it goes on.
-    if not _dialog_open(user_id, message.date) and is_hub_command(text):
+    # "в учёбу добавь завтра в 11 …", "добавь задачу купить билеты", "вынес мусор": «Дела», their own preview
+    # (handlers/life.py). Consumes the message only when the model found an action or asks a question; else it
+    # goes on ("купил продукты на ужин: курица 300 г" is food).
+    life_asked = not _dialog_open(user_id, message.date) and is_life_command(text)
+    if life_asked:
         async with keep_typing(message):
-            hub_pending = await hub_tasks.stage(message, text, raw, settings, sessionmaker, llm)
-        if hub_pending is not None:
-            await hub_tasks.send(message, hub_pending, prefix=prefix)
+            life_pending = await life_chat.stage(message, text, raw, settings, sessionmaker, llm)
+        if life_pending is not None:
+            await life_chat.send(message, life_pending, prefix=prefix)
             return
     # "убери французский жим из дня рук", "поставь на сгибания 30 кг": the program, its own preview
     # (handlers/chat_edit.py). Consumes the message only when the model found a valid edit; else it goes on.
@@ -805,6 +826,15 @@ async def process_text(
             await send_staged(message, staged, prefix=prefix)
             return
         await message.answer(prefix + "Нейросеть сейчас недоступна, попробуй ещё раз чуть позже.")
+        return
+    # The parser says it is about «Дела»: the «Дела» model without the gate (asked once: after the quick words it
+    # already found nothing). A settings command in the same message wins (its own preview below).
+    if result.kind == "life" and staged is None:
+        if life_asked:
+            await message.answer(prefix + life_chat.NOT_UNDERSTOOD)
+            return
+        async with keep_typing(message):
+            await life_chat.handle_parsed(message, text, raw, settings, sessionmaker, llm, prefix=prefix)
         return
     # "2 самсы = 2116 ккал": one repair round on an implausible estimate, then the reference (services/plausibility)
     result = await plausibility.review(
@@ -882,7 +912,7 @@ async def _reply_parsed(
     )
     factual = _factual_question(text, result, prev)
     answer_html: str | None = None
-    command: str | None = None
+    command: Suggested | None = None
     if follow_up or factual or (
         result.kind == "question"
         and not (prev and prev.token)

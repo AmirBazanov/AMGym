@@ -84,12 +84,13 @@ _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _FENCE = re.compile(r"^```[\w-]*\s*$", re.MULTILINE)
 
 
-def clean_text(content: str) -> str:
-    """The model's text without reasoning and code fences. Bold, lists and headers stay: the callers make
-    Telegram HTML of them (gymbot.services.tg_html) and a plain version for checks and the fallback
-    (gymbot.services.tg_format.plain)."""
+def clean_text(content: str, *, keep_code: bool = False) -> str:
+    """The model's text without reasoning and code fences (`keep_code`: fences stay, for Markdown notes). Bold,
+    lists and headers stay: the callers make Telegram HTML of them (gymbot.services.tg_html) and a plain
+    version for checks and the fallback (gymbot.services.tg_format.plain)."""
     text = _THINK.sub("", content)
-    text = _FENCE.sub("", text)
+    if not keep_code:
+        text = _FENCE.sub("", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
@@ -508,12 +509,14 @@ class OpenRouterClient:
         return Probe(route.name, self._clock() - start, clean_text(text)[:40], self.stats.last_usage)
 
     async def complete_text(
-        self, messages: list[dict[str, str]], temperature: float = 0.3, *, purpose: str = "answer"
+        self, messages: list[dict[str, str]], temperature: float = 0.3, *, purpose: str = "answer",
+        keep_code: bool = False,
     ) -> str:
         """Plain text generation (no JSON mode) with the same route fallback as parse_message.
 
         Empty `content` counts as a failure: `reasoning` is the model's chain of thought, not an answer.
         `purpose` ("answer", "advice") picks Claude's effort and timeout; temperature goes to the others only.
+        `keep_code`: code fences stay (Markdown notes of «Дела», handlers/life.py).
         """
         spec = PURPOSES[purpose]
 
@@ -521,7 +524,7 @@ class OpenRouterClient:
             raw = await self._complete(
                 route, messages, False, purpose=spec, temperature=temperature, use_reasoning=False
             )
-            text = clean_text(raw)
+            text = clean_text(raw, keep_code=keep_code)
             if not text or not plain(text).strip():
                 raise _EmptyAnswer("empty answer")
             return text

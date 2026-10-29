@@ -32,7 +32,6 @@ from gymbot.handlers import (
     common,
     deload,
     facts,
-    hub,
     life_reminders,
     llm_status,
     log_text,
@@ -42,6 +41,7 @@ from gymbot.handlers import (
     voice,
     web_login,
 )
+from gymbot.handlers import life as life_chat
 from gymbot.llm.openrouter import OpenRouterClient
 from gymbot.services import baselines, life, live
 from gymbot.services.access import is_allowed
@@ -93,7 +93,7 @@ async def setup_bot_ui(bot: Bot, settings: Settings) -> None:
             BotCommand(command="deload", description="Разгрузочная неделя: статус, начать, отменить"),
             BotCommand(command="advice", description="Советы по питанию, тренировкам и восстановлению"),
             BotCommand(command="facts", description="Что я помню о тебе"),
-            BotCommand(command="hub", description="Дела: задачи и дом"),
+            BotCommand(command="life", description="Дела: расписание, планы, задачи, заметки"),
             BotCommand(command="products", description="Мои продукты (штрихкод, этикетка)"),
             BotCommand(command="help", description="Как записывать"),
             BotCommand(command="web", description="Вход с компьютера: ссылка на дневник и дела"),
@@ -210,7 +210,7 @@ async def run() -> None:
             deload.router,
             chat_settings.router,
             chat_edit.router,
-            hub.router,
+            life_chat.router,
             life_reminders.router,
             voice.router,
             photo.router,

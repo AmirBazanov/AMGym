@@ -107,7 +107,7 @@ class ParsedWellbeing(BaseModel):
 
 
 class ParseResult(BaseModel):
-    kind: Literal["workout", "food", "wellbeing", "question", "unknown"]
+    kind: Literal["workout", "food", "wellbeing", "question", "unknown", "life"]  # life: «Дела» (handlers/life.py)
     exercises: list[ParsedExercise] = []
     foods: list[ParsedFood] = []
     wellbeing: ParsedWellbeing | None = None

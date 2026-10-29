@@ -26,6 +26,12 @@ check passed, or the database text with its heading line bold. None = send `text
 A program change the user asks for or agrees to comes as the model's last line «ПРАВКА: <команда>»
 (`split_command`): it is cut off before the check and returned as `Reply.command`, and the chat handler stages
 that command as a program edit preview with «Применить» under the answer (handlers/chat_edit.send_suggested).
+A change in «Дела» comes the same way as «ДЕЛА: <команда>» (`split_commands`, `Reply.life`), staged by
+handlers/life.send_suggested.
+
+«Дела» (gymbot.services.life, the owner only): the summary has their block (gymbot.services.life_brief:
+today's and tomorrow's agenda, open tasks, deadlines, learning projects, note titles), and a database answer
+to a general day question («что у меня завтра?») gets that day's agenda appended.
 
 Several questions in a row reuse the summary: `respond` keeps it per user for CONTEXT_TTL seconds
 (`ContextCache`) unless the local day changes or anything published a change for the user
@@ -55,14 +61,14 @@ from gymbot.db.models import User
 from gymbot.db.session import Sessionmaker
 from gymbot.llm.openrouter import LLMError, OpenRouterClient
 from gymbot.llm.prompts import build_answer_messages
-from gymbot.services import active_workout, advice, body_weight, live, nutrition, overrides, plan
+from gymbot.services import active_workout, advice, body_weight, life_brief, live, nutrition, overrides, plan
 from gymbot.services import answer_direct as direct
 from gymbot.services import records as new_records
 from gymbot.services.answer_check import Evidence, correction, violations
-from gymbot.services.answer_intent import classify, mentions, plan_question
+from gymbot.services.answer_intent import PlanQuestion, classify, mentions, plan_question, resolve_day
 from gymbot.services.programs import normalize
 from gymbot.services.tg_format import plain
-from gymbot.services.tg_html import bold_head, to_html
+from gymbot.services.tg_html import bold_head, escape, to_html
 from gymbot.services.users import active_program, get_or_create_user
 
 log = logging.getLogger(__name__)
@@ -70,6 +76,12 @@ log = logging.getLogger(__name__)
 ANSWER_MAX = 1500  # characters sent to the chat; the prompt asks for far less
 COMMAND_MAX = 300  # characters of a suggested program edit
 _COMMAND = re.compile(r"^[\s*_•-]*правка[*_]*\s*[:：][\s*_]*(?P<cmd>.+?)[\s*_]*$", re.IGNORECASE | re.MULTILINE)
+# «ДЕЛА: …» in capitals only: «Дела: пара в 10:00» is an ordinary line of an answer about the agenda.
+_LIFE_COMMAND = re.compile(r"^[\s*_•-]*ДЕЛА[*_]*\s*[:：][\s*_]*(?P<cmd>.+?)[\s*_]*$", re.MULTILINE)
+# A day question about the training itself («какая завтра тренировка», «веса на пятницу») gets no agenda.
+_TRAINING_WORDS = re.compile(
+    r"(?<![а-яё])(?:трен|упражн|вражен|зал(?:е|а|у|ом)?(?![а-яё])|вес(?:а|ом|ы|у|ов|ах)?(?![а-яё])|подход|жим|присед|тяг|кардио)"
+)
 NO_TRAINING = "Сегодня тренировки по программе нет."
 DONE_MAX = 900  # characters of the "done on the last training day" block
 ANSWER_TEMPERATURE = 0.4  # the numbers come from the summary and the check; Claude gets no temperature
@@ -183,6 +195,9 @@ async def _base(
         f"{summary}\n{done}\n{food}\n{records}\n{fresh}\n"
         f"План на сегодня ({now_utc.astimezone(tz):%d.%m}):\n{today}"
     )
+    view = await life_brief.owner_view(session, settings, user, today_local)  # a «Дела» change publishes "life"
+    if view is not None:
+        text += "\n" + life_brief.context_block(view)
     return _Base(text, done, food, history, catalog, aliases)
 
 
@@ -238,14 +253,26 @@ async def build_context(
     return (await gather(session, user, settings, llm, tz, now_utc)).text
 
 
-def split_command(raw: str) -> tuple[str, str | None]:
-    """The model's text without its «ПРАВКА: …» line, and that command (the last one; quotes stripped)."""
-    found = list(_COMMAND.finditer(raw))
+def _cut_command(pattern: re.Pattern[str], raw: str) -> tuple[str, str | None]:
+    found = list(pattern.finditer(raw))
     if not found:
         return raw, None
     command = found[-1]["cmd"].strip().strip("«»\"'` ").strip()
-    text = _COMMAND.sub("", raw).strip()
-    return text, (command[:COMMAND_MAX] or None)
+    return pattern.sub("", raw).strip(), (command[:COMMAND_MAX] or None)
+
+
+def split_commands(raw: str) -> tuple[str, str | None, str | None]:
+    """The model's text without its «ПРАВКА: …» and «ДЕЛА: …» lines, the program edit and the «Дела» change
+    (the last of each; quotes stripped)."""
+    text, life_command = _cut_command(_LIFE_COMMAND, raw)
+    text, command = _cut_command(_COMMAND, text)
+    return text, command, life_command
+
+
+def split_command(raw: str) -> tuple[str, str | None]:
+    """The model's text without its «ПРАВКА: …» (and «ДЕЛА: …») lines, and the program edit (see split_commands)."""
+    text, command, _ = split_commands(raw)
+    return text, command
 
 
 def _cut(text: str) -> str:
@@ -275,6 +302,7 @@ class Reply:
     flags: list[str] = field(default_factory=list)  # claims the check did not find in the summary
     html: str | None = None  # Telegram HTML of the same text (see the module doc)
     command: str | None = None  # a program edit the model suggests staging (see the module doc)
+    life: str | None = None  # a «Дела» change the model suggests staging (see the module doc)
 
 
 DIRECT, LLM, RETRIED, FALLBACK = "direct", "llm", "llm-retry", "fallback"
@@ -303,23 +331,25 @@ async def checked_answer(
     dialog = dialog or []
     messages = build_answer_messages(ctx.text, question, dialog)
     said = await llm.complete_text(messages, temperature=ANSWER_TEMPERATURE)
-    raw, command = split_command(said)
+    raw, command, life_command = split_commands(said)
     text = _cut(raw)
     evidence = ctx.evidence(question, dialog)
     flags = violations(text, evidence)
     if not flags:
-        return Reply(text, LLM, html=_html(raw), command=command)
+        return Reply(text, LLM, html=_html(raw), command=command, life=life_command)
     log.warning("diary answer: not in the summary %s, asking again", flags)
     retry = [*messages, {"role": "assistant", "content": said}, {"role": "user", "content": correction(flags)}]
     try:
-        raw_again, command = split_command(await llm.complete_text(retry, temperature=ANSWER_TEMPERATURE))
+        raw_again, command, life_command = split_commands(
+            await llm.complete_text(retry, temperature=ANSWER_TEMPERATURE)
+        )
     except LLMError as e:
         log.warning("diary answer: the regeneration failed (%s), honest fallback", e)
         return _fallback_reply(ctx, question, flags)
     again = _cut(raw_again)
     still = violations(again, evidence)
     if not still:
-        return Reply(again, RETRIED, flags, html=_html(raw_again), command=command)
+        return Reply(again, RETRIED, flags, html=_html(raw_again), command=command, life=life_command)
     log.warning("diary answer: still not in the summary %s, honest fallback", still)
     return _fallback_reply(ctx, question, still)
 
@@ -327,6 +357,22 @@ async def checked_answer(
 def _fallback_reply(ctx: Context, question: str, flags: list[str]) -> Reply:
     text = fallback(ctx, question, flags)
     return Reply(text, FALLBACK, flags, html=bold_head(text))
+
+
+async def _agenda(
+    session: AsyncSession, user: User, settings: Settings, question: str, pq: PlanQuestion, today: date
+) -> str:
+    """The owner's «Дела» of the day a general day question asks about («что у меня завтра?»), '' for a question
+    about the training itself, an exercise or the weights, a day not said, or a free day."""
+    if pq.weights or pq.exercise or pq.when is None or pq.when[0] == "next" or _TRAINING_WORDS.search(
+        normalize(question)
+    ):
+        return ""
+    day = resolve_day(pq.when, today)
+    if day is None:
+        return ""
+    view = await life_brief.owner_view(session, settings, user, today, until=max(day, today))
+    return life_brief.day_text(view, day) if view is not None else ""
 
 
 async def respond(
@@ -351,7 +397,9 @@ async def respond(
             await session.commit()
             if (day := await direct.plan_reply(session, user, settings, question, pq, tz, now_utc)) is not None:
                 log.info("diary answer: the program day from the database")
-                return Reply(day.text, DIRECT, html=day.html)
+                agenda = await _agenda(session, user, settings, question, pq, now_utc.astimezone(tz).date())
+                tail = f"\n\n{agenda}" if agenda else ""
+                return Reply(day.text + tail, DIRECT, html=day.html + escape(tail))
         q = classify(question)
         if q is not None and (text := await direct.reply(session, user, question, q, tz, now_utc)) is not None:
             log.info("diary answer: %s from the database", q.intent.value)
