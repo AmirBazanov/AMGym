@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gymbot.config import Settings
 from gymbot.db.models import Exercise, ProgramDay, User, Workout, WorkoutSet
 from gymbot.mcp_server import num, set_text
+from gymbot.services import day_adjustments as dayadj
+from gymbot.services import deload
 from gymbot.services import next_weights as nw
 from gymbot.services.access import owner_user
 from gymbot.services.nutrition import _aware
@@ -57,6 +59,28 @@ def _tonnage(kg: Decimal) -> str:
     return f"{num(kg)} кг".replace(".", ",")
 
 
+async def _changes(session: AsyncSession, user_id: int, day: date) -> str | None:
+    """«разгрузка: веса −15 %», «веса −20 %, без ног»: the deload and the day adjustment only. Not
+    DayWeights.summary: today it is the day plan's note, which names sleep and pains, and the dashboard is
+    public."""
+    parts = []
+    if await deload.active_until(session, user_id, day) is not None:
+        parts.append(f"разгрузка: веса −{round((1 - deload.WEIGHT_FACTOR) * 100)} %")
+    if (adj := await dayadj.get(session, user_id, day)) is not None and not adj.empty():
+        parts.append(dayadj.describe(adj))
+    return ", ".join(parts) or None
+
+
+def _plan_note(names: list[str], changes: str | None) -> str:
+    """Up to PLAN_EXERCISES names, fewer when the note would pass NOTE_MAX: the changes are never cut."""
+    tail = f" · {changes}" if changes else ""
+    for n in range(min(len(names), PLAN_EXERCISES), 0, -1):
+        note = _cap(", ".join(names[:n]) + (", …" if len(names) > n else "") + tail)
+        if len(note) <= NOTE_MAX:
+            return note
+    return _short(_cap(names[0] + ", …" + tail))
+
+
 async def plan_week(
     session: AsyncSession, settings: Settings, user: User, tz: ZoneInfo, now_utc: datetime
 ) -> list[dict[str, Any]]:
@@ -77,11 +101,9 @@ async def plan_week(
         if dw.rest or not names:
             note = REST_NOTE
         else:
-            note = ", ".join(names[:PLAN_EXERCISES]) + (", …" if len(names) > PLAN_EXERCISES else "")
-            if dw.summary:
-                note += " · " + dw.summary
+            note = _plan_note(names, await _changes(session, user.id, day))
         # No "time": program days have none, and the dashboard expects the key left out.
-        out.append({"day": dw.weekday, "title": title, "note": _short(_cap(note))})
+        out.append({"day": dw.weekday, "title": title, "note": note})
     return out
 
 

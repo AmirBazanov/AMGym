@@ -14,7 +14,7 @@ from conftest import make_settings
 from sqlalchemy import select
 
 from gymbot.api.app import create_app
-from gymbot.db.models import ProgramDay, Workout, WorkoutSet
+from gymbot.db.models import ProgramDay, WellbeingEntry, Workout, WorkoutSet
 from gymbot.services import day_adjustments as dayadj
 from gymbot.services import hub
 from gymbot.services.programs import get_or_create_exercise
@@ -114,7 +114,7 @@ async def test_format_and_headers(tmp_path, db):
     assert plan[1]["note"].endswith(", …")  # six exercises, five named
     # The Wednesday adjustment takes the legs off the day, as the Mini App shows it.
     assert plan[3]["title"] == "База"
-    assert plan[3]["note"] == "Жим лёжа, тяга вертикального блока · Твоя поправка на день: без ног."
+    assert plan[3]["note"] == "Жим лёжа, тяга вертикального блока · без ног"
 
     log = sorted(data["workouts"]["log"], key=lambda x: x["date"])
     assert log == [
@@ -148,6 +148,33 @@ async def test_read_only(tmp_path, db):
     await get(tmp_path, db)
     r = await get(tmp_path, db)
     assert r.json()["workouts"]["plan"] == []
+
+
+async def test_today_plan_keeps_wellbeing_out(tmp_path, db, monkeypatch):
+    """Today the day plan cuts the weights for poor sleep and a pain; the public note names neither."""
+    monday = datetime(2026, 10, 5, 10, 0, tzinfo=MSK).astimezone(UTC)
+    monkeypatch.setattr("gymbot.services.plan.utcnow", lambda: monday)
+    uid = await owner(db)
+    async with db() as s:
+        s.add(WellbeingEntry(user_id=uid, noted_at=monday - timedelta(hours=2), sleep_hours=Decimal(4),
+                             pains='[{"place": "колено", "severity": 4}]', raw_text="спал 4 часа, болит колено"))
+        await s.commit()
+    note = next(p["note"] for p in (await get(tmp_path, db)).json()["workouts"]["plan"] if p["day"] == 1)
+    assert note.startswith("Сгибания с гантелями")
+    for word in ("сон", "спал", "колен", "4 ч", "бол"):  # the day plan's summary here: «Спал 4 ч. Вес −10 %, …»
+        assert word not in note.casefold()
+
+
+async def test_long_day_keeps_the_adjustment(tmp_path, db):
+    uid = await owner(db)
+    adj = dayadj.DayAdjust(weight_factor=0.8, sets_delta=-1, skip_exercises=["несуществующее упражнение " * 3])
+    async with db() as s:
+        await dayadj.upsert(s, uid, MON + timedelta(days=4), adj, "в пятницу полегче")
+        await s.commit()
+    note = next(p["note"] for p in (await get(tmp_path, db)).json()["workouts"]["plan"] if p["day"] == 5)
+    assert len(note) <= hub.NOTE_MAX
+    assert note.endswith(dayadj.describe(adj))
+    assert ", … · веса −20 %" in note
 
 
 def test_set_runs_and_tonnage():
