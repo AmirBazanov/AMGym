@@ -1,9 +1,10 @@
 """Sign-in to the Mini App from a computer browser, where Telegram gives no initData.
 
-/web (handlers/web_login.py) sends a link `PUBLIC_URL/?login=<token>`; the Mini App keeps the token and sends it
+/web (handlers/web_login.py) sends a link `PUBLIC_URL/#login=<token>`; the Mini App keeps the token and sends it
 as `X-App-Token`, which the API takes where it takes initData (api/app.py tg_user). The token is
 `<telegram id>.<expires unix>.<signature>`: HMAC with a key derived from the bot token under its own label (useless
-for initData or the live stream), valid TTL; the API still checks ALLOWED_USER_IDS on every request.
+for initData or the live stream), valid TTL; the API still checks ALLOWED_USER_IDS on every request and refuses tokens made before
+users.web_login_since («/web выйти» revokes every link given so far).
 """
 
 from __future__ import annotations
@@ -29,6 +30,11 @@ def _sig(key: bytes, telegram_id: int, exp: int) -> str:
 def make_token(key: bytes, telegram_id: int, now: float | None = None, ttl: int = TTL) -> str:
     exp = int(now if now is not None else time.time()) + ttl
     return f"{telegram_id}.{exp}.{_sig(key, telegram_id, exp)}"
+
+
+def issued_at(token: str, ttl: int = TTL) -> int:
+    """Unix time the token was made (its expiry minus TTL); call after `verify`."""
+    return int(token.split(".")[1]) - ttl
 
 
 def verify(key: bytes, token: str, now: float | None = None) -> int | None:

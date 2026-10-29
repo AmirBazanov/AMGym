@@ -68,6 +68,8 @@ class User(Base):
     life_summary_enabled: Mapped[bool] = mapped_column(default=True, server_default=true())
     life_summary_sent_on: Mapped[date | None] = mapped_column(Date)
     life_imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # /web sign-in links issued before this moment no longer work («/web выйти», gymbot.services.web_login).
+    web_login_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Exercise(Base):

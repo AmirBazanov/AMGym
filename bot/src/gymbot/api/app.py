@@ -51,6 +51,7 @@ from gymbot.services import reminders as rem
 from gymbot.services import wellbeing as wb
 from gymbot.services import workouts as ws
 from gymbot.services.access import is_allowed, owner_user
+from gymbot.services.life import aware as life_aware
 from gymbot.services.programs import load_program
 from gymbot.services.users import active_program, get_or_create_user, set_program
 
@@ -244,6 +245,9 @@ def create_app(
             async with sessionmaker() as session:
                 if not await is_allowed(session, settings, telegram_id):
                     raise HTTPException(403, "this is a personal app")
+                since = await session.scalar(select(User.web_login_since).where(User.telegram_id == telegram_id))
+            if since is not None and web_login.issued_at(x_app_token) < life_aware(since).timestamp():
+                raise HTTPException(401, "this sign-in link was revoked: send /web to the bot again")
             return TelegramUser(id=telegram_id, name=None)
         if not x_telegram_init_data:
             # Dev bypass only for direct local requests, never through the tunnel (cloudflared adds

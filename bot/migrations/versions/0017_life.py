@@ -179,12 +179,14 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column('life_summary_enabled', sa.Boolean(), server_default=sa.true(), nullable=False))
         batch_op.add_column(sa.Column('life_summary_sent_on', sa.Date(), nullable=True))
         batch_op.add_column(sa.Column('life_imported_at', sa.DateTime(timezone=True), nullable=True))
+        batch_op.add_column(sa.Column('web_login_since', sa.DateTime(timezone=True), nullable=True))
 
 
 
 def downgrade() -> None:
     """Downgrade schema."""
     with op.batch_alter_table('users', schema=None) as batch_op:
+        batch_op.drop_column('web_login_since')
         batch_op.drop_column('life_imported_at')
         batch_op.drop_column('life_summary_sent_on')
         batch_op.drop_column('life_summary_enabled')

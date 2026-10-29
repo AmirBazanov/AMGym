@@ -99,7 +99,7 @@ HUB_STATE = {
 
 LIFE_TABLES = {f"life_{t}" for t in ("slots", "events", "deadlines", "tasks", "chores", "projects", "notes")}
 USER_COLUMNS = {"life_remind_before", "life_summary_minute", "life_summary_enabled", "life_summary_sent_on",
-                "life_imported_at"}
+                "life_imported_at", "web_login_since"}
 
 
 # ---- migration 0017 ----

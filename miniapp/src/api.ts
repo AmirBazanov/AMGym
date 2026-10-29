@@ -13,7 +13,8 @@ import {
 
 // Requests carry Telegram initData; the backend validates its HMAC with the bot token before trusting
 // the user id. Never trust initDataUnsafe on the server. Outside Telegram (a computer browser) the bot's
-// /web command gives a link `/?login=<token>`: the token is kept in localStorage and sent as X-App-Token.
+// /web command gives a link `/#login=<token>`: the token is kept in localStorage and sent as X-App-Token.
+// It rides in the fragment, which the browser never sends to the server, so it stays out of access logs.
 const initData: string =
   (window as unknown as { Telegram?: { WebApp?: { initData?: string } } }).Telegram?.WebApp?.initData ?? ''
 
@@ -23,16 +24,18 @@ export const inTelegram = initData.length > 0
 const APP_TOKEN_KEY = 'gymapp.appToken'
 
 /**
- * `?login=<token>` of this page load, removed from the address at once (history.replaceState, other params
- * and the hash stay): the token must not stay in the address bar, the history or a shared link.
+ * `#login=<token>` of this page load, removed from the address at once (history.replaceState, the query
+ * stays): the token must not stay in the address bar, the history or a shared link.
  */
 function takeLoginParam(): string | null {
   try {
     const url = new URL(location.href)
-    const token = url.searchParams.get('login')
+    const fragment = new URLSearchParams(url.hash.slice(1))
+    const token = fragment.get('login')
     if (token == null) return null
-    url.searchParams.delete('login')
-    history.replaceState(history.state, '', url.pathname + url.search + url.hash)
+    fragment.delete('login')
+    const rest = fragment.toString()
+    history.replaceState(history.state, '', url.pathname + url.search + (rest ? `#${rest}` : ''))
     return token.trim() || null
   } catch {
     return null
@@ -56,7 +59,7 @@ function writeAppToken(token: string | null): void {
   }
 }
 
-// Login CSRF guard: a foreign link must not silently replace a login. Inside Telegram `?login` is ignored
+// Login CSRF guard: a foreign link must not silently replace a login. Inside Telegram `#login` is ignored
 // (initData decides who it is). A first login is stored, and the app shows whose it is (freshLogin). A link
 // with another token than the stored one waits for the user's «Войти по новой ссылке?» (takePendingLogin).
 const loginParam = takeLoginParam()

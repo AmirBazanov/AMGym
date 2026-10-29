@@ -1,6 +1,9 @@
 """Sign-in from a computer browser: the /web link and X-App-Token on the API (gymbot.services.web_login)."""
 
+import time
+
 import httpx
+from aiogram.filters import CommandObject
 from conftest import TOKEN, make_settings
 from test_log_text import message
 
@@ -41,10 +44,24 @@ async def test_api_takes_the_token(tmp_path, db):
 
 async def test_web_command(tmp_path):
     msg = message("/web")
-    await hw.cmd_web(msg, make_settings(tmp_path, public_url="https://gym.example"))
+    await hw.cmd_web(msg, make_settings(tmp_path, public_url="https://gym.example"), None)
     url = msg.answer.await_args.kwargs["reply_markup"].inline_keyboard[0][0].url
-    assert url.startswith("https://gym.example/?login=")
+    assert url.startswith("https://gym.example/#login=")  # the fragment never reaches the server
     assert wl.verify(KEY, url.split("login=", 1)[1]) == msg.from_user.id
     msg = message("/web")
-    await hw.cmd_web(msg, make_settings(tmp_path))
+    await hw.cmd_web(msg, make_settings(tmp_path), None)
     assert msg.answer.await_args.args[0] == hw.NOT_SET
+
+
+async def test_revoke_all_links(tmp_path, db):
+    settings = make_settings(tmp_path, allowed_user_ids=[42])
+    app = create_app(settings, db)
+    old = {"X-App-Token": wl.make_token(KEY, 42, now=time.time() - 3600)}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        assert (await c.get("/api/life/view", headers=old)).status_code == 200
+        msg = message("/web выйти", user_id=42)
+        await hw.cmd_web(msg, settings, db, CommandObject(command="web", args="выйти"))
+        assert msg.answer.await_args.args[0] == hw.REVOKED
+        assert (await c.get("/api/life/view", headers=old)).status_code == 401  # made before the revoke
+        fresh = {"X-App-Token": wl.make_token(KEY, 42, now=time.time() + 5)}
+        assert (await c.get("/api/life/view", headers=fresh)).status_code == 200
