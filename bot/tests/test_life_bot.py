@@ -17,6 +17,7 @@ from gymbot.api.app import create_app
 from gymbot.db.models import LifeDeadline, LifeEvent, LifeNote, LifeSlot
 from gymbot.handlers import life as hl
 from gymbot.handlers import log_text
+from gymbot.llm.openrouter import LLMError
 from gymbot.llm.prompts_life import LIFE_SYSTEM_PROMPT
 from gymbot.services import answer as qa
 from gymbot.services import live
@@ -337,7 +338,7 @@ async def test_only_the_owner(life_settings, db):
     await owner(db, tg_id=1)  # someone else is the owner
     llm = FakeLLM(life_settings)
     msg = message("добавь задачу купить билеты")
-    assert await hl.stage(msg, msg.text, msg.text, life_settings, db, llm.client) is None
+    assert await hl.stage(msg, msg.text, msg.text, life_settings, db, llm.client) == (None, hl.NOT_OWNER)
     assert llm.bodies == []
 
 
@@ -346,7 +347,7 @@ async def test_model_failure_goes_on(life_settings, db):
     llm = FakeLLM(life_settings)
     llm.answers.append("not json at all")
     msg = message("добавь задачу купить билеты")
-    assert await hl.stage(msg, msg.text, msg.text, life_settings, db, llm.client) is None
+    assert await hl.stage(msg, msg.text, msg.text, life_settings, db, llm.client) == (None, hl.FAILED)
 
 
 async def test_question_with_options_then_preview(life_settings, db):
@@ -597,6 +598,97 @@ async def test_parser_kind_life_shows_why_an_action_was_dropped(life_settings, d
     llm.answers += [{"kind": "life"}, life_answer(add_event(day="2099-01-01", title="Созвон"))]
     msg = await say("созвон первого января 2099", llm, life_settings, db)
     assert shown(msg) == "Дата 2099-01-01 дальше 400 дней от сегодня."
+
+
+PIZZA = {"description": "пицца, 3 куска", "grams": 300, "kcal": 800, "protein_g": 33, "fat_g": 30, "carbs_g": 99}
+
+
+async def test_parser_kind_life_with_food_is_a_food_record(life_settings, db, no_diary):
+    """«сдал зачёт, съел пиццу 3 куска» called kind="life" with the food in it: the food is never lost."""
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers += [{"kind": "life", "foods": [PIZZA]}] * 2  # the parser (and its plausibility round)
+    msg = await say("сдал зачёт, съел пиццу 3 куска", llm, life_settings, db)
+    assert not any(is_life_request(b) for b in llm.bodies) and not hl.PENDING
+    [pending] = log_text.PENDING.values()
+    assert pending.result.kind == "food" and pending.result.foods[0].description == "пицца, 3 куска"
+    assert "пицца" in shown(msg)
+
+
+async def test_parser_kind_life_with_wellbeing_is_a_wellbeing_record(life_settings, db, no_diary):
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers.append({"kind": "life", "wellbeing": {"sleep_hours": 5}})
+    await say("зачёт завтра, спал 5 часов", llm, life_settings, db)
+    assert len(llm.bodies) == 1 and not hl.PENDING
+    [pending] = log_text.PENDING.values()
+    assert pending.result.kind == "wellbeing" and pending.result.wellbeing.sleep_hours == 5
+
+
+def life_model_down(llm, monkeypatch) -> list[str]:
+    """The «Дела» model fails (every model of the chain); the parser still answers."""
+    calls: list[str] = []
+
+    async def complete_json(messages, **kwargs):
+        calls.append(messages[0]["content"])
+        raise LLMError("all models failed")
+
+    monkeypatch.setattr(llm.client, "complete_json", complete_json)
+    return calls
+
+
+async def test_parser_kind_life_with_an_unknown_word_is_still_life(life_settings, db):
+    """An unfamiliar subject name in unknown_terms is no dish: without a meal in the text it stays «Дела»."""
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers += [{"kind": "life", "unknown_terms": ["ОСиСП"]},
+                    life_answer({"op": "add", "entity": "task", "fields": {"title": "Дедлайн по ОСиСП"}})]
+    msg = await say("к пятнице ОСиСП сдаю", llm, life_settings, db)  # no quick words: the parser first
+    assert len(llm.bodies) == 2 and is_life_request(llm.bodies[1]) and not log_text.PENDING
+    assert "ОСиСП" in shown(msg)
+
+
+async def test_parser_kind_life_with_an_unknown_dish_is_food(life_settings, db, no_diary, monkeypatch):
+    async def no_variants(*args):
+        return []
+
+    monkeypatch.setattr(log_text, "_variants", no_variants)
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers.append({"kind": "life", "unknown_terms": ["гульчатай"], "clarification": "гульчатай — это что?"})
+    await say("сдал зачёт, съел гульчатай", llm, life_settings, db)
+    assert len(llm.bodies) == 1 and not hl.PENDING
+
+
+async def test_parser_kind_life_and_the_life_model_fails(life_settings, db, monkeypatch):
+    """A failing «Дела» model is not «Не понял»: the user is told the model is down."""
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    failed = life_model_down(llm, monkeypatch)
+    llm.answers.append({"kind": "life"})
+    msg = await say("в субботу в 15 созвон с Ильёй", llm, life_settings, db)
+    assert len(llm.bodies) == 1 and failed == [LIFE_SYSTEM_PROMPT]
+    assert shown(msg) == hl.FAILED == "Нейросеть сейчас недоступна, попробуй ещё раз чуть позже."
+
+
+async def test_quick_words_model_failed_then_parser_kind_life(life_settings, db, monkeypatch):
+    """The «Дела» model failed after the quick words, the parser says kind="life": not asked again, and the
+    answer says the model is down, not «Не понял»."""
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    failed = life_model_down(llm, monkeypatch)
+    llm.answers.append({"kind": "life"})
+    msg = await say("добавь задачу купить билеты", llm, life_settings, db)
+    assert failed == [LIFE_SYSTEM_PROMPT] and len(llm.bodies) == 1 and not is_life_request(llm.bodies[0])
+    assert shown(msg) == hl.FAILED
+
+
+async def test_quick_words_model_found_nothing_then_parser_kind_life(life_settings, db):
+    await owner(db)
+    llm = FakeLLM(life_settings)
+    llm.answers += [life_answer(), {"kind": "life"}]
+    msg = await say("добавь задачу", llm, life_settings, db)
+    assert shown(msg) == hl.NOT_UNDERSTOOD
 
 
 # ---- the diary answer: «ДЕЛА: …» and the «Дела» block ----

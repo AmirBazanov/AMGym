@@ -587,6 +587,26 @@ def _diary_like(text: str) -> bool:
     )
 
 
+def _record_over_life(result: ParseResult, text: str) -> ParseResult:
+    """kind="life" holding food, sets or wellbeing (a mixed message): the record's kind, so it is never lost to
+    «Дела». Food first, then sets, then wellbeing (one kind per preview, as the parser does elsewhere). Unknown
+    words alone count as food only when the text reads as a meal («съел гульчатай»): «дедлайн по ОСиСП» is not."""
+    if result.kind != "life":
+        return result
+    t = normalize(text)
+    meal = result.unknown_terms and (_RECORD_VERB.search(t) or FOOD_WORDS.search(t))
+    if result.foods or meal:
+        kind = "food"
+    elif result.exercises:
+        kind = "workout"
+    elif result.wellbeing is not None and not result.wellbeing.is_empty():
+        kind = "wellbeing"
+    else:
+        return result
+    log.info("kind=life with a %s record: the record wins", kind)
+    return result.model_copy(update={"kind": kind})
+
+
 def _factual_question(text: str, result: ParseResult, prev: Exchange | None) -> bool:
     """Whether a message the parser did not take as a question still gets the diary answer from the database
     ("сколько белка осталось" without "?", "что я сегодня делал" called unclear). Never when the parser
@@ -797,9 +817,10 @@ async def process_text(
     # goes on. A message that may be a diary record is never asked here ("купил продукты на ужин: курица 300 г"
     # is food): the parser's kind="life" brings it to «Дела» below.
     life_asked = not _dialog_open(user_id, message.date) and is_life_command(text) and not _diary_like(text)
+    life_why: str | None = None
     if life_asked:
         async with keep_typing(message):
-            life_pending = await life_chat.stage(message, text, raw, settings, sessionmaker, llm)
+            life_pending, life_why = await life_chat.stage(message, text, raw, settings, sessionmaker, llm)
         if life_pending is not None:
             await life_chat.send(message, life_pending, prefix=prefix)
             return
@@ -848,11 +869,14 @@ async def process_text(
             return
         await message.answer(prefix + "Нейросеть сейчас недоступна, попробуй ещё раз чуть позже.")
         return
+    # "сдал зачёт, съел пиццу 3 куска" called kind="life" with the food in it: a record, the «Дела» part is dropped
+    # (the user says it again) rather than the record.
+    result = _record_over_life(result, text)
     # The parser says it is about «Дела»: the «Дела» model without the gate (asked once: after the quick words it
-    # already found nothing). A settings command in the same message wins (its own preview below).
+    # already found nothing, or failed). A settings command in the same message wins (its own preview below).
     if result.kind == "life" and staged is None:
         if life_asked:
-            await message.answer(prefix + life_chat.NOT_UNDERSTOOD)
+            await message.answer(prefix + (life_why or life_chat.NOT_UNDERSTOOD))
             return
         async with keep_typing(message):
             await life_chat.handle_parsed(message, text, raw, settings, sessionmaker, llm, prefix=prefix)

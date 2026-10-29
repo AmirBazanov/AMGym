@@ -5,8 +5,9 @@ words (text or voice) get a preview with «✅ Применить» (gymbot.serv
 Three ways in from handlers/log_text.process_text:
 - `stage`: quick words (gymbot.services.life_gate) before the program edits; a message the model turned into
   no action and no question goes on as usual (food, a workout, a program edit);
-- `handle_parsed`: the parser called the message kind="life": the model without the gate, and «Не понял, что
-  сделать в делах» with an example when it finds nothing;
+- `handle_parsed`: the parser called the message kind="life" (with no food, sets or wellbeing in it: then it
+  is a record, log_text): the model without the gate, and «Не понял, что сделать в делах» with an example
+  when it finds nothing (FAILED, «Нейросеть сейчас недоступна», when the model fails);
 - `send_suggested`: the diary answer's last line «ДЕЛА: <команда>» (gymbot.services.answer), staged under it.
 
 Notes the bot writes («составь памятку по epoll»): the model returns write_note {title, brief}; a second call
@@ -58,7 +59,7 @@ NOT_UNDERSTOOD = (
     "Не понял, что сделать в делах. Напиши, например: «в учёбу добавь завтра в 11 позаниматься HTTP-сервером "
     "на C», «добавь задачу купить билеты» или «вынес мусор»."
 )
-FAILED = "Не получилось разобрать, попробуй ещё раз чуть позже."
+FAILED = "Нейросеть сейчас недоступна, попробуй ещё раз чуть позже."  # a failure, not «nothing found»
 SAVE_FAILED = "Не получилось сохранить, попробуй ещё раз"
 NOT_OWNER = "«Дела» ведёт только владелец бота."
 SUGGESTED_FAILED = "Не получилось подготовить изменение в делах («{command}»), напиши его сам."
@@ -205,14 +206,15 @@ async def _stage(
 async def stage(
     message: Message, text: str, raw: str, settings: Settings, sessionmaker: Sessionmaker, llm: OpenRouterClient,
     *, forced: bool = False,
-) -> LifePending | None:
+) -> tuple[LifePending | None, str | None]:
     """The «Дела» preview of `text` for the owner, when it has the gate's words (or `forced`: the parser said
-    kind="life") and the model found an action or asks a question; None otherwise or on any error."""
+    kind="life") and the model found an action or asks a question: (pending, None). Else (None, why): None
+    without the words or when the model found nothing, FAILED on any error, NOT_OWNER, the dropped actions'
+    notes (see `_stage`)."""
     tg = message.from_user
     if tg is None or not (forced or is_life_command(text)):
-        return None
-    pending, _ = await _stage(tg.id, message.date, text, raw, settings, sessionmaker, llm)
-    return pending
+        return None, None
+    return await _stage(tg.id, message.date, text, raw, settings, sessionmaker, llm)
 
 
 async def handle_parsed(
