@@ -6,8 +6,9 @@ The route machinery (fallback, cooldowns, stats) lives in gymbot.llm.openrouter;
   text of the turn).
 - claude-opus-5-5 always thinks: no `thinking` field (disabled or a budget is a 400), depth via
   `output_config.effort` per call type (PURPOSES). No temperature/top_p (400 on this model), no assistant prefill.
-- JSON calls send `output_config.format` with the call's schema (gymbot.llm.structured); the callers still
-  validate. A 400 about the schema switches that call type to plain JSON instructions (openrouter._try_route).
+- JSON calls send `output_config.format` with the call's schema (gymbot.llm.structured; "edit" has none, see
+  there); the callers still validate. A 400 about the schema switches that call type to plain JSON
+  instructions (openrouter._try_route).
 - Prompt caching: cache_control on the stable system prompt (`stable_system`, the part before per-user facts or
   the diary summary), on the last system block, and on the last stable chat turn (`stable_messages`: the parser's
   few-shot examples). Minimum cacheable prefix on Opus 5.5 is 512 tokens; shorter prefixes just don't cache.
@@ -57,7 +58,7 @@ PURPOSES: dict[str, Purpose] = {
         Purpose("parse", "low", 4096, 30.0, structured.PARSE),  # chat parser, saved-edit re-estimate, repair
         Purpose("photo", "low", 4096, 40.0, structured.PHOTO, VISION_SYSTEM),
         Purpose("settings", "low", 4096, 30.0, structured.SETTINGS),
-        Purpose("edit", "low", 4096, 30.0, structured.EDIT, stable_system=EDIT_SYSTEM_PROMPT),  # program edits
+        Purpose("edit", "low", 4096, 30.0, stable_system=EDIT_SYSTEM_PROMPT),  # no schema: see structured
         Purpose("baselines", "low", 4096, 30.0, structured.BASELINES),
         Purpose("lookup", "low", 4096, 30.0, structured.LOOKUP),
         Purpose("json", "low", 4096, 30.0),  # complete_json without a known schema

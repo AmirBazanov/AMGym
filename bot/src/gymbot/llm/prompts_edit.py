@@ -1,9 +1,9 @@
 """Prompt for program edits from the chat (gymbot.services.chat_edit, handlers/chat_edit.py).
 
-A separate call with its own schema (gymbot.llm.structured.EditAnswer), not the parser: the parser prompt is
-at its size limit and the program week it would need costs tokens on every food record. The system prompt is
-stable (cached by Claude, Purpose "edit"); the program week and the catalog go into the user turn.
-Keep the action shapes in sync with chat_edit's pydantic models and structured.EditAnswer.
+A separate call (no JSON schema: too large for Claude, see gymbot.llm.structured), not the parser: the parser
+prompt is at its size limit and the program week it would need costs tokens on every food record. The system
+prompt is stable (cached by Claude, Purpose "edit"); the program week and the catalog go into the user turn.
+Keep the action shapes in sync with chat_edit's pydantic models.
 """
 
 from __future__ import annotations

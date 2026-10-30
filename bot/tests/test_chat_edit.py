@@ -931,27 +931,20 @@ async def test_apply_swap_and_deload_in_one_plan(db):
     assert copy.deload == (date(2026, 10, 12), date(2026, 10, 18))
 
 
-def test_edit_schema_lists_every_action_type_the_parser_accepts():
-    from gymbot.llm import structured
+def test_edit_prompt_lists_every_action_type_the_parser_accepts():
+    """The edit call has no JSON schema (too large for Claude): the prompt alone names the actions, so it and
+    chat_edit.Action must list the same types."""
+    import re
+    import typing
 
-    def type_consts(node):
-        if isinstance(node, dict):
-            enum = node.get("properties", {}).get("type", {}).get("enum")
-            if enum:
-                yield from enum
-            for v in node.values():
-                yield from type_consts(v)
-        elif isinstance(node, list):
-            for v in node:
-                yield from type_consts(v)
+    from gymbot.llm.prompts_edit import EDIT_SYSTEM_PROMPT
 
-    in_schema = set(type_consts(structured.EDIT))
-    assert {"swap_days", "move_day", "deload"} <= in_schema
-    for t in ("swap_days", "move_day", "deload"):  # and the chat side parses what the schema allows
-        valid, _ = ce.parse_actions({"actions": [{"type": t}]})
-        assert len(valid) == 1
-    assert in_schema == {"replace", "remove", "add", "prescribe", "reorder", "weight", "swap_days", "move_day",
-                         "deload", "adjust_day", "clear_day", "set_weekdays", "clarify"}
+    actions = EDIT_SYSTEM_PROMPT.split("Действия", 1)[1].split("DAY =", 1)[0]
+    in_prompt = set(re.findall(r'^- \{"type": "(\w+)"', actions, re.MULTILINE))
+    union = typing.get_args(typing.get_args(ce.Action)[0])
+    in_parser = {typing.get_args(m.model_fields["type"].annotation)[0] for m in union}
+    assert in_prompt == in_parser
+    assert "replace_day" in in_prompt and len(in_prompt) == 14
 
 
 # ---- review fixes: moves run last, one per command, chat checks, day weights, a changed deload ----
