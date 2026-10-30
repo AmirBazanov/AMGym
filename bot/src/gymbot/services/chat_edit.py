@@ -1433,18 +1433,28 @@ def _rest_day(snap: Snapshot, n: int, ref: DayRef, picks: dict[tuple[int, str], 
 
 
 def _new_day(snap: Snapshot, a: AddA | ReplaceDayA, day: DayView, plan: EditPlan, all_weeks: list[int], temp: int) -> int:
-    """A workout on a rest day: an add_day op (once per day), then the exercises of `a` in it."""
-    weeks = scope_weeks(a.scope or "this_week", day.week, all_weeks)
-    where = scope_words(weeks, day.week, all_weeks)
+    """A workout on a rest day: an add_day op (once per day), then the exercises of `a` in it. A weekday already
+    past this week starts next week when the scope goes on ("по понедельникам до конца программы" on a Friday).
+    The day's label ("день ног" -> focus "ноги") names the new day: «Ноги»."""
     when = snap.date_of(day.week, day.weekday)
-    said = _date(when) if when is not None else WEEKDAYS[day.weekday - 1]
+    weeks = scope_weeks(a.scope or "this_week", day.week, all_weeks)
     if when is not None and when < snap.today:
-        raise _Need(note=f"{said.capitalize()} уже прошло — тренировку туда не добавляю.")
+        start = next((w for w in weeks if w > day.week and snap.day(w, day.weekday) is None), None)
+        if start is None:
+            raise _Need(note=f"{_date(when).capitalize()} уже прошло — тренировку туда не добавляю.")
+        day = DayView(day.id, start, day.weekday, day.focus, [])
+        when = snap.date_of(day.week, day.weekday)
+        weeks = [w for w in weeks if w >= start]  # "во всей программе": never this week's past day
+    where = scope_words(weeks, day.week, all_weeks)
+    said = _date(when) if when is not None else WEEKDAYS[day.weekday - 1]
+    label = (a.day.focus or "").strip()
+    label = label[:1].upper() + label[1:pe.FOCUS_MAX] if label else ""
     if (day.week, day.weekday) not in plan.new_days:
         plan.new_days.add((day.week, day.weekday))
-        plan.ops.append(_op("add_day", day, weeks))
+        plan.ops.append(_op("add_day", day, weeks, **({"focus": label} if label else {})))
         plan.op_labels.append(f"тренировка {WEEKDAYS[day.weekday - 1]}")
-        plan.lines.append(f"{said.capitalize()}: тренировка вместо отдыха ({where})")
+        named = f"тренировка «{label}»" if label else "тренировка"
+        plan.lines.append(f"{said.capitalize()}: {named} вместо отдыха ({where})")
     if isinstance(a, ReplaceDayA):
         return _replace_day(snap, a, day, plan, all_weeks, temp)
     new, known = _canonical(snap, a.name)

@@ -1817,3 +1817,77 @@ async def test_set_weekdays_after_an_earlier_move_keeps_every_week_on_the_new_da
     for w in range(1, 9):
         assert sorted(after.weeks[w]) == [2, 4, 6]
         assert after.day(w, 6).focus == "Руки и плечи"
+
+
+# ---- a new training day until the end of the program (incident 30.10: «добавь день ног») ----
+
+
+def leg_day(weekday, scope="from_this_week"):
+    return ce.ReplaceDayA(type="replace_day", day=DayRef(weekday=weekday, focus="ноги"), scope=scope, items=[
+        ce.DayItemA(name="присед со штангой", sets=3, repsMin=8, weight_kg=80),
+        ce.DayItemA(name="румынская тяга", sets=3, repsMin=10),
+    ])
+
+
+def test_new_leg_day_on_saturdays_is_named_and_goes_to_the_end(snap):
+    plan = ce.compile_ops(snap, [leg_day(6)])
+    assert plan.ready() and plan.notes == []
+    assert [op["op"] for op in plan.ops] == ["add_day", "add", "add"]
+    assert plan.ops[0]["focus"] == "Ноги" and plan.ops[0]["week"] == 1
+    assert plan.ops[0]["weeks"] == snap.all_weeks()
+    assert plan.lines[0] == "Сб 10.10: тренировка «Ноги» вместо отдыха (все недели)"
+
+
+def test_new_day_on_a_weekday_already_past_starts_next_week(snap):
+    """Friday: «по вторникам до конца программы» starts on next Tuesday, not «уже прошло»."""
+    plan = ce.compile_ops(snap, [leg_day(2)])
+    assert plan.ready() and plan.notes == []
+    assert {(op["week"], op["weekday"]) for op in plan.ops} == {(2, 2)}
+    assert plan.ops[0]["weeks"] == [w for w in snap.all_weeks() if w >= 2]
+    assert plan.lines[0].startswith("Вт 13.10: тренировка «Ноги» вместо отдыха (недели 2")
+
+
+def test_new_day_on_a_past_weekday_this_week_only_is_a_note(snap):
+    plan = ce.compile_ops(snap, [leg_day(2, scope="this_week")])
+    assert not plan.ready() and plan.notes == ["Вт 06.10 уже прошло — тренировку туда не добавляю."]
+
+
+async def test_new_leg_day_applies_to_every_week_with_the_weight_on_the_first(db):
+    from gymbot.services import overrides
+
+    s, session, user, up, plan = await staged(db, [leg_day(6)])
+    try:
+        await ce.preview(session, user, up, plan)
+        assert plan.ready()
+    finally:
+        await s.__aexit__(None, None, None)
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        up = await active_program(session, user, TODAY)
+        assert await ce.apply(session, user, up, plan, TODAY, "добавь тренировку ног по субботам") == []
+        await session.commit()
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        after = await ce.load_snapshot(session, user, TODAY)
+        for week in after.all_weeks():
+            assert after.day(week, 6).focus == "Ноги"
+            assert _names(after.day(week, 6)) == ["присед со штангой", "румынская тяга"]
+        saturday = {w.exercise: w.weightKg for w in await overrides.for_day(session, user.id, TODAY + timedelta(days=1))}
+        assert saturday == {"присед со штангой": 80.0}
+
+
+def test_new_day_on_a_past_weekday_in_all_weeks_never_lands_on_this_week(snap):
+    plan = ce.compile_ops(snap, [leg_day(2, scope="all_weeks")])
+    assert plan.ready()
+    assert plan.ops[0]["week"] == 2 and 1 not in plan.ops[0]["weeks"]
+
+
+@pytest.mark.parametrize("text", [
+    "измени в сегодняшней тренировке жим на 80",
+    "измени сегодняшнюю тренировку, жим 80 а не 70",
+    "измени последнюю тренировку: жим 3 подхода по 8",
+    "измени тренировку в понедельник: жим 80",
+    "измени жим в тренировке на 85 кг",
+])
+def test_fixing_a_saved_workout_is_not_a_program_edit(text):
+    assert not ce.is_edit_command(text)

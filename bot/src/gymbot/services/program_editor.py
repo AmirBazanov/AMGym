@@ -88,6 +88,7 @@ MAX_SETS = 20
 MAX_REPS = 100
 DROPS_MIN, DROPS_MAX = 2, 5
 NAME_MAX = 200
+FOCUS_MAX = 64  # a day's label made by add_day
 SLUG_MAX = 100  # programs.slug
 PROGRAM_NAME_MAX = 200  # programs.name
 COPY_MARK = " · моя"
@@ -176,7 +177,7 @@ class MoveDayOp(_DayOp):
 
 class AddDayOp(_DayOp):
     op: Literal["add_day"]
-    focus: str | None = Field(default=None, max_length=64)
+    focus: str | None = Field(default=None, max_length=FOCUS_MAX)
 
 
 class SetWeekdaysOp(_DayOp):
