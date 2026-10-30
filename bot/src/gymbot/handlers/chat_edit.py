@@ -153,7 +153,7 @@ async def stage_edit(
     tg = message.from_user
     assert tg is not None
     today = _local_day(message.date, settings)
-    pending, _ = await _stage(tg.id, message.date, text, raw, today, sessionmaker, llm)
+    pending, _, _ = await _stage(tg.id, message.date, text, raw, today, sessionmaker, llm)
     if pending is None:
         return None
     plan = pending.plan
@@ -170,23 +170,27 @@ async def stage_edit(
 
 async def _stage(
     tg_id: int, at: datetime, text: str, raw: str, today: date, sessionmaker: Sessionmaker, llm: OpenRouterClient
-) -> tuple[EditPending | None, bool]:
-    """The edit model's actions for `text` compiled into a previewed plan, and whether it failed; (None, False)
-    when the model found no valid action, (None, True) on any error."""
+) -> tuple[EditPending | None, bool, list[str]]:
+    """The edit model's actions for `text` compiled into a previewed plan, whether it failed, and the notes
+    about actions it gave out of limits; (None, False, notes) when the model found no valid action, (None, True,
+    []) on any error."""
     try:
         data = await _ask_model(text, today, tg_id, sessionmaker, llm)
         actions, invalid = ce.parse_actions(data)
         if not actions:
-            return None, False
+            return None, False, invalid
         pending = EditPending(tg_id, text, raw, actions, at, notes=invalid)
         pending.plan = await _build(pending, today, sessionmaker)
     except Exception as e:  # noqa: BLE001 - a failing edit path must never cost the user a record
         log.warning("program edit command failed (%s), the usual path", type(e).__name__)
-        return None, True
-    return pending, False
+        return None, True, []
+    return pending, False, invalid
 
 
-NOT_SUPPORTED = "Эту правку («{command}») я пока сделать не могу — тренируйся по своему плану и запиши сделанное после зала."
+NOT_SUPPORTED = (
+    "Эту правку («{command}») я пока сделать не могу. Умею менять упражнения, подходы и дни, переносить и "
+    "облегчать тренировки, ставить разгрузку и делать новую программу целиком — скажи, что из этого нужно."
+)
 SUGGESTED_FAILED = "Не получилось подготовить правку «{command}», попробуй ещё раз чуть позже."
 
 
@@ -198,8 +202,11 @@ async def send_suggested(
     tg = message.from_user
     assert tg is not None
     today = _local_day(message.date, settings)
-    pending, failed = await _stage(tg.id, message.date, command, raw, today, sessionmaker, llm)
+    pending, failed, invalid = await _stage(tg.id, message.date, command, raw, today, sessionmaker, llm)
     if pending is None:
+        if invalid and not failed:  # «новая программа: от 1 до 16 недель …»: why, not «не могу»
+            await message.answer("\n".join(invalid))
+            return
         await message.answer((SUGGESTED_FAILED if failed else NOT_SUPPORTED).format(command=command))
         return
     log.info("program edit suggested by the diary answer: %r", command)

@@ -1954,3 +1954,11 @@ def test_followup_is_not_taken_after_a_life_turn_the_answer_staged(diary, monkey
         [log_text.life_chat.Turn(T0, "assistant", "Добавить уборку на завтра?")]
     ))
     assert not log_text._follows_answer(USER, "да", T0 + timedelta(minutes=1))
+
+
+def test_a_command_over_several_lines_is_taken_whole():
+    text, cmd, _ = qa.split_commands(
+        "Вот программа.\nПРАВКА: замени программу на 8 недель с 02.11:\nпн — жим лёжа 4×8\n- ср — присед 4×8\n\nУдачи!"
+    )
+    assert cmd == "замени программу на 8 недель с 02.11: пн — жим лёжа 4×8; ср — присед 4×8"
+    assert text == "Вот программа.\n\nУдачи!"
