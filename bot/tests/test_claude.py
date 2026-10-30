@@ -216,7 +216,7 @@ async def test_answer_uses_high_effort_no_schema_and_caches_prompt_and_summary()
     ("purpose", "effort", "schema"),
     [
         ("settings", "low", structured.SETTINGS),
-        ("edit", "low", structured.EDIT),
+        ("edit", "low", None),  # too large for Claude's grammar compiler: see structured
         ("baselines", "low", structured.BASELINES),
         ("lookup", "low", structured.LOOKUP),
         ("plan", "low", structured.PLAN),
@@ -238,7 +238,7 @@ async def test_edit_purpose_caches_its_system_prompt():
     await h.client.complete_json(build_edit_messages("убери жим", "Сегодня …"), prefer="actions", purpose="edit")
     body = h.claude_bodies[0]
     assert body["system"] == [{"type": "text", "text": EDIT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
-    assert body["output_config"]["format"]["schema"] == structured.EDIT
+    assert body["output_config"] == {"effort": "low"}
     assert "Сообщение: убери жим" in body["messages"][0]["content"][0]["text"]
 
 
@@ -403,6 +403,19 @@ async def test_schema_rejection_retries_without_schema_and_remembers_it():
     await h.client.parse_message("привет", [])
     assert "format" in h.claude_bodies[3]["output_config"]  # other call types keep their schema
     assert h.other == []
+
+
+async def test_edit_is_one_request_without_a_schema():
+    """Prod, 2026-10-30: Claude rejected the edit schema ("The compiled grammar is too large"), so the first edit
+    after every restart cost a 400 before the plain-JSON retry. Now the first request is the one that answers."""
+    answer = {"actions": [{"type": "remove", "day": {"weekday": 5, "focus": None, "when": None},
+                           "exercise": "французский жим лёжа", "scope": None}], "summary": "Убрать жим"}
+    h = Harness([message(answer)])
+    msgs = build_edit_messages("убери французский жим из пятницы", "Сегодня …")
+    assert await h.client.complete_json(msgs, prefer="actions", purpose="edit") == answer
+    assert len(h.claude_bodies) == 1 and h.other == []
+    assert "format" not in h.claude_bodies[0]["output_config"]
+    assert claude.PURPOSES["edit"].schema is None
 
 
 async def test_other_400_goes_to_next_route():
