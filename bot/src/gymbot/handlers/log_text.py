@@ -412,6 +412,46 @@ def wants_diary(text: str) -> bool:
     return "?" in text or len(text.split()) > SMALL_TALK_WORDS or bool(ASKS_VISIBILITY.search(normalize(text)))
 
 
+# A reply to the diary answer's offer («…, сделать?» -> «да», «давай») or a push to do it («измени, ты же
+# можешь»), made of these words only («добавь банан» is a record): the diary answer sees its offer and stages
+# it («ПРАВКА: …»). Incident 30.10: the parser answered «да» itself («сам изменить программу я не могу»), and
+# saved_edits took «измени ты же можешь» for a saved record («Не понял…»).
+_AGREE_WORDS = frozenset(
+    ["да", "даа", "ага", "угу", "ок", "окей", "хорошо", "конечно", "давай", "давайте", "го", "погнали", "вперед", "согласен", "ладно", "ну", "так", "тогда", "пожалуйста", "плиз", "это", "его", "ее", "их"]
+)
+_PUSH_WORDS = frozenset(
+    ["делай", "сделай", "сделайте", "измени", "измените", "меняй", "поменяй", "добавь", "добавляй", "применяй", "ставь", "поставь", "ты", "же", "можешь", "сам", "сама", "сами", "уже"]
+)
+FOLLOWUP_WORDS = 6
+
+
+def answer_followup(text: str, answers: list[tuple[str, str]]) -> bool:
+    """Whether `text` agrees with or pushes for what the last diary answer offered: a bare agreement only after
+    an answer that asked («сделать?»), a push after any recent one."""
+    if not answers or "?" in text or re.search(r"\d", text):  # «ставь 85», «да, 90»: settings or a record
+        return False
+    words = re.findall(r"[a-zа-я]+", normalize(text))
+    if not words or len(words) > FOLLOWUP_WORDS or any(w not in _AGREE_WORDS | _PUSH_WORDS for w in words):
+        return False
+    return any(w in _PUSH_WORDS for w in words) or "?" in answers[-1][1]
+
+
+def _follows_answer(user_id: int, text: str, now: datetime) -> bool:
+    """answer_followup on the user's last diary answer while it is the bot's last word: not after a newer record
+    or «Дела» turn (one the answer staged itself has its time), nor once its own change is already shown with
+    «Применить» («давай» then would stage it twice)."""
+    turns = [t for t in QA.get(user_id, []) if now - t[2] <= CONTEXT_TTL]
+    if not turns:
+        return False
+    at, last = turns[-1][2], turns[-1][1]
+    life_at, ex = life_chat.last_at(user_id), recent_exchange(user_id, now)
+    if (life_at is not None and life_at >= at) or (ex is not None and ex.at >= at):
+        return False
+    if "\nПРАВКА: " in last or "\nДЕЛА: " in last:
+        return False
+    return answer_followup(text, [(q, a) for q, a, _ in turns])
+
+
 # "тебе видно?", "видишь в мини-аппе?": only the diary answer knows the workout in progress.
 ASKS_VISIBILITY = re.compile(r"мини[\s-]?апп?|миниапп?|mini ?app|\b(?:видно|видишь|вижу)\b", re.IGNORECASE)
 # A reply that is not a record must never claim an action: the bot writes only after «Сохранить».
@@ -557,6 +597,27 @@ async def _diary_answer(
     _remember_answer(tg_user.id, text, remembered, message.date)
     suggested = Suggested(command, life_command) if command or life_command else None
     return result.model_copy(update={"clarification": reply}), rich, suggested
+
+
+async def _continue_answer(
+    message: Message, text: str, raw: str, prefix: str, settings: Settings, sessionmaker: Sessionmaker,
+    llm: OpenRouterClient,
+) -> bool:
+    """The diary answer to a follow-up of its own answer, with what it suggests staged under it; False: it
+    failed, nothing was sent."""
+    asked = ParseResult(kind="question")
+    answered, rich, suggested = await _diary_answer(message, text, asked, settings, sessionmaker, llm)
+    if answered is asked or not (answered.clarification or "").strip() and suggested is None:
+        return False
+    reply = prefix + (answered.clarification or "")
+    if not reply.strip():  # only «ПРАВКА: …»: its preview below is the whole reply
+        log.info("a follow-up answer was only its suggested change")
+    elif rich is not None:
+        await send_html(message.answer, escape(prefix) + rich, reply)
+    else:
+        await message.answer(reply)
+    await _suggested(message, suggested, raw, settings, sessionmaker, llm)
+    return True
 
 
 # A record in the same message ("съел курт, сколько белка осталось", "сделал жим 3 подхода по 8"): the
@@ -814,6 +875,14 @@ async def process_text(
     if await life_chat.on_text(message, text, llm, dialog_at=dialog_at, prefix=prefix):
         return
     if await product_cards.on_text(message, text, raw, sessionmaker, dialog_at=dialog_at, prefix=prefix):
+        return
+    # «да», «измени, ты же можешь» right after a diary answer: that answer goes on and stages what it offered
+    # (answer_followup), neither the parser nor saved_edits. If it fails, the message goes the usual way.
+    if (
+        not _dialog_open(user_id, message.date)
+        and _follows_answer(user_id, text, message.date)
+        and await _continue_answer(message, text, raw, prefix, settings, sessionmaker, llm)
+    ):
         return
     # "в учёбу добавь завтра в 11 …", "добавь задачу купить билеты", "вынес мусор": «Дела», their own preview
     # (handlers/life.py). Consumes the message only when the model found an action or asks a question; else it

@@ -1858,3 +1858,99 @@ async def test_diary_answer_without_a_command_stages_nothing(llm, settings, db, 
     llm.answers = [{"kind": "question", "clarification": "Не знаю."}, MARKED]
     await send(ADVICE_Q, llm, settings, db)
     staged.assert_not_awaited()
+
+
+# ---- «да» and «измени, ты же можешь» after the diary answer's offer (incident 30.10) ----
+
+LEG_OFFER = "Ногам нужен свой день с приседом. Добавить день ног в программу по субботам, сделать?"
+LEG_COMMAND = "добавь тренировку ног по субботам до конца программы: присед со штангой 3×8 80 кг"
+
+
+@pytest.mark.parametrize("text", ["Да", "давай", "ну давай", "ок, делай", "Измени ты же можешь", "сделай сам"])
+async def test_agreement_after_an_offer_continues_the_diary_answer(text, llm, settings, db, diary, monkeypatch):
+    """«Да» got the parser's own «сам изменить программу я не могу», «измени ты же можешь» saved_edits' «Не понял»."""
+    staged = AsyncMock()
+    monkeypatch.setattr(log_text, "send_suggested", staged)
+    llm.answers = [{"kind": "question", "clarification": "Не знаю."}, LEG_OFFER]
+    await send("База уже не нужна наверно, что там по полноценной программе", llm, settings, db)
+    calls = len(llm.bodies)
+    llm.answers = [f"Ставлю день ног по субботам.\nПРАВКА: {LEG_COMMAND}"]
+    msg = await send(text, llm, settings, db, T0 + timedelta(minutes=1))
+    assert len(llm.bodies) == calls + 1  # the diary answer only: no parser, no saved_edits
+    assert "ПРАВКА" not in msg.answer.await_args.args[0] and "по субботам" in msg.answer.await_args.args[0]
+    staged.assert_awaited_once()
+    assert staged.await_args.args[1] == LEG_COMMAND
+
+
+@pytest.mark.parametrize("text, answers", [
+    ("Да", []),  # no diary answer
+    ("Да", [("что сегодня?", "Сегодня руки: сгибания 4×8.")]),  # nothing offered
+    ("добавь банан", [("что посоветуешь?", LEG_OFFER)]),  # a record
+    ("да, а сколько белка в твороге?", [("что посоветуешь?", LEG_OFFER)]),  # a new question
+    ("давай я лучше в понедельник схожу на ноги и потом решим", [("что посоветуешь?", LEG_OFFER)]),  # too long
+])
+def test_answer_followup_is_only_a_bare_agreement_or_push(text, answers):
+    assert not log_text.answer_followup(text, answers)
+
+
+def test_answer_followup_push_needs_no_question_in_the_answer():
+    assert log_text.answer_followup("измени ты же можешь", [("что по программе?", "Сам изменить я не могу.")])
+    assert log_text.answer_followup("Да!", [("что посоветуешь?", LEG_OFFER)])
+
+
+async def test_yes_with_a_pending_preview_still_goes_to_the_parser(llm, settings, db, diary):
+    llm.answers = [{"kind": "question", "clarification": "Не знаю."}, LEG_OFFER]
+    await send("База уже не нужна наверно, что там по полноценной программе", llm, settings, db)
+    llm.answers = [food(1)]
+    await send("самса", llm, settings, db, T0 + timedelta(minutes=1))
+    llm.answers = [food(1, revises=True)]
+    msg = await send("да", llm, settings, db, T0 + timedelta(minutes=2))
+    assert "самса" in llm.last_messages()  # the parser, with the preview in its history
+    assert "самса" in msg.answer.await_args.args[0]
+
+
+async def test_yes_after_a_newer_life_reply_is_not_the_diary_answers(llm, settings, db, diary, monkeypatch):
+    llm.answers = [{"kind": "question", "clarification": "Не знаю."}, LEG_OFFER]
+    await send("База уже не нужна наверно, что там по полноценной программе", llm, settings, db)
+    monkeypatch.setitem(log_text.life_chat.HISTORY, USER, log_text.life_chat.deque(
+        [log_text.life_chat.Turn(T0 + timedelta(minutes=1), "assistant", "Добавить уборку на завтра?")]
+    ))
+    assert not log_text._follows_answer(USER, "да", T0 + timedelta(minutes=2))
+
+
+async def test_followup_answer_of_only_the_command_sends_just_the_preview(llm, settings, db, diary, monkeypatch):
+    staged = AsyncMock()
+    monkeypatch.setattr(log_text, "send_suggested", staged)
+    llm.answers = [{"kind": "question", "clarification": "Не знаю."}, LEG_OFFER]
+    await send("База уже не нужна наверно, что там по полноценной программе", llm, settings, db)
+    llm.answers = [f"ПРАВКА: {LEG_COMMAND}"]
+    msg = await send("да", llm, settings, db, T0 + timedelta(minutes=1))
+    msg.answer.assert_not_awaited()  # never an empty message (Telegram: 400)
+    assert staged.await_args.args[1] == LEG_COMMAND
+
+
+@pytest.mark.parametrize("text", ["ставь 85", "да, 90"])
+def test_answer_followup_never_takes_numbers(text):
+    assert not log_text.answer_followup(text, [("что посоветуешь?", LEG_OFFER)])
+
+
+def test_followup_is_not_taken_once_the_offer_is_staged_or_a_record_came_after(diary):
+    log_text.QA[USER] = [("что посоветуешь?", f"Ок.\nПРАВКА: {LEG_COMMAND}", T0)]
+    assert not log_text._follows_answer(USER, "давай", T0 + timedelta(minutes=1))
+    log_text.QA[USER] = [("что посоветуешь?", LEG_OFFER, T0)]
+    assert log_text._follows_answer(USER, "давай", T0 + timedelta(minutes=1))
+    log_text.CONTEXT[USER] = log_text.Exchange(
+        ["самса"], ["самса"], ParseResult.model_validate(food(1)), T0 + timedelta(seconds=30), "t"
+    )
+    try:
+        assert not log_text._follows_answer(USER, "давай", T0 + timedelta(minutes=1))
+    finally:
+        log_text.CONTEXT.pop(USER, None)
+
+
+def test_followup_is_not_taken_after_a_life_turn_the_answer_staged(diary, monkeypatch):
+    log_text.QA[USER] = [("что посоветуешь?", LEG_OFFER, T0)]
+    monkeypatch.setitem(log_text.life_chat.HISTORY, USER, log_text.life_chat.deque(
+        [log_text.life_chat.Turn(T0, "assistant", "Добавить уборку на завтра?")]
+    ))
+    assert not log_text._follows_answer(USER, "да", T0 + timedelta(minutes=1))

@@ -151,6 +151,12 @@ def recent(tg_id: int, now: datetime) -> bool:
     return bool(turns) and turns[-1].role == "assistant" and now - turns[-1].at <= FOLLOWUP_TTL
 
 
+def last_at(tg_id: int) -> datetime | None:
+    """When the last «Дела» turn was (None: none yet)."""
+    turns = HISTORY.get(tg_id)
+    return turns[-1].at if turns else None
+
+
 # ---- the Mini App button ----
 
 
