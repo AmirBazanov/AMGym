@@ -275,6 +275,56 @@ async def _copy_name(session: AsyncSession, base: str, user_id: int) -> str:
     return name
 
 
+@dataclass(frozen=True)
+class NewItem:
+    name: str
+    sets: int
+    reps_min: int | None
+    reps_max: int | None
+    drop_reps: list[int] | None
+
+
+@dataclass(frozen=True)
+class NewDay:
+    weekday: int
+    focus: str | None
+    items: list[NewItem]
+
+
+async def create_program(session: AsyncSession, user: User, name: str, weeks: int, days: list[NewDay]) -> Program:
+    """A program of the user's own made from scratch ("замени программу на 3 дня на 8 недель: …"): `weeks`
+    weeks of the same `days`, no template behind it (`based_on_id` and `base_day_id` stay NULL). Exercises
+    are found by name or alias, or created. Flushes, the caller commits and starts it."""
+    exercises = {i.name: await get_or_create_exercise(session, i.name) for d in days for i in d.items}
+    for d in days:
+        if any(k > 1 for k in Counter(exercises[i.name].id for i in d.items).values()):
+            raise EditError(f"{WEEKDAY_TITLES[d.weekday].capitalize()}: одно упражнение дважды в одном дне.")
+    program = Program(
+        slug=await _copy_slug(session, "own", user.id),
+        name=await _copy_name(session, name, user.id),
+        owner_user_id=user.id,
+        version=1,
+    )
+    for n in range(1, weeks + 1):
+        week = ProgramWeek(number=n)
+        for d in days:
+            day = ProgramDay(weekday=d.weekday, focus=d.focus)
+            for order, i in enumerate(d.items, 1):
+                day.items.append(ProgramItem(
+                    exercise=exercises[i.name],
+                    order=order,
+                    sets=i.sets,
+                    reps_min=i.reps_min,
+                    reps_max=i.reps_max,
+                    drop_reps=i.drop_reps,
+                ))
+            week.days.append(day)
+        program.weeks.append(week)
+    session.add(program)
+    await session.flush()
+    return program
+
+
 async def fork_program(session: AsyncSession, user: User, up: UserProgram, template: Program) -> Fork:
     """The user's own copy of `template` (tree loaded), made active from `up.started_on`; see the module doc.
     Flushes, the caller commits."""

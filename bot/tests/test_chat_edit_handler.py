@@ -658,3 +658,47 @@ async def test_suggested_command_on_an_error_says_try_again(settings, db, llm, m
     msg = message("давай", at=T0)
     await hce.send_suggested(msg, "сделай сегодня день рук", "давай", settings, db, llm.client)
     assert shown(msg) == hce.SUGGESTED_FAILED.format(command="сделай сегодня день рук")
+
+
+INCIDENT_PROGRAM = (
+    "замени программу на 3 дня (пн, ср, пт) на 8 недель с 12.10: пн — жим лёжа 4×6–8, тяга вертикального блока "
+    "4×8–10, жим сидя в смите 3×8–10, сгибания на бицепс с ez грифом хватом снизу 3×10–12, французский жим лёжа "
+    "3×10–12; ср — присед со штангой 4×8, румынская тяга 3×10, разгибания ног в тренажёре 3×12, сгибания ног "
+    "лёжа 3×12, подъёмы на носки 3×15; пт — жим лёжа 3×8–10, тяга штанги в наклоне 4×8, жим гантелей сидя 3×10"
+)
+
+
+async def test_a_whole_new_program_suggested_by_the_answer_previews_and_applies(settings, db, llm):
+    """Incident 30.10: the command was cut at 300 characters and the edit model refused a new program."""
+    from gymbot.services import answer as qa
+
+    _, command = qa.split_command(f"Вот программа.\nПРАВКА: {INCIDENT_PROGRAM}")
+    assert command == INCIDENT_PROGRAM  # whole, not cut
+    rx = {"dropReps": None, "weight_kg": None}
+    llm.answers.append({"actions": [{"type": "new_program", "name": None, "weeks": 8, "start": "2026-10-12", "days": [
+        {"weekday": 1, "focus": None, "items": [{**rx, "name": "жим лёжа", "sets": 4, "repsMin": 6, "repsMax": 8}]},
+        {"weekday": 3, "focus": None, "items": [{**rx, "name": "присед со штангой", "sets": 4, "repsMin": 8, "repsMax": None}]},
+        {"weekday": 5, "focus": None, "items": [{**rx, "name": "жим гантелей сидя", "sets": 3, "repsMin": 10, "repsMax": None}]},
+    ]}], "summary": ""})
+    msg = message("да", at=T0)
+    await hce.send_suggested(msg, command, "да", settings, db, llm.client)
+    assert "Новая программа «Программа пн/ср/пт, 8 нед.»: 8 нед. с пн 12.10, пн/ср/пт" in shown(msg)
+    assert "Создам твою копию" not in shown(msg)
+    token = token_of(msg)
+    assert buttons(msg) == [f"eapply:{token}", f"edrop:{token}"]
+    cb = callback(f"eapply:{token}")
+    await hce.apply_edit(cb, settings, db)
+    assert "Готово:</b>\n• Новая программа" in cb.message.edit_text.await_args.args[0]
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        up = await active_program(session, user, date(2026, 10, 12))
+        assert up.program.name == "Программа пн/ср/пт, 8 нед. · моя" and up.started_on == date(2026, 10, 12)
+
+
+async def test_a_new_program_out_of_limits_says_why(settings, db, llm):
+    llm.answers.append({"actions": [{"type": "new_program", "name": None, "weeks": 30, "start": None, "days": [
+        {"weekday": 1, "focus": None, "items": [{"name": "жим лёжа", "sets": 3, "repsMin": 8}]},
+    ]}], "summary": ""})
+    msg = message("да", at=T0)
+    await hce.send_suggested(msg, "замени программу на 30 недель: пн — жим лёжа 3×8", "да", settings, db, llm.client)
+    assert shown(msg).startswith("Не применю — новая программа: от 1 до 16 недель")

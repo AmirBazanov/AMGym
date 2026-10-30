@@ -74,7 +74,7 @@ from gymbot.services.users import active_program, get_or_create_user
 log = logging.getLogger(__name__)
 
 ANSWER_MAX = 1500  # characters sent to the chat; the prompt asks for far less
-COMMAND_MAX = 300  # characters of a suggested program edit
+COMMAND_MAX = 2000  # characters of a suggested program edit: a whole new program fits (incident 30.10)
 _COMMAND = re.compile(r"^[\s*_•-]*правка[*_]*\s*[:：][\s*_]*(?P<cmd>.+?)[\s*_]*$", re.IGNORECASE | re.MULTILINE)
 # «ДЕЛА: …» in capitals only: «Дела: пара в 10:00» is an ordinary line of an answer about the agenda.
 _LIFE_COMMAND = re.compile(r"^[\s*_•-]*ДЕЛА[*_]*\s*[:：][\s*_]*(?P<cmd>.+?)[\s*_]*$", re.MULTILINE)
@@ -253,11 +253,22 @@ async def build_context(
     return (await gather(session, user, settings, llm, tz, now_utc)).text
 
 
-def _cut_command(pattern: re.Pattern[str], raw: str) -> tuple[str, str | None]:
+def _cut_command(pattern: re.Pattern[str], raw: str, *, continued: bool = False) -> tuple[str, str | None]:
+    """The text without the command lines and the last command. `continued`: the lines right under the last
+    one, up to a blank line, belong to it («ПРАВКА: замени программу на 8 недель:\nпн — …\nср — …»)."""
     found = list(pattern.finditer(raw))
     if not found:
         return raw, None
-    command = found[-1]["cmd"].strip().strip("«»\"'` ").strip()
+    last = found[-1]
+    command, end = last["cmd"], last.end()
+    if continued:
+        rest = raw[end:].split("\n\n", 1)
+        tail = [ln.strip(" *_•-") for ln in rest[0].split("\n") if ln.strip(" *_•-")]
+        if tail:
+            head = command.rstrip(" ;")
+            command = head + (" " if head.endswith(":") else "; ") + "; ".join(tail)
+            raw = raw[:end] + ("\n\n" + rest[1] if len(rest) > 1 else "")
+    command = command.strip().strip("«»\"'` ").strip()
     return pattern.sub("", raw).strip(), (command[:COMMAND_MAX] or None)
 
 
@@ -265,7 +276,7 @@ def split_commands(raw: str) -> tuple[str, str | None, str | None]:
     """The model's text without its «ПРАВКА: …» and «ДЕЛА: …» lines, the program edit and the «Дела» change
     (the last of each; quotes stripped)."""
     text, life_command = _cut_command(_LIFE_COMMAND, raw)
-    text, command = _cut_command(_COMMAND, text)
+    text, command = _cut_command(_COMMAND, text, continued=True)
     return text, command, life_command
 
 

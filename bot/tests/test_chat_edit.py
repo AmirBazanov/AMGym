@@ -27,7 +27,7 @@ from gymbot.services.chat_edit import (
     WeightA,
 )
 from gymbot.services.day_adjustments import DayAdjust
-from gymbot.services.programs import load_program
+from gymbot.services.programs import load_program, normalize
 from gymbot.services.users import active_program, get_or_create_user
 
 TODAY = date(2026, 10, 9)  # Friday: program week 1
@@ -944,7 +944,7 @@ def test_edit_prompt_lists_every_action_type_the_parser_accepts():
     union = typing.get_args(typing.get_args(ce.Action)[0])
     in_parser = {typing.get_args(m.model_fields["type"].annotation)[0] for m in union}
     assert in_prompt == in_parser
-    assert "replace_day" in in_prompt and len(in_prompt) == 14
+    assert "replace_day" in in_prompt and "new_program" in in_prompt and len(in_prompt) == 15
 
 
 # ---- review fixes: moves run last, one per command, chat checks, day weights, a changed deload ----
@@ -1891,3 +1891,156 @@ def test_new_day_on_a_past_weekday_in_all_weeks_never_lands_on_this_week(snap):
 ])
 def test_fixing_a_saved_workout_is_not_a_program_edit(text):
     assert not ce.is_edit_command(text)
+
+
+# ---- a new program from scratch (incident 30.10: «замени программу на 3 дня … на 8 недель с 02.11») ----
+
+
+def _rx(name, sets, lo, hi=None):
+    return {"name": name, "sets": sets, "repsMin": lo, "repsMax": hi, "dropReps": None, "weight_kg": None}
+
+
+NEW_PROGRAM_JSON = {"type": "new_program", "name": None, "weeks": 8, "start": "2026-10-12", "days": [
+    {"weekday": 1, "focus": None, "items": [_rx("жим лёжа", 4, 6, 8), _rx("тяга вертикального блока", 4, 8, 10)]},
+    {"weekday": 3, "focus": "ноги", "items": [_rx("присед со штангой", 4, 8), _rx("румынская тяга", 3, 10)]},
+    {"weekday": 5, "focus": None, "items": [_rx("сгибания на бицепс с ez грифом хватом снизу", 3, 10, 12)]},
+]}
+
+
+def new_program(**kw):
+    (a,), notes = ce.parse_actions({"actions": [{**NEW_PROGRAM_JSON, **kw}]})
+    assert notes == []
+    return a
+
+
+def test_new_program_previews_every_day_and_what_happens_to_the_current_one(snap):
+    plan = ce.compile_ops(snap, [new_program()])
+    assert plan.ready() and plan.ops == [] and plan.notes == []
+    assert plan.lines == [
+        "Новая программа «Программа пн/ср/пт, 8 нед.»: 8 нед. с пн 12.10, пн/ср/пт",
+        "пн: жим лёжа 4×6–8, тяга вертикального блока 4×8–10",
+        "ср «Ноги»: присед со штангой 4×8, румынская тяга 3×10",
+        "пт: сгибания на бицепс с ez грифом хватом снизу 3×10–12",
+        f"«{snap.name}» заканчивается: до пн 12.10 тренировок по программе нет, сделанные тренировки останутся в истории",
+    ]
+    assert plan.live_topics() == ["program", "plan", "state"]
+
+
+def test_new_program_without_a_start_begins_next_monday_and_fills_defaults(snap):
+    a = new_program(start=None, days=[{"weekday": 2, "focus": None, "items": [{"name": "жим лёжа"}]}])
+    plan = ce.compile_ops(snap, [a])
+    assert plan.new_program.start == date(2026, 10, 12)
+    assert plan.lines[1] == "вт: жим лёжа 3×8–12 (по умолчанию)"
+
+
+def test_new_program_alone_other_actions_are_dropped_with_a_note(snap):
+    plan = ce.compile_ops(snap, [AddA(type="add", day=DayRef(weekday=5), name="молотки"), new_program()])
+    assert plan.ready() and plan.ops == []
+    assert plan.notes == ["Новую программу делаю отдельно от других правок: их повтори после неё."]
+
+
+def test_new_program_in_the_past_or_with_a_weekday_twice_is_refused(snap):
+    plan = ce.compile_ops(snap, [new_program(start="2026-09-28")])
+    assert not plan.ready() and plan.notes == ["Пн 28.09 уже прошло — назови, с какого понедельника начать."]
+    twice = {**NEW_PROGRAM_JSON, "days": [NEW_PROGRAM_JSON["days"][0], NEW_PROGRAM_JSON["days"][0]]}
+    actions, notes = ce.parse_actions({"actions": [twice]})
+    assert actions == [] and notes[0].startswith("Не применю — новая программа:")
+
+
+async def test_new_program_applies_and_starts_on_its_monday(db):
+    from gymbot.db.models import UserProgram
+
+    async with db() as session:
+        before = dict((await session.execute(select(Workout.id, Workout.program_day_id))).all())
+    _, notes, copy = await _apply(db, [new_program()])
+    assert notes == []
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        up = await active_program(session, user, TODAY)
+        assert up.started_on == date(2026, 10, 12) and up.program.owner_user_id == user.id
+        assert up.program.slug == "own.u1" and up.program.based_on_id is None
+        program = await load_program(session, up.program_id)
+        assert [w.number for w in program.weeks] == list(range(1, 9))
+        assert all([d.weekday for d in w.days] == [1, 3, 5] for w in program.weeks)
+        legs = program.weeks[7].days[1]
+        assert legs.focus == "Ноги" and [(i.order, i.exercise.name, i.sets, i.reps_min, i.reps_max) for i in legs.items] == [
+            (1, "присед со штангой", 4, 8, 8), (2, "румынская тяга", 3, 10, 10),
+        ]
+        assert dict((await session.execute(select(Workout.id, Workout.program_day_id))).all()) == before
+        assert await session.scalar(select(func.count()).select_from(UserProgram)) >= 2  # the old choice stays
+    assert copy.position(TODAY).not_started
+
+
+TYPED_PROGRAM = (
+    "замени программу на 3 дня (пн, ср, пт) на 8 недель с 02.11: пн — жим лёжа 4×6–8, тяга вертикального блока 4×8–10; "
+    "ср — присед со штангой 4×8, румынская тяга 3×10; пт — жим гантелей сидя 3×8–10"
+)
+
+
+@pytest.mark.parametrize("text", [TYPED_PROGRAM, "смени программу на 3 дня: пн — жим лёжа 4×8; ср — присед 4×8"])
+def test_a_program_spelled_out_reaches_the_edit_model(text):
+    assert ce.is_edit_command(text)
+
+
+@pytest.mark.parametrize("text", ["начни программу с понедельника", "смени программу на другую", "программа на пн и ср"])
+def test_picking_or_starting_a_program_is_not_a_new_one(text):
+    assert not ce._branch_new_program(normalize(text))
+
+
+def test_a_new_program_is_never_taken_for_a_guess(snap):
+    plan = ce.compile_ops(snap, [new_program()])
+    assert not ce.only_guesses(plan, [new_program()], TYPED_PROGRAM)
+
+
+@pytest.mark.parametrize("start, monday, note", [
+    ("2026-10-14", date(2026, 10, 19), "Неделя программы начинается с понедельника: с пн 19.10."),  # a Wednesday
+    ("2026-10-12", date(2026, 10, 12), None),
+    (None, date(2026, 10, 12), None),  # Friday: next Monday
+])
+def test_new_program_starts_on_the_monday_on_or_after_the_date(snap, start, monday, note):
+    plan = ce.compile_ops(snap, [new_program(start=start)])
+    assert plan.new_program.start == monday
+    assert plan.notes == ([note] if note else [])
+
+
+def test_new_program_without_a_start_on_a_monday_begins_today(snap):
+    from dataclasses import replace
+
+    plan = ce.compile_ops(replace(snap, today=date(2026, 10, 12)), [new_program(start=None)])
+    assert plan.new_program.start == date(2026, 10, 12)
+
+
+def test_new_program_marks_defaults_and_new_exercises(snap):
+    a = new_program(days=[{"weekday": 2, "focus": None, "items": [{"name": "жим лёжа"}, _rx("прыжки на тумбу", 3, 10)]}])
+    plan = ce.compile_ops(snap, [a])
+    assert plan.lines[1] == f"вт: жим лёжа 3×8–12 (по умолчанию), прыжки на тумбу 3×10 ({ce.NEW_EXERCISE})"
+
+
+async def test_two_new_programs_get_their_own_slugs_and_names(db):
+    await _apply(db, [new_program()])
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        up = await active_program(session, user, TODAY)
+        first = (up.program.slug, up.program.name)
+    await _apply(db, [new_program()])
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        up = await active_program(session, user, TODAY)
+        assert first == ("own.u1", "Программа пн/ср/пт, 8 нед. · моя")
+        assert (up.program.slug, up.program.name) == ("own.u1-2", "Программа пн/ср/пт, 8 нед. · моя 2")
+        assert up.program.source is None
+
+
+async def test_a_new_program_can_be_edited_from_the_chat_afterwards(db):
+    await _apply(db, [new_program(start="2026-10-05")])  # this week's Monday: today is in week 1
+    plan, notes, copy = await _apply(db, [AddA(type="add", day=DayRef(weekday=5), name="молотки", sets=3, repsMin=10)])
+    assert notes == [] and not plan.forks
+    assert _names(copy.day(1, 5))[-1] == "молотки" and copy.slug == "own.u1"
+
+
+async def test_create_program_refuses_one_exercise_twice_in_a_day(db):
+    async with db() as session:
+        user = await get_or_create_user(session, 42)
+        item = pe.NewItem("жим лёжа", 3, 8, 8, None)
+        with pytest.raises(pe.EditError, match="Понедельник: одно упражнение дважды"):
+            await pe.create_program(session, user, "x", 1, [pe.NewDay(1, None, [item, item])])

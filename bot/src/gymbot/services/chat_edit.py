@@ -58,10 +58,11 @@ from gymbot.services.programs import (
     exercise_catalog,
     get_or_create_exercise,
     load_program,
+    monday_of,
     normalize,
     program_position,
 )
-from gymbot.services.users import active_program
+from gymbot.services.users import active_program, set_program
 
 log = logging.getLogger(__name__)
 
@@ -172,6 +173,16 @@ _UNDO_ADJUST = re.compile(
 _AS_IT_WAS = re.compile(r"(?<!\w)верни(?:те)?\s+(?:все\s+|всё\s+)?как\s+было(?!\w)")
 _ADJUST_WORD = re.compile(r"(?<!\w)(?:поправк\w*|облегч\w*)")
 # Program start or switch ("перенеси старт программы", "начни программу заново") stays with settings.
+# A whole program spelled out: «замени программу на 3 дня (пн, ср, пт): пн — жим лёжа 4×6–8; ср — …».
+_PROGRAM_WORD = re.compile(r"(?<!\w)программ\w*")
+_ANY_WEEKDAY = re.compile(rf"(?<!\w)(?:пн|вт|ср|чт|пт|сб|вс|{_WEEKDAY})(?!\w)")
+_SETS_X = re.compile(r"\d+\s*[xх×*]\s*\d+")
+
+
+def _branch_new_program(norm: str) -> bool:
+    return bool(_PROGRAM_WORD.search(norm)) and len(_ANY_WEEKDAY.findall(norm)) >= 2 and bool(_SETS_X.search(norm))
+
+
 _PROGRAM_START = re.compile(
     r"(?<!\w)(?:старт\w*|начал\w*|заново|сначала|с\s+понедельника|с\s+\d|переключ\w*|выбер\w*|запуст\w*|"
     r"начни(?:те)?|друг\w*|смени(?:те)?)(?!\w)"
@@ -255,6 +266,8 @@ def is_edit_command(text: str) -> bool:
         return False
     norm = normalize(text)
     if _undo_adjust(text, norm):
+        return True
+    if _branch_new_program(norm):  # before the program-start words: «смени программу на 3 дня: пн — …»
         return True
     if _PAST.search(norm) or _RECORDS.search(norm) or _FOOD.search(norm):
         return False
@@ -414,6 +427,34 @@ class ReplaceDayA(_Action):
     scope: Scope | None = None
 
 
+NEW_PROGRAM_WEEKS = 16  # at most, for a program made from the chat
+
+
+class NewDayA(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    weekday: int = Field(ge=1, le=7)
+    focus: str | None = Field(default=None, max_length=pe.FOCUS_MAX)
+    items: list[DayItemA] = Field(min_length=1, max_length=pe.MAX_ITEMS)
+
+
+class NewProgramA(_Action):
+    """«замени программу на 3 дня (пн, ср, пт) на 8 недель с 02.11: пн — …»: a new program of the user's own,
+    every week the same days, from the Monday of `start` (None: next Monday). The only action of its message."""
+
+    type: Literal["new_program"]
+    name: str | None = Field(default=None, max_length=100)
+    weeks: int = Field(ge=1, le=NEW_PROGRAM_WEEKS)
+    start: dt.date | None = None
+    days: list[NewDayA] = Field(min_length=1, max_length=7)
+
+    @model_validator(mode="after")
+    def _weekdays(self) -> NewProgramA:
+        if len({d.weekday for d in self.days}) != len(self.days):
+            raise ValueError("a weekday twice")
+        return self
+
+
 class ReorderA(_Action):
     type: Literal["reorder"]
     day: DayRef = Field(default_factory=DayRef)
@@ -537,7 +578,7 @@ class ClarifyA(_Action):
 
 Action = Annotated[
     ReplaceA | RemoveA | AddA | PrescribeA | ReplaceDayA | ReorderA | WeightA | SwapDaysA | MoveDayA | DeloadA
-    | AdjustDayA | ClearDayA | SetWeekdaysA | ClarifyA,
+    | AdjustDayA | ClearDayA | SetWeekdaysA | NewProgramA | ClarifyA,
     Field(discriminator="type"),
 ]
 _ACTION: TypeAdapter[Any] = TypeAdapter(Action)
@@ -550,6 +591,8 @@ INVALID = {
     "replace_day": f"замена дня: от 1 до {pe.MAX_ITEMS} упражнений, подходов от 1 до {pe.MAX_SETS}, "
     f"повторов от 1 до {pe.MAX_REPS}, вес от 1 до 500 кг",
     "weight": "вес: от 1 до 500 кг",
+    "new_program": f"новая программа: от 1 до {NEW_PROGRAM_WEEKS} недель, дни недели без повторов, в дне от 1 до "
+    f"{pe.MAX_ITEMS} упражнений, подходов от 1 до {pe.MAX_SETS}, повторов от 1 до {pe.MAX_REPS}",
     "adjust_day": "поправка дня: только легче — вес от −1 до −70 %, подходов меньше на 1–5",
 }
 
@@ -974,6 +1017,14 @@ WEIGHT_LINE = "Вес "
 
 
 @dataclass
+class NewProgramChange:
+    name: str
+    weeks: int
+    start: date  # Monday of week 1
+    days: list[pe.NewDay]
+
+
+@dataclass
 class EditPlan:
     """Resolved changes. `lines` is the preview (and the summary after "Применить"), `notes` what is
     skipped; `ops` are program_editor PATCH ops against `slug` at `version`."""
@@ -999,6 +1050,7 @@ class EditPlan:
     clarify: Clarify | None = None
     copy_name: str | None = None  # set by `preview` when a copy would be made
     new_days: set[tuple[int, int]] = field(default_factory=set)  # (week, weekday) made by an add_day op
+    new_program: NewProgramChange | None = None  # a program made from scratch: then nothing else
 
     def finish(self) -> EditPlan:
         """Put the swap or move after every other op (called once, at the end of compile_ops)."""
@@ -1011,11 +1063,13 @@ class EditPlan:
         return self
 
     def ready(self) -> bool:
-        return self.clarify is None and bool(self.ops or self.move_op or self.weights or self.deload or self.adjusts)
+        return self.clarify is None and bool(
+            self.ops or self.move_op or self.weights or self.deload or self.adjusts or self.new_program
+        )
 
     def live_topics(self) -> list[Any]:
         topics: list[Any] = []
-        if self.ops or self.move_op:
+        if self.ops or self.move_op or self.new_program:
             topics += ["program", "plan", "state"]
         if self.weights and "state" not in topics:
             topics.append("state")
@@ -1461,6 +1515,48 @@ def _new_day(snap: Snapshot, a: AddA | ReplaceDayA, day: DayView, plan: EditPlan
     return _add_op(plan, day, weeks, where, new, known, a, pe.MAX_ITEMS + 1, "", temp)
 
 
+def _new_program(snap: Snapshot, a: NewProgramA, plan: EditPlan) -> None:
+    """A program from scratch: names from the catalog, defaults for a prescription not said, a label per day;
+    the preview says what happens to the current program until the new one starts."""
+    this_monday = monday_of(snap.today)
+    said = a.start if a.start is not None else snap.today  # no date: from today's Monday, else the next one
+    start = monday_of(said) if said.weekday() == 0 else monday_of(said) + timedelta(days=7)
+    if start < this_monday:
+        raise _Need(note=f"{_date(start).capitalize()} уже прошло — назови, с какого понедельника начать.")
+    if a.start is not None and start != a.start:
+        plan.notes.append(f"Неделя программы начинается с понедельника: с {_date(start)}.")
+    days: list[pe.NewDay] = []
+    lines: list[str] = []
+    for d in sorted(a.days, key=lambda d: d.weekday):
+        items: list[pe.NewItem] = []
+        texts: list[str] = []
+        for i in d.items:
+            name, known = _canonical(snap, i.name)
+            if any(normalize(x.name) == normalize(name) for x in items):
+                raise _Need(note=f"{WEEKDAYS[d.weekday - 1]}: «{name}» дважды в одном дне — так нельзя.")
+            drops = list(i.dropReps) if i.dropReps else None
+            lo, hi = (i.repsMin, i.repsMax) if i.repsMin is not None or drops else DEFAULT_REPS
+            hi = hi if hi is not None or drops else lo
+            item = pe.NewItem(name, i.sets or DEFAULT_SETS, lo, hi, drops)
+            items.append(item)
+            marks = [m for m, on in (("по умолчанию", i.sets is None or (i.repsMin is None and not drops)),
+                                     (NEW_EXERCISE, not known)) if on]
+            texts.append(f"{name} {rx_text(item.sets, lo, item.reps_max, drops)}" + (f" ({'; '.join(marks)})" if marks else ""))
+        focus = (d.focus or "").strip()
+        focus = focus[:1].upper() + focus[1:] if focus else None
+        days.append(pe.NewDay(d.weekday, focus, items))
+        lines.append(f"{WEEKDAYS[d.weekday - 1]}{f' «{focus}»' if focus else ''}: {', '.join(texts)}")
+    weekdays = _days([d.weekday for d in days])
+    name = " ".join((a.name or "").split()) or f"Программа {weekdays}, {a.weeks} нед."
+    plan.lines.append(f"Новая программа «{name}»: {a.weeks} нед. с {_date(start)}, {weekdays}")
+    plan.lines += lines
+    gap = f"до {_date(start)} тренировок по программе нет, " if start > snap.today else ""
+    plan.lines.append(f"«{snap.name}» заканчивается: {gap}сделанные тренировки останутся в истории")
+    if any(i.weight_kg is not None for d in a.days for i in d.items):
+        plan.notes.append("Веса не ставлю: дневник подберёт их по твоим прошлым подходам.")
+    plan.new_program = NewProgramChange(name, a.weeks, start, days)
+
+
 def _layout(snap: Snapshot, week: int) -> list[int]:
     """The training weekdays of a program week."""
     return [wd for wd, d in sorted(snap.weeks.get(week, {}).items()) if d.items]
@@ -1624,6 +1720,14 @@ def compile_ops(snap: Snapshot, actions: list[Any], picks: dict[tuple[int, str],
     plan = EditPlan(snap.slug, snap.version, snap.name, snap.template, snap.today)
     all_weeks = snap.all_weeks()
     temp = 0
+    if (new := next((a for a in actions if isinstance(a, NewProgramA)), None)) is not None:
+        if len(actions) > 1:
+            plan.notes.append("Новую программу делаю отдельно от других правок: их повтори после неё.")
+        try:
+            _new_program(snap, new, plan)
+        except _Need as need:
+            plan.notes.append(need.note or "")
+        return plan
     for n, a in enumerate(actions):
         if isinstance(a, ClarifyA):
             if a.options:
@@ -1750,7 +1854,7 @@ def only_guesses(plan: EditPlan, actions: list[Any], text: str) -> bool:
         return False
     if not plan.ready():
         return bool(actions) and all(isinstance(a, ClearDayA) for a in actions)
-    if plan.ops or plan.move_op or plan.weights or plan.deload:
+    if plan.ops or plan.move_op or plan.weights or plan.deload or plan.new_program:
         return False
     return all(c.default for c in plan.adjusts) and not explicit_day_or_imperative(normalize(text))
 
@@ -1850,6 +1954,15 @@ async def apply(
     the preview, then the weights, then the deload. Raises EditError / Conflict (nothing is written then).
     Returns notes."""
     notes: list[str] = []
+    if plan.new_program is not None:
+        new = plan.new_program
+        program = await pe.create_program(session, user, new.name, new.weeks, new.days)
+        await set_program(session, user, program.slug, new.start)
+        log.info(
+            "new program from chat: user %s, %s from %s, %s weeks, days %s, text %r", user.id, program.slug,
+            new.start, new.weeks, [(d.weekday, [i.name for i in d.items]) for d in new.days], raw_text,
+        )
+        return notes
     started_on = up.started_on
     outcome = None
     if plan.ops:

@@ -58,7 +58,7 @@ PURPOSES: dict[str, Purpose] = {
         Purpose("parse", "low", 4096, 30.0, structured.PARSE),  # chat parser, saved-edit re-estimate, repair
         Purpose("photo", "low", 4096, 40.0, structured.PHOTO, VISION_SYSTEM),
         Purpose("settings", "low", 4096, 30.0, structured.SETTINGS),
-        Purpose("edit", "low", 4096, 30.0, stable_system=EDIT_SYSTEM_PROMPT),  # no schema: see structured
+        Purpose("edit", "low", 8192, 60.0, stable_system=EDIT_SYSTEM_PROMPT),  # a whole new program is ~3k tokens  # no schema: see structured
         Purpose("baselines", "low", 4096, 30.0, structured.BASELINES),
         Purpose("lookup", "low", 4096, 30.0, structured.LOOKUP),
         Purpose("json", "low", 4096, 30.0),  # complete_json without a known schema
